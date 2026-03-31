@@ -244,7 +244,11 @@ enum NodeStream {
 
             if (!globalThis.__nodeModules) globalThis.__nodeModules = {};
             __nodeModules.stream = stream;
-            __nodeModules.events = { EventEmitter: EventEmitter, default: EventEmitter };
+            // require('events') returns EventEmitter constructor directly (Node.js compat)
+            // so that `class X extends require('events') {}` works.
+            EventEmitter.EventEmitter = EventEmitter;
+            EventEmitter.default = EventEmitter;
+            __nodeModules.events = EventEmitter;
 
             // string_decoder
             __nodeModules.string_decoder = {

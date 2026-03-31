@@ -214,7 +214,12 @@ public final class BunProcess: Sendable {
         }
         self.jsContext = ctx
 
-        // Install polyfills
+        // Install Web API polyfills (ReadableStream, Event, etc.)
+        // Must come before ESMResolver since Node.js polyfills may depend on Web APIs.
+        outputContinuation.yield("[bun:setup] step 0: webAPIPolyfills")
+        installWebAPIPolyfills(in: ctx)
+
+        // Install Node.js polyfills
         outputContinuation.yield("[bun:setup] step 1: installModules")
         ESMResolver.installModules(in: ctx)
         outputContinuation.yield("[bun:setup] step 2: consoleBridge")
@@ -339,6 +344,28 @@ public final class BunProcess: Sendable {
         stdoutContinuation.finish()
         outputContinuation.finish()
         promise.succeed(code)
+    }
+
+    // MARK: - Web API Polyfills
+
+    private func installWebAPIPolyfills(in ctx: JSContext) {
+        guard let url = Bundle.module.url(
+            forResource: "polyfills.bundle",
+            withExtension: "js"
+        ) else {
+            outputContinuation.yield("[bun:setup] polyfills.bundle.js not found")
+            return
+        }
+        do {
+            let source = try String(contentsOf: url, encoding: .utf8)
+            ctx.evaluateScript(source)
+            if let ex = ctx.exception {
+                outputContinuation.yield("[bun:setup] polyfills exception: \(ex)")
+                ctx.exception = nil
+            }
+        } catch {
+            outputContinuation.yield("[bun:setup] polyfills load error: \(error)")
+        }
     }
 
     private func isProcessExitSentinel(_ value: JSValue) -> Bool {

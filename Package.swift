@@ -23,6 +23,7 @@ let package = Package(
             ],
             resources: [
                 .copy("Resources/esm-transformer.bundle.js"),
+                .copy("Resources/polyfills.bundle.js"),
             ]
         ),
         .testTarget(
@@ -32,6 +33,7 @@ let package = Package(
                 .copy("claude.bundle.js"),
                 .copy("esm-transformer.bundle.js"),
                 .copy("bun-test.bundle.js"),
+                .copy("polyfills.bundle.js"),
             ]
         ),
     ],
