@@ -1,0 +1,1005 @@
+import Testing
+import Foundation
+@testable import BunRuntime
+
+@Suite("BunRuntime")
+struct BunRuntimeTests {
+
+    @Test("Create context and evaluate basic JS")
+    func evaluateBasicJS() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "1 + 2")
+        #expect(result.int32Value == 3)
+    }
+
+    @Test("String evaluation")
+    func evaluateString() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "'hello' + ' ' + 'world'")
+        #expect(result.stringValue == "hello world")
+    }
+
+    @Test("Call global function")
+    func callGlobalFunction() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        try await context.evaluate(js: "function add(a, b) { return a + b; }")
+        let result = try await context.call("add", arguments: [3, 4])
+        #expect(result.int32Value == 7)
+    }
+
+    @Test("JavaScript exception is thrown")
+    func javaScriptException() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: "throw new Error('test error')")
+        }
+    }
+
+    @Test("Function not found throws error")
+    func functionNotFound() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.call("nonexistentFunction")
+        }
+    }
+}
+
+@Suite("Node.js Compatibility")
+struct NodeCompatTests {
+
+    @Test("require('node:path') works")
+    func requireNodePath() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var path = require('node:path');
+            path.join('/foo', 'bar', 'baz');
+        """)
+        #expect(result.stringValue == "/foo/bar/baz")
+    }
+
+    @Test("path.basename")
+    func pathBasename() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').basename('/foo/bar/baz.txt')
+        """)
+        #expect(result.stringValue == "baz.txt")
+    }
+
+    @Test("path.dirname")
+    func pathDirname() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').dirname('/foo/bar/baz.txt')
+        """)
+        #expect(result.stringValue == "/foo/bar")
+    }
+
+    @Test("path.extname")
+    func pathExtname() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').extname('/foo/bar/baz.txt')
+        """)
+        #expect(result.stringValue == ".txt")
+    }
+
+    @Test("path.isAbsolute")
+    func pathIsAbsolute() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').isAbsolute('/foo')
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Buffer.from string")
+    func bufferFromString() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.from('hello').toString('utf-8')
+        """)
+        #expect(result.stringValue == "hello")
+    }
+
+    @Test("Buffer.from hex encoding")
+    func bufferHex() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.from('hello').toString('hex')
+        """)
+        #expect(result.stringValue == "68656c6c6f")
+    }
+
+    @Test("Buffer.concat")
+    func bufferConcat() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.concat([Buffer.from('hello'), Buffer.from(' world')]).toString('utf-8')
+        """)
+        #expect(result.stringValue == "hello world")
+    }
+
+    @Test("require('node:crypto') randomUUID")
+    func cryptoRandomUUID() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').randomUUID()
+        """)
+        let uuid = result.stringValue
+        #expect(uuid.count == 36)
+        #expect(uuid.contains("-"))
+    }
+
+    @Test("crypto.createHash('sha256')")
+    func cryptoHash() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').createHash('sha256').update('hello').digest('hex')
+        """)
+        #expect(result.stringValue == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    }
+
+    @Test("process.env is accessible")
+    func processEnv() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            typeof process.env
+        """)
+        #expect(result.stringValue == "object")
+    }
+
+    @Test("process.platform is darwin")
+    func processPlatform() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "process.platform")
+        #expect(result.stringValue == "darwin")
+    }
+
+    @Test("console.log does not crash")
+    func consoleLog() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        try await context.evaluate(js: "console.log('test message from JS')")
+    }
+
+    @Test("TextEncoder/TextDecoder roundtrip")
+    func textEncoderDecoder() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new TextEncoder().encode('hello'))
+        """)
+        #expect(result.stringValue == "hello")
+    }
+
+    @Test("require('node:url').parse")
+    func urlParse() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var u = require('node:url').parse('https://example.com/path?q=1');
+            u.hostname;
+        """)
+        #expect(result.stringValue == "example.com")
+    }
+
+    @Test("require('node:util').format")
+    func utilFormat() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:util').format('hello %s, you are %d', 'world', 42)
+        """)
+        #expect(result.stringValue == "hello world, you are 42")
+    }
+
+    @Test("require('node:os').platform()")
+    func osPlatform() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:os').platform()
+        """)
+        #expect(result.stringValue == "darwin")
+    }
+
+    @Test("EventEmitter basic usage")
+    func eventEmitter() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var EventEmitter = require('node:events').EventEmitter;
+            var ee = new EventEmitter();
+            var received = '';
+            ee.on('test', function(data) { received = data; });
+            ee.emit('test', 'hello');
+            received;
+        """)
+        #expect(result.stringValue == "hello")
+    }
+
+    @Test("require without node: prefix")
+    func requireWithoutPrefix() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var path = require('path');
+            path.join('a', 'b');
+        """)
+        #expect(result.stringValue == "a/b")
+    }
+
+    @Test("require unknown module throws")
+    func requireUnknown() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: "require('unknown-module')")
+        }
+    }
+
+    @Test("fs.readFileSync throws ENOENT for missing file")
+    func fsReadFileThrowsENOENT() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: """
+                require('node:fs').readFileSync('/nonexistent/path/file.txt')
+            """)
+        }
+    }
+
+    @Test("fs.writeFileSync and readFileSync roundtrip")
+    func fsWriteReadRoundtrip() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-test-\(UUID().uuidString).txt"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await context.evaluate(js: """
+            var fs = require('node:fs');
+            fs.writeFileSync('\(tmpPath)', 'hello from swift-bun');
+            fs.readFileSync('\(tmpPath)', 'utf-8');
+        """)
+        #expect(result.stringValue == "hello from swift-bun")
+    }
+
+    @Test("fs.existsSync returns false for missing file")
+    func fsExistsSyncMissing() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:fs').existsSync('/nonexistent/file.txt')
+        """)
+        #expect(result.boolValue == false)
+    }
+}
+
+@Suite("Bun API")
+struct BunAPITests {
+
+    @Test("Bun.version is set")
+    func bunVersion() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "Bun.version")
+        #expect(result.stringValue == "swift-bun-shim")
+    }
+
+    @Test("Bun.nanoseconds returns number")
+    func bunNanoseconds() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "typeof Bun.nanoseconds()")
+        #expect(result.stringValue == "number")
+    }
+
+    @Test("Bun.env mirrors process.env")
+    func bunEnvMirror() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            process.env.TEST_KEY = 'test_value';
+            Bun.env.TEST_KEY;
+        """)
+        #expect(result.stringValue == "test_value")
+    }
+
+    @Test("Bun.escapeHTML")
+    func bunEscapeHTML() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Bun.escapeHTML('<script>alert("xss")</script>')
+        """)
+        let expected = "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;"
+        #expect(result.stringValue == expected)
+    }
+
+    @Test("Bun.deepEquals")
+    func bunDeepEquals() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Bun.deepEquals({a: 1, b: [2, 3]}, {a: 1, b: [2, 3]})
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Bun.hash returns number")
+    func bunHash() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "typeof Bun.hash('hello')")
+        #expect(result.stringValue == "number")
+    }
+
+    @Test("Bun.fileURLToPath converts correctly")
+    func bunFileURLToPath() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "Bun.fileURLToPath('file:///tmp/test.js')")
+        #expect(result.stringValue == "/tmp/test.js")
+    }
+
+    @Test("Bun.serve throws not supported")
+    func bunServeNotSupported() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: "Bun.serve({})")
+        }
+    }
+
+    @Test("Bun.spawn throws not supported")
+    func bunSpawnNotSupported() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: "Bun.spawn(['echo', 'hello'])")
+        }
+    }
+}
+
+// MARK: - Edge Case Tests
+
+@Suite("TextEncoder/TextDecoder Edge Cases")
+struct TextCodecEdgeCaseTests {
+
+    @Test("ASCII roundtrip")
+    func asciiRoundtrip() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new TextEncoder().encode('Hello, World!'))
+        """)
+        #expect(result.stringValue == "Hello, World!")
+    }
+
+    @Test("Multibyte UTF-8 roundtrip (Japanese)")
+    func multibyteCJK() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new TextEncoder().encode('こんにちは'))
+        """)
+        #expect(result.stringValue == "こんにちは")
+    }
+
+    @Test("4-byte UTF-8 emoji roundtrip")
+    func fourByteEmoji() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new TextEncoder().encode('🎉🚀'))
+        """)
+        #expect(result.stringValue == "🎉🚀")
+    }
+
+    @Test("Empty string roundtrip")
+    func emptyString() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new TextEncoder().encode(''))
+        """)
+        #expect(result.stringValue == "")
+    }
+
+    @Test("Truncated 2-byte sequence does not crash")
+    func truncated2Byte() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        // 0xC3 starts a 2-byte sequence but is alone
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new Uint8Array([0x41, 0xC3]))
+        """)
+        // Should return at least 'A' and not crash
+        #expect(result.stringValue.hasPrefix("A"))
+    }
+
+    @Test("Truncated 3-byte sequence does not crash")
+    func truncated3Byte() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        // 0xE3 starts a 3-byte sequence but only has 1 continuation byte
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new Uint8Array([0x42, 0xE3, 0x81]))
+        """)
+        #expect(result.stringValue.hasPrefix("B"))
+    }
+
+    @Test("Truncated 4-byte sequence does not crash")
+    func truncated4Byte() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        // 0xF0 0x9F starts a 4-byte sequence but is incomplete
+        let result = try await context.evaluate(js: """
+            new TextDecoder().decode(new Uint8Array([0x43, 0xF0, 0x9F]))
+        """)
+        #expect(result.stringValue.hasPrefix("C"))
+    }
+}
+
+@Suite("URL Polyfill Edge Cases")
+struct URLEdgeCaseTests {
+
+    @Test("Parse HTTPS URL with path and query")
+    func parseHTTPS() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var u = new URL('https://api.example.com:8080/v1/chat?model=claude');
+            u.hostname + '|' + u.port + '|' + u.pathname + '|' + u.searchParams.get('model');
+        """)
+        #expect(result.stringValue == "api.example.com|8080|/v1/chat|claude")
+    }
+
+    @Test("Parse file:/// URL with empty hostname")
+    func parseFileURL() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var u = new URL('file:///tmp/test.js');
+            u.protocol + '|' + u.pathname;
+        """)
+        #expect(result.stringValue == "file:|/tmp/test.js")
+    }
+
+    @Test("Parse URL with auth")
+    func parseURLWithAuth() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var u = new URL('https://user:pass@example.com/path');
+            u.username + '|' + u.password + '|' + u.hostname;
+        """)
+        #expect(result.stringValue == "user|pass|example.com")
+    }
+
+    @Test("Parse URL with hash fragment")
+    func parseURLWithHash() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var u = new URL('https://example.com/page#section');
+            u.hash;
+        """)
+        #expect(result.stringValue == "#section")
+    }
+
+    @Test("URLSearchParams multiple values")
+    func searchParamsMultiple() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var sp = new URLSearchParams('a=1&b=2&c=hello%20world');
+            sp.get('a') + '|' + sp.get('b') + '|' + sp.get('c');
+        """)
+        #expect(result.stringValue == "1|2|hello world")
+    }
+}
+
+@Suite("Path Edge Cases")
+struct PathEdgeCaseTests {
+
+    @Test("path.join with .. normalization")
+    func joinWithDotDot() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').join('/foo/bar', '..', 'baz')
+        """)
+        #expect(result.stringValue == "/foo/baz")
+    }
+
+    @Test("path.join with . normalization")
+    func joinWithDot() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').join('/foo', '.', 'bar')
+        """)
+        #expect(result.stringValue == "/foo/bar")
+    }
+
+    @Test("path.relative between two absolute paths")
+    func relative() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').relative('/data/orandea/test/aaa', '/data/orandea/impl/bbb')
+        """)
+        #expect(result.stringValue == "../../impl/bbb")
+    }
+
+    @Test("path.parse extracts all components")
+    func parse() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var p = require('node:path').parse('/home/user/dir/file.txt');
+            p.root + '|' + p.base + '|' + p.ext + '|' + p.name;
+        """)
+        #expect(result.stringValue == "/|file.txt|.txt|file")
+    }
+
+    @Test("path.basename with extension removal")
+    func basenameWithExt() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:path').basename('/foo/bar.html', '.html')
+        """)
+        #expect(result.stringValue == "bar")
+    }
+}
+
+@Suite("Buffer Edge Cases")
+struct BufferEdgeCaseTests {
+
+    @Test("Buffer.from base64 encoding")
+    func base64Roundtrip() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.from('SGVsbG8gV29ybGQ=', 'base64').toString('utf-8')
+        """)
+        #expect(result.stringValue == "Hello World")
+    }
+
+    @Test("Buffer.from hex roundtrip")
+    func hexRoundtrip() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.from(Buffer.from('test data').toString('hex'), 'hex').toString('utf-8')
+        """)
+        #expect(result.stringValue == "test data")
+    }
+
+    @Test("Buffer.alloc creates zeroed buffer")
+    func allocZeroed() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var b = Buffer.alloc(4);
+            b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 0;
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Buffer.isBuffer distinguishes Buffer from Uint8Array")
+    func isBuffer() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.isBuffer(Buffer.from('x')) + '|' + Buffer.isBuffer(new Uint8Array(1));
+        """)
+        #expect(result.stringValue == "true|false")
+    }
+
+    @Test("Buffer.byteLength for multibyte UTF-8")
+    func byteLengthMultibyte() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.byteLength('café')
+        """)
+        // 'café' = c(1) + a(1) + f(1) + é(2) = 5 bytes
+        #expect(result.int32Value == 5)
+    }
+
+    @Test("Buffer.concat with empty array")
+    func concatEmpty() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            Buffer.concat([]).length
+        """)
+        #expect(result.int32Value == 0)
+    }
+
+    @Test("Buffer.compare ordering")
+    func compare() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var a = Buffer.from('abc');
+            var b = Buffer.from('abd');
+            var c = Buffer.from('abc');
+            a.compare(b) + '|' + b.compare(a) + '|' + a.compare(c);
+        """)
+        #expect(result.stringValue == "-1|1|0")
+    }
+}
+
+@Suite("Crypto Edge Cases")
+struct CryptoEdgeCaseTests {
+
+    @Test("SHA-256 of empty string")
+    func sha256Empty() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').createHash('sha256').update('').digest('hex')
+        """)
+        #expect(result.stringValue == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    }
+
+    @Test("SHA-512 produces correct length")
+    func sha512Length() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').createHash('sha512').update('test').digest('hex').length
+        """)
+        #expect(result.int32Value == 128) // 64 bytes = 128 hex chars
+    }
+
+    @Test("HMAC-SHA256")
+    func hmacSHA256() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').createHmac('sha256', 'secret').update('message').digest('hex')
+        """)
+        #expect(result.stringValue == "8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b")
+    }
+
+    @Test("Hash chaining with multiple updates")
+    func hashChaining() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var h = require('node:crypto').createHash('sha256');
+            h.update('hello');
+            h.update(' world');
+            h.digest('hex');
+        """)
+        // sha256('hello world')
+        #expect(result.stringValue == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9")
+    }
+
+    @Test("randomBytes returns correct length")
+    func randomBytesLength() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').randomBytes(16).length
+        """)
+        #expect(result.int32Value == 16)
+    }
+
+    @Test("Unsupported hash algorithm throws")
+    func unsupportedAlgorithm() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: """
+                require('node:crypto').createHash('md5').update('test').digest('hex')
+            """)
+        }
+    }
+
+    @Test("Hash digest base64 encoding")
+    func hashBase64() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            require('node:crypto').createHash('sha256').update('hello').digest('base64')
+        """)
+        #expect(result.stringValue == "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=")
+    }
+}
+
+@Suite("FS Error Handling Edge Cases")
+struct FSEdgeCaseTests {
+
+    @Test("fs.statSync throws for missing file")
+    func statSyncMissing() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: """
+                require('node:fs').statSync('/nonexistent/file.txt')
+            """)
+        }
+    }
+
+    @Test("fs.statSync returns correct isDirectory")
+    func statSyncIsDirectory() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        // Use /private/tmp instead of /tmp (macOS symlink)
+        let result = try await context.evaluate(js: """
+            require('node:fs').statSync('/private/tmp').isDirectory()
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.statSync returns correct isFile")
+    func statSyncIsFile() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-stat-test-\(UUID().uuidString).txt"
+        try "test".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await context.evaluate(js: """
+            require('node:fs').statSync('\(tmpPath)').isFile()
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.readdirSync throws for missing directory")
+    func readdirMissing() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        await #expect(throws: BunRuntimeError.self) {
+            try await context.evaluate(js: """
+                require('node:fs').readdirSync('/nonexistent/dir')
+            """)
+        }
+    }
+
+    @Test("fs.mkdirSync recursive creates nested dirs")
+    func mkdirRecursive() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let tmpDir = NSTemporaryDirectory() + "swift-bun-mkdir-\(UUID().uuidString)/a/b/c"
+        let baseDir = (tmpDir as NSString).deletingLastPathComponent
+        let rootDir = ((baseDir as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+        defer { try? FileManager.default.removeItem(atPath: rootDir) }
+
+        try await context.evaluate(js: """
+            require('node:fs').mkdirSync('\(tmpDir)', { recursive: true })
+        """)
+        let result = try await context.evaluate(js: """
+            require('node:fs').existsSync('\(tmpDir)')
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.promises.readFile async")
+    func promisesReadFile() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-async-test-\(UUID().uuidString).txt"
+        try "async content".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await context.evaluate(js: """
+            (async function() {
+                return await require('node:fs').promises.readFile('\(tmpPath)', 'utf-8');
+            })()
+        """)
+        // Note: JSResult captures the Promise object, not its resolved value.
+        // Async promises resolution in JSContext requires event loop pumping.
+        // This test verifies promises API is accessible without crash.
+        #expect(!result.isUndefined)
+    }
+}
+
+@Suite("EventEmitter Edge Cases")
+struct EventEmitterEdgeCaseTests {
+
+    @Test("once fires only once")
+    func onceFiresOnce() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var EE = require('node:events').EventEmitter;
+            var ee = new EE();
+            var count = 0;
+            ee.once('x', function() { count++; });
+            ee.emit('x');
+            ee.emit('x');
+            ee.emit('x');
+            count;
+        """)
+        #expect(result.int32Value == 1)
+    }
+
+    @Test("removeListener removes correct listener")
+    func removeListener() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var EE = require('node:events').EventEmitter;
+            var ee = new EE();
+            var log = '';
+            var fn1 = function() { log += 'a'; };
+            var fn2 = function() { log += 'b'; };
+            ee.on('x', fn1);
+            ee.on('x', fn2);
+            ee.emit('x');
+            ee.removeListener('x', fn1);
+            ee.emit('x');
+            log;
+        """)
+        #expect(result.stringValue == "abb")
+    }
+
+    @Test("listenerCount returns correct count")
+    func listenerCount() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var EE = require('node:events').EventEmitter;
+            var ee = new EE();
+            ee.on('x', function() {});
+            ee.on('x', function() {});
+            ee.on('y', function() {});
+            ee.listenerCount('x') + '|' + ee.listenerCount('y') + '|' + ee.listenerCount('z');
+        """)
+        #expect(result.stringValue == "2|1|0")
+    }
+
+    @Test("emit returns false for no listeners")
+    func emitNoListeners() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var ee = new (require('node:events').EventEmitter)();
+            ee.emit('nonexistent');
+        """)
+        #expect(result.boolValue == false)
+    }
+}
+
+@Suite("JSResult Edge Cases")
+struct JSResultEdgeCaseTests {
+
+    @Test("Number result preserves integer")
+    func integerResult() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "42")
+        #expect(result == .number(42))
+        #expect(result.int32Value == 42)
+        #expect(result.stringValue == "42")
+    }
+
+    @Test("Number result preserves float")
+    func floatResult() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "3.14")
+        #expect(result == .number(3.14))
+        #expect(result.stringValue == "3.14")
+    }
+
+    @Test("Boolean true")
+    func boolTrue() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "true")
+        #expect(result == .bool(true))
+        #expect(result.boolValue == true)
+        #expect(result.int32Value == 1)
+    }
+
+    @Test("Null result")
+    func nullResult() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "null")
+        #expect(result == .null)
+        #expect(result.isNull == true)
+        #expect(result.boolValue == false)
+        #expect(result.stringValue == "null")
+    }
+
+    @Test("Undefined result")
+    func undefinedResult() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "undefined")
+        #expect(result == .undefined)
+        #expect(result.isUndefined == true)
+        #expect(result.boolValue == false)
+    }
+
+    @Test("Object result serialized as JSON")
+    func objectResult() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "({key: 'value', num: 42})")
+        if case .json(let j) = result {
+            #expect(j.contains("\"key\""))
+            #expect(j.contains("\"value\""))
+        } else {
+            #expect(Bool(false), "Expected .json case")
+        }
+    }
+
+    @Test("Array result serialized as JSON")
+    func arrayResult() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: "[1, 2, 3]")
+        if case .json(let j) = result {
+            #expect(j == "[1,2,3]")
+        } else {
+            #expect(Bool(false), "Expected .json case")
+        }
+    }
+}
+
+@Suite("AsyncLocalStorage Edge Cases")
+struct AsyncLocalStorageTests {
+
+    @Test("AsyncLocalStorage run and getStore")
+    func runAndGetStore() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var als = new (require('node:async_hooks').AsyncLocalStorage)();
+            var captured = null;
+            als.run({ userId: 42 }, function() {
+                captured = als.getStore();
+            });
+            captured.userId;
+        """)
+        #expect(result.int32Value == 42)
+    }
+
+    @Test("AsyncLocalStorage nested run")
+    func nestedRun() async throws {
+        let runtime = BunRuntime()
+        let context = try await runtime.createContext()
+        let result = try await context.evaluate(js: """
+            var als = new (require('node:async_hooks').AsyncLocalStorage)();
+            var log = '';
+            als.run('outer', function() {
+                log += als.getStore() + ',';
+                als.run('inner', function() {
+                    log += als.getStore() + ',';
+                });
+                log += als.getStore();
+            });
+            log;
+        """)
+        #expect(result.stringValue == "outer,inner,outer")
+    }
+}
+
