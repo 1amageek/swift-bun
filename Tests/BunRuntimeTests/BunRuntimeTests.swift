@@ -1003,3 +1003,292 @@ struct AsyncLocalStorageTests {
     }
 }
 
+// MARK: - Web API Polyfills
+
+@Suite("Web API Polyfills")
+struct WebAPIPolyfillTests {
+
+    @Test("ReadableStream exists and is constructable")
+    func readableStream() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var rs = new ReadableStream({
+                start: function(controller) {
+                    controller.enqueue('hello');
+                    controller.close();
+                }
+            });
+            typeof rs.getReader === 'function' && typeof rs.pipeTo === 'function';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("TransformStream exists")
+    func transformStream() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var ts = new TransformStream();
+            typeof ts.readable === 'object' && typeof ts.writable === 'object';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Event and EventTarget work")
+    func eventTarget() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var received = '';
+            var target = new EventTarget();
+            target.addEventListener('test', function(e) { received = e.type; });
+            target.dispatchEvent(new Event('test'));
+            received;
+        """)
+        #expect(result.stringValue == "test")
+    }
+
+    @Test("CustomEvent carries detail")
+    func customEvent() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var detail = null;
+            var target = new EventTarget();
+            target.addEventListener('msg', function(e) { detail = e.detail; });
+            target.dispatchEvent(new CustomEvent('msg', { detail: 42 }));
+            detail;
+        """)
+        #expect(result.int32Value == 42)
+    }
+
+    @Test("class extends EventTarget works")
+    func extendsEventTarget() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            class MyTarget extends EventTarget {
+                constructor() { super(); this.x = 1; }
+            }
+            var t = new MyTarget();
+            var ok = t.x === 1 && typeof t.addEventListener === 'function';
+            ok;
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Blob size and type")
+    func blob() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var b = new Blob(['hello', ' ', 'world'], { type: 'text/plain' });
+            JSON.stringify({ size: b.size, type: b.type, instanceof: b instanceof Blob });
+        """)
+        #expect(result.stringValue == #"{"size":11,"type":"text/plain","instanceof":true}"#)
+    }
+
+    @Test("File extends Blob with name")
+    func file() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var f = new File(['content'], 'test.txt', { type: 'text/plain' });
+            JSON.stringify({ name: f.name, instanceof: f instanceof Blob });
+        """)
+        #expect(result.stringValue == #"{"name":"test.txt","instanceof":true}"#)
+    }
+
+    @Test("FormData append and get")
+    func formData() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var fd = new FormData();
+            fd.append('key', 'value');
+            fd.append('key', 'value2');
+            JSON.stringify({ get: fd.get('key'), all: fd.getAll('key'), has: fd.has('key') });
+        """)
+        #expect(result.stringValue == #"{"get":"value","all":["value","value2"],"has":true}"#)
+    }
+
+    @Test("MessageChannel exists")
+    func messageChannel() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var ch = new MessageChannel();
+            typeof ch.port1.postMessage === 'function' && typeof ch.port2.postMessage === 'function';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("structuredClone deep copies")
+    func structuredClone() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var obj = { a: 1, b: { c: 2 } };
+            var clone = structuredClone(obj);
+            clone.b.c = 99;
+            obj.b.c;
+        """)
+        #expect(result.int32Value == 2)
+    }
+
+    @Test("crypto.getRandomValues fills array")
+    func cryptoGetRandomValues() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var arr = new Uint8Array(4);
+            crypto.getRandomValues(arr);
+            arr.length === 4 && (arr[0] !== 0 || arr[1] !== 0 || arr[2] !== 0 || arr[3] !== 0);
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("crypto.randomUUID returns valid format")
+    func cryptoRandomUUID() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var uuid = crypto.randomUUID();
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid);
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Symbol.dispose exists")
+    func symbolDispose() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            typeof Symbol.dispose === 'symbol' && typeof Symbol.asyncDispose === 'symbol';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("navigator exists")
+    func navigator() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: "navigator.platform")
+        #expect(result.stringValue == "darwin")
+    }
+}
+
+// MARK: - Node.js polyfill additions
+
+@Suite("Node.js Polyfill Additions")
+struct NodePolyfillAdditionTests {
+
+    @Test("util.debuglog returns callable function")
+    func utilDebuglog() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var debuglog = require('node:util').debuglog;
+            var fn = debuglog('test');
+            typeof fn === 'function' && typeof fn.enabled === 'boolean';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("global is globalThis")
+    func globalAlias() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: "global === globalThis && self === globalThis")
+        #expect(result.boolValue == true)
+    }
+
+    @Test("process.execArgv is array")
+    func processExecArgv() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: "Array.isArray(process.execArgv)")
+        #expect(result.boolValue == true)
+    }
+
+    @Test("process.on returns process")
+    func processOn() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: "process.on('exit', function(){}) === process")
+        #expect(result.boolValue == true)
+    }
+
+    @Test("require('events') is constructor")
+    func eventsIsConstructor() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var EE = require('events');
+            typeof EE === 'function' && typeof new EE().on === 'function';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("class extends require('events') works")
+    func extendsEvents() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var EE = require('events');
+            class MyEmitter extends EE { constructor() { super(); this.x = 1; } }
+            var e = new MyEmitter();
+            e.x === 1 && typeof e.on === 'function';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.realpathSync resolves path")
+    func fsRealpathSync() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var fs = require('node:fs');
+            var resolved = fs.realpathSync('/tmp');
+            typeof resolved === 'string' && resolved.length > 0;
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.realpathSync throws for missing path")
+    func fsRealpathSyncMissing() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var fs = require('node:fs');
+            try { fs.realpathSync('/nonexistent_path_xyz'); 'no-error'; }
+            catch(e) { 'error'; }
+        """)
+        #expect(result.stringValue == "error")
+    }
+
+    @Test("fs.promises.realpath works")
+    func fsPromisesRealpath() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var fsp = require('node:fs/promises');
+            typeof fsp.realpath === 'function';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.accessSync does not throw for existing path")
+    func fsAccessSync() async throws {
+        let p = BunProcess()
+        try await p.load()
+        let result = try await p.evaluate(js: """
+            var fs = require('node:fs');
+            try { fs.accessSync('/tmp'); 'ok'; }
+            catch(e) { 'error'; }
+        """)
+        #expect(result.stringValue == "ok")
+    }
+}
+
