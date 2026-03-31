@@ -20,12 +20,15 @@ public actor BunRuntime {
             throw BunRuntimeError.bundleNotFound(url)
         }
 
-        let source: String
+        let rawSource: String
         do {
-            source = try String(contentsOf: url, encoding: .utf8)
+            rawSource = try String(contentsOf: url, encoding: .utf8)
         } catch {
             throw BunRuntimeError.bundleReadFailed(url, underlying: error)
         }
+
+        // Transform ESM syntax for JSC compatibility (static imports, import.meta, assertions)
+        let source = SourceTransformer.transformForJSC(rawSource, bundleURL: url)
 
         let jsContext = try createJSContext()
 
