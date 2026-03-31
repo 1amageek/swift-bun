@@ -172,7 +172,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | `node:url` | ✅ | URL/URLSearchParams |
 | `node:util` | ✅ | format, promisify, debuglog, types |
 | `node:os` | ✅ | ProcessInfo-backed |
-| `node:fs` | ✅ | FileManager-backed (sync + promises) |
+| `node:fs` | ✅ | FileManager-backed (sync + promises, realpath, access, chmod) |
 | `node:crypto` | ✅ | CryptoKit (SHA-256/512, HMAC, randomBytes) |
 | `node:http/https` | ✅ | URLSession-backed fetch + http.request |
 | `node:stream` | ✅ | Readable, Writable, Transform, EventEmitter |

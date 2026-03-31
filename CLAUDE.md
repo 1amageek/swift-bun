@@ -164,7 +164,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:url | ✅ Implemented | URL/URLSearchParams |
 | node:util | ✅ Implemented | format, promisify, debuglog, types |
 | node:os | ✅ Implemented | ProcessInfo-backed (homedir, platform, tmpdir) |
-| node:fs | ✅ Implemented | FileManager-backed (sync + promises) |
+| node:fs | ✅ Implemented | FileManager-backed (sync: readFile, writeFile, exists, stat, lstat, mkdir, readdir, unlink, rename, realpath, access, chmod, copyFile; promises: readFile, writeFile, stat, lstat, access, mkdir, readdir, unlink, rename, realpath, chmod, rm, copyFile, open) |
 | node:crypto | ✅ Implemented | CryptoKit (SHA-256/512, HMAC, randomBytes, randomUUID) |
 | node:http / node:https | ✅ Implemented | URLSession-backed fetch + http.request |
 | node:stream | ✅ Implemented | Readable, Writable, Transform, Duplex, EventEmitter |
