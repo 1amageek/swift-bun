@@ -3,49 +3,96 @@ import Foundation
 import NIOCore
 import NIOPosix
 
-/// A long-lived JavaScript process with a NIO EventLoop-driven event loop.
+/// A JavaScript execution context backed by a NIO EventLoop.
 ///
-/// Unlike `BunContext` which evaluates scripts synchronously and bridges
-/// Promises via `withCheckedThrowingContinuation`, `BunProcess` runs a
-/// NIO EventLoop that drives timers, fetch callbacks, and stdin delivery,
-/// keeping the process alive until all work completes or `process.exit()` is called.
+/// All JSContext access happens on a dedicated EventLoop thread,
+/// guaranteeing thread safety. The EventLoop drives timers, fetch callbacks,
+/// and stdin delivery — enabling both library-style function calls and
+/// long-running process execution.
 ///
-/// All JSContext access happens exclusively on the EventLoop thread,
-/// guaranteeing thread safety without actor overhead.
+/// ## Usage
+///
+/// ```swift
+/// let process = BunProcess()
+///
+/// // Library mode: load and call functions
+/// try await process.load(bundle: myLib)
+/// let result = try await process.evaluate(js: "myFunction()")
+///
+/// // Process mode: run until exit
+/// let exitCode = try await process.run(bundle: cliJS)
+/// ```
 public final class BunProcess: Sendable {
 
     private let eventLoopGroup: MultiThreadedEventLoopGroup
     private let eventLoop: EventLoop
 
-    // Accessed only on the EventLoop thread. The EventLoop's single-thread
-    // guarantee provides safety; preconditionInEventLoop() asserts this.
+    // All fields below are accessed exclusively on the EventLoop thread.
+    // preconditionInEventLoop() guards every access point.
     private nonisolated(unsafe) var jsContext: JSContext?
     private nonisolated(unsafe) var refCount: Int = 0
     private nonisolated(unsafe) var exitPromise: EventLoopPromise<Int32>?
     private nonisolated(unsafe) var nextTimerID: Int32 = 1
     private nonisolated(unsafe) var activeTimers: [Int32: Scheduled<Void>] = [:]
     private nonisolated(unsafe) var stdinValue: JSValue?
+    private nonisolated(unsafe) var isRunning: Bool = false
+    private nonisolated(unsafe) var isLoaded: Bool = false
+
+    /// Stream of output lines from JS (console.log, console.error, etc.).
+    /// Finishes when the process exits or is terminated.
+    public let output: AsyncStream<String>
+    private let outputContinuation: AsyncStream<String>.Continuation
 
     public init() {
+        let (stream, continuation) = AsyncStream<String>.makeStream()
+        self.output = stream
+        self.outputContinuation = continuation
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.eventLoop = eventLoopGroup.next()
     }
 
     deinit {
+        outputContinuation.finish()
         try? eventLoopGroup.syncShutdownGracefully()
     }
 
     // MARK: - Public API
 
+    /// Load a JavaScript bundle without running it as a process.
+    ///
+    /// Installs polyfills and evaluates the bundle on the EventLoop thread.
+    /// After loading, use `evaluate(js:)` to call functions.
+    public func load(bundle url: URL, environment: [String: String] = [:]) async throws {
+        try await eventLoop.submit {
+            try self.setupContext(bundle: url, environment: environment)
+        }.get()
+    }
+
+    /// Evaluate JavaScript and return the result.
+    ///
+    /// Must be called after `load(bundle:)`. Runs on the EventLoop thread.
+    @discardableResult
+    public func evaluate(js source: String) async throws -> JSResult {
+        try await eventLoop.submit {
+            self.eventLoop.preconditionInEventLoop()
+            guard let ctx = self.jsContext else {
+                throw BunRuntimeError.contextCreationFailed
+            }
+            let result = ctx.evaluateScript(source)
+            try self.checkException()
+            return JSResult(from: result)
+        }.get()
+    }
+
     /// Run a JavaScript bundle as a long-lived process.
     ///
-    /// Blocks the calling async context until the process exits via `process.exit(code)`
-    /// or when all pending work (timers, I/O) completes.
+    /// The process stays alive as long as there are pending timers or I/O operations.
+    /// Returns when `process.exit(code)` is called or all pending work completes.
     ///
     /// - Parameters:
-    ///   - url: URL to the bundled JavaScript file.
-    ///   - environment: Environment variables to inject into `process.env`.
-    /// - Returns: The exit code (0 for success).
+    ///   - url: Path to the bundled JavaScript file.
+    ///   - environment: Environment variables for `process.env`.
+    /// - Returns: The exit code.
     public func run(
         bundle url: URL,
         environment: [String: String] = [:]
@@ -54,7 +101,12 @@ public final class BunProcess: Sendable {
 
         eventLoop.execute {
             do {
-                try self.bootstrap(bundle: url, environment: environment, promise: promise)
+                self.exitPromise = promise
+                self.isRunning = true
+                if !self.isLoaded {
+                    try self.setupContext(bundle: url, environment: environment)
+                }
+                self.checkExitCondition()
             } catch {
                 promise.fail(error)
             }
@@ -63,33 +115,28 @@ public final class BunProcess: Sendable {
         return try await promise.futureResult.get()
     }
 
-    /// Send input data to the process's stdin stream.
+    /// Send data to the process's stdin.
     ///
-    /// Delivers data as a `'data'` event on `process.stdin`.
-    /// Pass `nil` to signal EOF (emits `'end'`).
+    /// Pass `nil` to signal EOF.
     public func sendInput(_ data: Data?) {
         eventLoop.execute {
             self.deliverStdin(data)
         }
     }
 
-    /// Request graceful shutdown of the process.
+    /// Terminate the process.
     public func terminate(exitCode: Int32 = 0) {
         eventLoop.execute {
             self.doExit(code: exitCode)
         }
     }
 
-    // MARK: - Bootstrap
+    // MARK: - Context Setup
 
-    private func bootstrap(
-        bundle url: URL,
-        environment: [String: String],
-        promise: EventLoopPromise<Int32>
-    ) throws {
+    private func setupContext(bundle url: URL, environment: [String: String]) throws {
         eventLoop.preconditionInEventLoop()
 
-        self.exitPromise = promise
+        guard !isLoaded else { return }
 
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw BunRuntimeError.bundleNotFound(url)
@@ -103,49 +150,28 @@ public final class BunProcess: Sendable {
         }
         self.jsContext = ctx
 
-        // 1. Install standard polyfills (modules, globals, default timer/fetch)
+        // Install standard polyfills
         ESMResolver.installModules(in: ctx)
 
-        // 2. Override with NIO-backed bridges
+        // Override with EventLoop-backed bridges
+        installConsoleBridge(in: ctx)
         installTimerBridge(in: ctx)
         installFetchBridge(in: ctx)
         installProcessExitBridge(in: ctx)
         installStdinBridge(in: ctx)
+        patchTimerModuleReferences(in: ctx)
 
-        // 3. Patch __nodeModules.timers references (captured at install time by NodeTimers)
-        ctx.evaluateScript("""
-        (function() {
-            if (!globalThis.__nodeModules || !__nodeModules.timers) return;
-            __nodeModules.timers.setTimeout = globalThis.setTimeout;
-            __nodeModules.timers.clearTimeout = globalThis.clearTimeout;
-            __nodeModules.timers.setInterval = globalThis.setInterval;
-            __nodeModules.timers.clearInterval = globalThis.clearInterval;
-            __nodeModules.timers.setImmediate = globalThis.setImmediate;
-            __nodeModules.timers.clearImmediate = globalThis.clearImmediate;
-            __nodeModules.timers.promises.setTimeout = function(ms, value) {
-                return new Promise(function(resolve) {
-                    globalThis.setTimeout(function() { resolve(value); }, ms);
-                });
-            };
-            __nodeModules.timers.promises.setImmediate = function(value) {
-                return new Promise(function(resolve) {
-                    globalThis.setTimeout(function() { resolve(value); }, 0);
-                });
-            };
-        })();
-        """)
-
-        // 4. Set environment variables
+        // Set environment variables
         for (key, value) in environment {
-            let escapedKey = escapeJS(key)
-            let escapedValue = escapeJS(value)
-            ctx.evaluateScript("process.env['\(escapedKey)'] = '\(escapedValue)';")
+            let k = escapeJS(key)
+            let v = escapeJS(value)
+            ctx.evaluateScript("process.env['\(k)'] = '\(v)';")
         }
 
-        // 5. Install require() last
+        // Install require() last
         ESMResolver.installRequire(in: ctx)
 
-        // 6. Evaluate the bundle
+        // Evaluate the bundle
         ctx.evaluateScript(source, withSourceURL: url)
         if let exception = ctx.exception {
             let message = exception.toString() ?? ""
@@ -155,8 +181,7 @@ public final class BunProcess: Sendable {
             }
         }
 
-        // 7. Check if process can exit immediately
-        checkExitCondition()
+        isLoaded = true
     }
 
     // MARK: - Lifecycle
@@ -174,10 +199,11 @@ public final class BunProcess: Sendable {
 
     private func checkExitCondition() {
         eventLoop.preconditionInEventLoop()
-        if refCount <= 0, let promise = exitPromise {
-            self.exitPromise = nil
-            promise.succeed(0)
-        }
+        guard isRunning, refCount <= 0, let promise = exitPromise else { return }
+        isRunning = false
+        exitPromise = nil
+        outputContinuation.finish()
+        promise.succeed(0)
     }
 
     private func doExit(code: Int32) {
@@ -188,10 +214,32 @@ public final class BunProcess: Sendable {
         activeTimers.removeAll()
         refCount = 0
 
-        if let promise = exitPromise {
-            self.exitPromise = nil
-            promise.succeed(code)
+        guard let promise = exitPromise else { return }
+        isRunning = false
+        exitPromise = nil
+        outputContinuation.finish()
+        promise.succeed(code)
+    }
+
+    private func checkException() throws {
+        eventLoop.preconditionInEventLoop()
+        guard let ctx = jsContext, let exception = ctx.exception else { return }
+        ctx.exception = nil
+        let message = exception.toString() ?? "Unknown JS exception"
+        if !message.contains("__PROCESS_EXIT__") {
+            throw BunRuntimeError.javaScriptException(message)
         }
+    }
+
+    // MARK: - Console Bridge
+
+    private func installConsoleBridge(in ctx: JSContext) {
+        eventLoop.preconditionInEventLoop()
+
+        let logBlock: @convention(block) (String, String) -> Void = { [outputContinuation] level, message in
+            outputContinuation.yield("[\(level)] \(message)")
+        }
+        ctx.setObject(logBlock, forKeyedSubscript: "__nativeLog" as NSString)
     }
 
     // MARK: - Timer Bridge
@@ -209,10 +257,8 @@ public final class BunProcess: Sendable {
             let scheduled = self.eventLoop.scheduleTask(in: .milliseconds(delayMs)) {
                 self.eventLoop.preconditionInEventLoop()
                 self.activeTimers.removeValue(forKey: timerID)
-
                 let args = self.extractArgs(argsArray)
                 callback.call(withArguments: args)
-
                 self.unref()
             }
             self.activeTimers[timerID] = scheduled
@@ -240,7 +286,6 @@ public final class BunProcess: Sendable {
         }
         ctx.setObject(setIntervalBlock, forKeyedSubscript: "__nativeSetInterval" as NSString)
 
-        // JS wrappers to collect rest args
         ctx.evaluateScript("""
         (function() {
             globalThis.setTimeout = function(fn, delay) {
@@ -249,14 +294,12 @@ public final class BunProcess: Sendable {
                 return __nativeSetTimeout(fn, delay || 0, args);
             };
             globalThis.clearTimeout = function(id) { __nativeClearTimeout(id); };
-
             globalThis.setInterval = function(fn, delay) {
                 var args = [];
                 for (var i = 2; i < arguments.length; i++) args.push(arguments[i]);
                 return __nativeSetInterval(fn, delay || 0, args);
             };
             globalThis.clearInterval = function(id) { __nativeClearTimeout(id); };
-
             globalThis.setImmediate = function(fn) {
                 var args = [];
                 for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
@@ -270,7 +313,6 @@ public final class BunProcess: Sendable {
     private func scheduleRepeating(timerID: Int32, callback: JSValue, intervalMs: Int64, argsArray: JSValue) {
         let scheduled = eventLoop.scheduleTask(in: .milliseconds(intervalMs)) { [self] in
             self.eventLoop.preconditionInEventLoop()
-
             let args = self.extractArgs(argsArray)
             callback.call(withArguments: args)
 
@@ -279,6 +321,31 @@ public final class BunProcess: Sendable {
             }
         }
         activeTimers[timerID] = scheduled
+    }
+
+    private func patchTimerModuleReferences(in ctx: JSContext) {
+        ctx.evaluateScript("""
+        (function() {
+            if (!globalThis.__nodeModules || !__nodeModules.timers) return;
+            var t = __nodeModules.timers;
+            t.setTimeout = globalThis.setTimeout;
+            t.clearTimeout = globalThis.clearTimeout;
+            t.setInterval = globalThis.setInterval;
+            t.clearInterval = globalThis.clearInterval;
+            t.setImmediate = globalThis.setImmediate;
+            t.clearImmediate = globalThis.clearImmediate;
+            t.promises.setTimeout = function(ms, value) {
+                return new Promise(function(resolve) {
+                    globalThis.setTimeout(function() { resolve(value); }, ms);
+                });
+            };
+            t.promises.setImmediate = function(value) {
+                return new Promise(function(resolve) {
+                    globalThis.setTimeout(function() { resolve(value); }, 0);
+                });
+            };
+        })();
+        """)
     }
 
     private func extractArgs(_ argsArray: JSValue) -> [Any] {
@@ -330,7 +397,6 @@ public final class BunProcess: Sendable {
             }
 
             let task = URLSession.shared.dataTask(with: request) { [self] data, response, error in
-                // Marshal back to EventLoop thread before touching JSValues
                 self.eventLoop.execute {
                     defer { self.unref() }
 
@@ -369,7 +435,6 @@ public final class BunProcess: Sendable {
             task.resume()
         }
 
-        // Override __nativeFetch registered by NodeHTTP.install
         ctx.setObject(fetchBlock, forKeyedSubscript: "__nativeFetch" as NSString)
     }
 
@@ -378,14 +443,15 @@ public final class BunProcess: Sendable {
     private func installProcessExitBridge(in ctx: JSContext) {
         eventLoop.preconditionInEventLoop()
 
-        let exitBlock: @convention(block) (Int32) -> Void = { [self] code in
+        let exitBlock: @convention(block) (JSValue) -> Void = { [self] codeValue in
+            let code: Int32 = codeValue.isUndefined ? 0 : codeValue.toInt32()
             self.doExit(code: code)
         }
         ctx.setObject(exitBlock, forKeyedSubscript: "__processExit" as NSString)
 
         ctx.evaluateScript("""
         process.exit = function(code) {
-            __processExit(code || 0);
+            __processExit(code === undefined ? 0 : (code | 0));
             throw new Error('__PROCESS_EXIT__');
         };
         """)
