@@ -7,11 +7,12 @@ A Swift package that runs Bun-built JavaScript bundles natively on iOS and macOS
 swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, enabling JavaScript code bundled with Bun (or esbuild) to execute on Apple platforms without embedding a full Node.js runtime.
 
 **What it does:**
-- Loads and executes CommonJS bundles built by Bun
+- Loads and executes ESM and CJS bundles built by Bun or esbuild
 - Polyfills Node.js built-in modules (`fs`, `path`, `crypto`, `http`, `stream`, etc.)
 - Bridges `fetch()` to `URLSession` for real HTTP networking
 - Provides `Bun.*` API shims (`Bun.file()`, `Bun.env`, `Bun.write()`, etc.)
-- Bridges JS Promises to Swift async/await
+- Runs long-lived JS applications with a NIO EventLoop (timers, fetch, stdin)
+- Bridges JS console output to Swift via `AsyncStream`
 
 **What it doesn't do:**
 - Bundle or transpile JavaScript (use Bun or esbuild for that)
@@ -43,68 +44,76 @@ targets: [
 
 ## Usage
 
-### Load and execute a bundle
+### Library mode: load a bundle and call functions
 
 ```swift
 import BunRuntime
 
-let runtime = BunRuntime()
-let context = try await runtime.load(
+let process = BunProcess()
+try await process.load(
     bundle: Bundle.main.url(forResource: "app.bundle", withExtension: "js")!
 )
-```
 
-### Evaluate JavaScript
-
-```swift
-// Synchronous evaluation
-let result = try await context.evaluate(js: "1 + 2")
+// Evaluate JavaScript
+let result = try await process.evaluate(js: "1 + 2")
 print(result.int32Value) // 3
 
 // Call a global function
-let greeting = try await context.call("greet", arguments: ["World"])
+let greeting = try await process.call("greet", arguments: ["World"])
 print(greeting.stringValue) // "Hello, World!"
 ```
 
-### Async operations (fetch, Promises)
+### Process mode: run a long-lived application
 
 ```swift
-let response = try await context.evaluateAsync(js: """
-    fetch('https://api.example.com/data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: 'hello' })
-    }).then(res => res.json())
-""")
+let process = BunProcess()
+let exitCode = try await process.run(
+    bundle: cliBundle,
+    environment: ["API_KEY": "sk-ant-..."]
+)
+// Blocks until process.exit() is called or all pending work completes
 ```
 
-`evaluateAsync` bridges JS Promises to Swift async/await via `URLSession`.
+### Sending stdin input
+
+```swift
+let process = BunProcess()
+let task = Task {
+    try await process.run(bundle: interactiveApp)
+}
+
+process.sendInput("user input\n".data(using: .utf8)!)
+process.sendInput(nil) // EOF
+
+let exitCode = try await task.value
+```
+
+### Reading console output
+
+```swift
+let process = BunProcess()
+
+Task {
+    for await line in process.output {
+        print(line) // "[log] hello world", "[error] something failed", etc.
+    }
+}
+
+try await process.run(bundle: myApp)
+```
 
 ### Environment variables
 
 ```swift
-try await runtime.setEnvironment([
-    "API_KEY": "sk-ant-...",
-], in: context)
+let process = BunProcess()
+try await process.run(
+    bundle: myApp,
+    environment: [
+        "API_KEY": "sk-ant-...",
+        "NODE_ENV": "production",
+    ]
+)
 // Accessible in JS as process.env.API_KEY and Bun.env.API_KEY
-```
-
-### Event stream
-
-JavaScript can emit events to Swift via `__emitEvent()`:
-
-```javascript
-// In your JS bundle
-__emitEvent(JSON.stringify({ type: "response", data: result }));
-```
-
-```swift
-// In Swift
-for await line in await context.eventStream {
-    let event = try JSONDecoder().decode(Event.self, from: Data(line.utf8))
-    // handle event
-}
-// Call context.shutdown() to terminate the stream
 ```
 
 ## Supported Modules
@@ -122,7 +131,7 @@ for await line in await context.eventStream {
 | `node:crypto` | Native bridge | CryptoKit (SHA-256/512, HMAC, randomBytes) |
 | `node:http/https` | Native bridge | URLSession-backed fetch + http.request |
 | `node:stream` | Pure JS | Readable, Writable, Transform, EventEmitter |
-| `node:timers` | Pure JS | setTimeout/setInterval wrappers |
+| `node:timers` | NIO bridge | EventLoop-backed setTimeout/setInterval |
 | `node:events` | Pure JS | EventEmitter |
 | `node:async_hooks` | Stub | AsyncLocalStorage with basic run/getStore |
 | `node:child_process` | Stub | Throws (not available on iOS) |
@@ -149,41 +158,48 @@ for await line in await context.eventStream {
 ## Building a JS bundle
 
 ```bash
-# With Bun
-bun build src/index.ts --target=bun --outfile=app.bundle.js
+# With Bun (ESM — transformed automatically by es-module-lexer)
+bun build src/index.ts --target=node --format=esm --outfile=app.bundle.js
 
-# With esbuild (Bun-compatible output)
+# With esbuild (CJS — no transformation needed)
 npx esbuild src/index.ts --bundle --platform=node --format=cjs \
   --external:node:* --outfile=app.bundle.js
 ```
 
-The bundle should use CommonJS (`require()`) for Node.js built-in modules. swift-bun's `require()` resolves both `'path'` and `'node:path'` forms.
+Both ESM and CJS bundles are supported. ESM bundles are automatically transformed to CJS before evaluation using es-module-lexer (WASM).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│              Your Swift App             │
-│                                         │
-│   BunRuntime.load(bundle:)              │
-│        ↓                                │
-│   BunContext                            │
-│     evaluate(js:) → JSResult            │
-│     evaluateAsync(js:) → JSResult       │
-│     eventStream → AsyncStream<String>   │
-│        ↓                                │
-│   ┌─────────────────────────────────┐   │
-│   │      JavaScriptCore.framework   │   │
-│   │  ┌───────────────────────────┐  │   │
-│   │  │  ESMResolver polyfills    │  │   │
-│   │  │  • Node.js modules        │  │   │
-│   │  │  • Bun API shims          │  │   │
-│   │  │  • fetch → URLSession     │  │   │
-│   │  │  • fs → FileManager       │  │   │
-│   │  │  • crypto → CryptoKit     │  │   │
-│   │  └───────────────────────────┘  │   │
-│   └─────────────────────────────────┘   │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│              Your Swift App                 │
+│                                             │
+│   BunProcess()                              │
+│     .load(bundle:) / .run(bundle:)          │
+│     .evaluate(js:) → JSResult               │
+│     .call(name, args) → JSResult            │
+│     .output → AsyncStream<String>           │
+│     .sendInput(data)                        │
+│        ↓                                    │
+│   ┌─────────────────────────────────────┐   │
+│   │     NIO EventLoop (dedicated thread) │  │
+│   │  ┌───────────────────────────────┐  │   │
+│   │  │  JavaScriptCore.framework     │  │   │
+│   │  │  ┌─────────────────────────┐  │  │   │
+│   │  │  │  ESMResolver polyfills  │  │  │   │
+│   │  │  │  • Node.js modules      │  │  │   │
+│   │  │  │  • Bun API shims        │  │  │   │
+│   │  │  └─────────────────────────┘  │  │   │
+│   │  │  ┌─────────────────────────┐  │  │   │
+│   │  │  │  NIO-backed bridges     │  │  │   │
+│   │  │  │  • setTimeout → sched   │  │  │   │
+│   │  │  │  • fetch → URLSession   │  │  │   │
+│   │  │  │  • stdin → sendInput    │  │  │   │
+│   │  │  │  • console → output     │  │  │   │
+│   │  │  └─────────────────────────┘  │  │   │
+│   │  └───────────────────────────────┘  │   │
+│   └─────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
 ```
 
 ## License

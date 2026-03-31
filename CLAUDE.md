@@ -12,13 +12,15 @@ swift build
 swift test
 
 # Run a specific test suite
-swift test --filter "FetchRoundtrip"
+swift test --filter "BunProcess"
 
 # Run a single test by name
-swift test --filter "getRequest"
+swift test --filter "setTimeout"
 ```
 
 Network roundtrip tests (`FetchRoundtripTests`) hit `httpbin.org` and require internet access.
+
+### Test bundle regeneration
 
 The test bundle `Tests/BunRuntimeTests/claude.bundle.js` is a resource copied into the test target via `Package.swift`. To regenerate it from `Fixtures/claude-test/`:
 
@@ -29,31 +31,59 @@ npx esbuild index.js --bundle --platform=node --target=es2020 --format=cjs \
 cp claude.bundle.js ../../Tests/BunRuntimeTests/
 ```
 
+The ESM transformer bundle `Sources/BunRuntime/Resources/esm-transformer.bundle.js` is regenerated from `Fixtures/esm-transformer/`:
+
+```bash
+cd Fixtures/esm-transformer && npm install
+npx esbuild index.js --bundle --platform=node --target=es2020 --format=cjs \
+  --outfile=esm-transformer.bundle.js
+cp esm-transformer.bundle.js ../../Sources/BunRuntime/Resources/
+cp esm-transformer.bundle.js ../../Tests/BunRuntimeTests/
+```
+
 ## Architecture
 
-swift-bun provides a Bun-compatible JavaScript runtime for iOS/macOS by wrapping JavaScriptCore with Node.js/Bun polyfills. There are no external Swift dependencies — only system frameworks (JavaScriptCore, Foundation, CryptoKit).
+swift-bun provides a Bun-compatible JavaScript runtime for iOS/macOS by wrapping JavaScriptCore with Node.js/Bun polyfills. It uses SwiftNIO for the event loop (NIOCore + NIOPosix).
 
-### Execution flow
+### Execution model: BunProcess
+
+`BunProcess` is the sole execution model. All JSContext access is serialized on a dedicated NIO EventLoop thread, guaranteeing thread safety.
 
 ```
-BunRuntime.load(bundle:)
-  → JSContext()
-  → ESMResolver.install()        # injects all polyfills + require()
-  → BunContext(jsContext:)        # wraps JSContext in an actor
-  → evaluateScript(bundleSource)  # runs the user's Bun-built bundle
+BunProcess (final class, Sendable)
+├── EventLoop thread (NIO MultiThreadedEventLoopGroup, 1 thread)
+│   ├── JSContext (all access pinned to this thread)
+│   ├── ESMResolver polyfills (require, Node.js modules, Bun APIs)
+│   └── NIO-backed bridges:
+│       ├── setTimeout/setInterval → eventLoop.scheduleTask
+│       ├── fetch (__nativeFetch) → URLSession + eventLoop.execute
+│       ├── process.stdin → sendInput() from Swift
+│       ├── process.exit → resolveExit()
+│       └── console.log → output AsyncStream
+├── Lifecycle (ref/unref counting, like Node.js)
+└── ESM transformer (es-module-lexer WASM, temporary JSContext)
 ```
 
-### Key design: Actor + JSResult bridge
+Two modes, mutually exclusive per instance:
 
-`JSContext` and `JSValue` are not `Sendable`. They are isolated inside `BunContext` (actor). The public API returns `JSResult` (a `Sendable` enum) instead of `JSValue` — all conversion happens inside the actor boundary before returning.
+- **Library mode**: `load(bundle:)` + `evaluate(js:)` / `call()` — for using JS libraries from Swift
+- **Process mode**: `run(bundle:)` — for long-lived applications (timers, fetch, stdin keep the process alive)
 
-### Key design: Promise bridging
+### ESM transformation
 
-`evaluateAsync(js:)` detects if the JS result is a `Promise`, then calls `.then(onResolve, onReject)` with `@convention(block)` callbacks that resume a `withCheckedThrowingContinuation`. This is the mechanism that makes `fetch()` → URLSession roundtrips awaitable from Swift.
+Bundles built with `bun build --format=esm` contain ESM syntax (`import`/`export`/`import.meta`) that JSCore's `evaluateScript()` cannot parse. Before evaluation, `ESMTransformer` converts ESM to CJS:
 
-### Key design: fetch → URLSession
+```
+ESMTransformer.transform(source, bundleURL:)
+  → temporary JSContext
+  → atob polyfill (for WASM base64)
+  → esm-transformer.bundle.js (es-module-lexer + transform logic)
+  → es-module-lexer.initSync() (synchronous WASM compilation)
+  → __transformESM(source, url)
+  → CJS-equivalent source
+```
 
-`NodeHTTP.install()` registers `__nativeFetch` as a `@convention(block)` closure that creates a `URLSession.shared.dataTask`. The JS-side `fetch()` function serializes options to JSON, calls `__nativeFetch`, and wraps the callback result in a `Response` polyfill object. The URLSession completion handler calls back into JSContext (which is thread-safe per Apple docs), resolving the Promise.
+es-module-lexer provides exact positions of all imports/exports, correctly handling strings, comments, regex, and template literals. JS parses JS — no false positives.
 
 ### ESMResolver module installation order
 
@@ -61,20 +91,57 @@ Order matters — later modules depend on earlier ones:
 
 1. **Globals**: `performance`, `URL`, `URLSearchParams`, `console`, `process`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `AbortController`
 2. **Node modules**: Path → Buffer → URL → Util → OS → FS → Crypto → HTTP → Stream → Timers → Stubs
-3. **Bun APIs**: Shims → Env → File → Spawn (File depends on FS native bridges)
-4. **`require()`**: Installed last — reads from `globalThis.__nodeModules` populated by steps 2-3
+3. **Bun APIs**: Shims → Env → File → Spawn
+4. **NIO bridges** (BunProcess only): Timer override → Fetch override → process.exit → stdin → timer module patch
+5. **`require()`**: Installed last — reads from `globalThis.__nodeModules` populated by steps 2-3
+
+### Timer bridge (NIO-backed)
+
+`BunProcess` replaces JSCore's built-in `setTimeout`/`setInterval` with NIO `scheduleTask`:
+
+```
+JS: setTimeout(fn, 100)
+  → __nativeSetTimeout(fn, 100, args)
+  → ref() (refCount++)
+  → eventLoop.scheduleTask(in: .milliseconds(100)) {
+      callback.call(withArguments: args)
+      unref() (refCount--)
+    }
+```
+
+Each pending timer/fetch holds a ref. When refCount drops to 0, the process exits naturally (like Node.js).
+
+### Fetch bridge (thread-safe)
+
+`__nativeFetch` uses `URLSession.shared.dataTask`. The completion handler marshals back to the EventLoop thread via `eventLoop.execute {}` before touching any JSValue:
+
+```
+JS: fetch(url) → Promise
+  → __nativeFetch(url, options, resolve, reject)
+  → ref()
+  → URLSession.dataTask { data, response, error in
+      eventLoop.execute {  // ← back on EventLoop thread
+          resolve.call(withArguments: [...])
+          unref()
+      }
+    }
+```
 
 ### Native bridges pattern
 
 Modules needing system APIs use `@convention(block)` closures registered on JSContext:
 
-- **NodeFS**: `__fsReadFileSync` etc. → `FileManager` — returns `[String: Any]` with either `value` or `error` key
+- **NodeFS**: `__fsReadFileSync` etc. → `FileManager` — returns `{value: ...}` or `{error: "ENOENT: ..."}`
 - **NodeCrypto**: `__cryptoSHA256` etc. → `CryptoKit`
-- **NodeHTTP**: `__nativeFetch` → `URLSession`
+- **NodeHTTP**: `__nativeFetch` → `URLSession` (EventLoop-safe in BunProcess)
 - **NodeOS**: `__osHostname` etc. → `ProcessInfo`
 
-The FS bridge returns structured results (`{value: ...}` or `{error: "ENOENT: ..."}`) rather than nil/bool, so JS-side error messages preserve the actual error code from Swift.
+### Output stream
 
-### Event stream
+`BunProcess.output` is an `AsyncStream<String>`. `console.log/error/warn` are routed through `__nativeLog` which yields to the output continuation. The stream finishes when the process exits.
 
-`BunContext` exposes an `AsyncStream<String>` via `eventStream`. JS code calls `globalThis.__emitEvent(string)` to push NDJSON lines. The stream **must** be terminated by calling `context.shutdown()` or `for await` loops will hang.
+### Known limitations
+
+- `process.exit()` uses `throw new Error('__PROCESS_EXIT__')` to unwind the JS stack. If JS code catches this exception, the exit may be suppressed.
+- `node:child_process` is stubbed (throws) — not available on iOS.
+- `Bun.serve()` is not supported.
