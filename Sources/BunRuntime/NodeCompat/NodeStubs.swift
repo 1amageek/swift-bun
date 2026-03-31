@@ -1,4 +1,5 @@
 @preconcurrency import JavaScriptCore
+import Foundation
 
 /// Stub modules for Node.js modules that are not applicable on iOS.
 ///
@@ -6,6 +7,65 @@
 /// while clearly indicating that the functionality is not available.
 enum NodeStubs {
     static func install(in context: JSContext) {
+        let childProcessRunSyncBlock: @convention(block) (String, String, String) -> [String: Any] = { file, argsJSON, optionsJSON in
+            #if os(macOS)
+            do {
+                let args = try parseStringArray(json: argsJSON)
+                let options = try parseJSONObject(json: optionsJSON)
+
+                let process = Process()
+                process.executableURL = try resolveExecutableURL(for: file)
+                process.arguments = args
+
+                if let cwd = options["cwd"] as? String, !cwd.isEmpty {
+                    process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+                }
+
+                var env = ProcessInfo.processInfo.environment
+                if let extraEnv = options["env"] as? [String: Any] {
+                    for (key, value) in extraEnv {
+                        env[key] = "\(value)"
+                    }
+                }
+                process.environment = env
+
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+
+                if let input = options["input"] as? String {
+                    let stdinPipe = Pipe()
+                    process.standardInput = stdinPipe
+                    try process.run()
+                    if let data = input.data(using: .utf8) {
+                        stdinPipe.fileHandleForWriting.write(data)
+                    }
+                    try stdinPipe.fileHandleForWriting.close()
+                } else {
+                    try process.run()
+                }
+
+                process.waitUntilExit()
+
+                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+                return [
+                    "status": process.terminationStatus,
+                    "signal": NSNull(),
+                    "stdout": String(data: stdoutData, encoding: .utf8) ?? "",
+                    "stderr": String(data: stderrData, encoding: .utf8) ?? "",
+                ]
+            } catch {
+                return ["error": "\(error)"]
+            }
+            #else
+            return ["error": "node:child_process is not supported in swift-bun on this platform"]
+            #endif
+        }
+        context.setObject(childProcessRunSyncBlock, forKeyedSubscript: "__cpRunSync" as NSString)
+
         context.evaluateScript("""
         (function() {
             if (!globalThis.__nodeModules) globalThis.__nodeModules = {};
@@ -71,26 +131,149 @@ enum NodeStubs {
 
             // child_process
             __nodeModules.child_process = {
-                spawn: function() {
-                    throw new Error('node:child_process spawn is not supported in swift-bun');
+                spawn: function(file, args, opts) {
+                    if (!Array.isArray(args) && args && typeof args === 'object') {
+                        opts = args;
+                        args = [];
+                    }
+                    args = Array.isArray(args) ? args : [];
+                    opts = opts || {};
+
+                    var EE = require('events');
+                    var Stream = require('stream');
+                    var child = new EE();
+                    var stdinChunks = [];
+                    var started = false;
+
+                    child.stdout = new Stream.PassThrough();
+                    child.stderr = new Stream.PassThrough();
+                    child.killed = false;
+                    child.exitCode = null;
+                    child.signalCode = null;
+                    child.stdin = new Stream.Writable({
+                        write: function(chunk, encoding, callback) {
+                            if (typeof chunk === 'string') stdinChunks.push(chunk);
+                            else if (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk)) stdinChunks.push(chunk.toString(encoding && encoding !== 'buffer' ? encoding : 'utf8'));
+                            else if (chunk instanceof Uint8Array) stdinChunks.push(Buffer.from(chunk).toString('utf8'));
+                            else stdinChunks.push(String(chunk));
+                            callback();
+                        },
+                        final: function(callback) {
+                            start();
+                            callback();
+                        }
+                    });
+
+                    function finishChild(result) {
+                        queueMicrotask(function() {
+                            if (result.error) {
+                                var err = new Error(result.error);
+                                child.stdout.destroy(err);
+                                child.stderr.destroy(err);
+                                child.emit('error', err);
+                                return;
+                            }
+
+                            child.exitCode = result.status || 0;
+                            child.signalCode = result.signal || null;
+
+                            if (result.stdout) child.stdout.write(Buffer.from(result.stdout, 'utf8'));
+                            child.stdout.end();
+
+                            if (result.stderr) child.stderr.write(Buffer.from(result.stderr, 'utf8'));
+                            child.stderr.end();
+
+                            child.emit('close', child.exitCode, child.signalCode);
+                            child.emit('exit', child.exitCode, child.signalCode);
+                        });
+                    }
+
+                    function start() {
+                        if (started) return;
+                        started = true;
+
+                        var runOptions = Object.assign({}, opts);
+                        if (stdinChunks.length > 0) {
+                            runOptions.input = stdinChunks.join('');
+                        }
+
+                        finishChild(__cpRunSync(file, JSON.stringify(args), JSON.stringify(runOptions)));
+                    }
+
+                    child.kill = function(signal) {
+                        child.killed = true;
+                        return true;
+                    };
+                    child.destroy = function(error) {
+                        child.killed = true;
+                        child.stdin.destroy(error);
+                        child.stdout.destroy(error);
+                        child.stderr.destroy(error);
+                    };
+
+                    queueMicrotask(start);
+
+                    return child;
                 },
                 exec: function(cmd, opts, cb) {
                     if (typeof opts === 'function') cb = opts;
-                    if (cb) cb(new Error('node:child_process exec is not supported in swift-bun'));
+                    return __nodeModules.child_process.execFile('/bin/sh', ['-lc', cmd], opts, cb);
                 },
-                execSync: function() {
-                    throw new Error('node:child_process execSync is not supported in swift-bun');
+                execSync: function(cmd, opts) {
+                    var result = __cpRunSync('/bin/sh', JSON.stringify(['-lc', cmd]), JSON.stringify(opts || {}));
+                    if (result.error) throw new Error(result.error);
+                    if ((result.status || 0) !== 0) throw new Error(result.stderr || ('Command exited with code ' + result.status));
+                    return result.stdout || '';
                 },
                 execFile: function(file, args, opts, cb) {
                     if (typeof opts === 'function') cb = opts;
                     if (typeof args === 'function') cb = args;
-                    if (cb) cb(new Error('node:child_process execFile is not supported in swift-bun'));
+                    if (!Array.isArray(args)) args = [];
+                    opts = opts && typeof opts === 'object' ? opts : {};
+
+                    var child = __nodeModules.child_process.spawn(file, args, opts);
+                    var stdout = '';
+                    var stderr = '';
+
+                    child.stdout.on('data', function(chunk) { stdout += chunk.toString(); });
+                    child.stderr.on('data', function(chunk) { stderr += chunk.toString(); });
+
+                    child.on('close', function(code, signal) {
+                        if (!cb) return;
+                        if (code === 0 || code === 1) cb(null, stdout, stderr);
+                        else {
+                            var err = new Error(stderr || ('Command exited with code ' + code));
+                            err.code = code;
+                            err.signal = signal;
+                            cb(err, stdout, stderr);
+                        }
+                    });
+
+                    child.on('error', function(err) {
+                        if (cb) cb(err, stdout, stderr);
+                    });
+
+                    return child;
                 },
                 fork: function() {
                     throw new Error('node:child_process fork is not supported in swift-bun');
                 },
-                spawnSync: function() {
-                    throw new Error('node:child_process spawnSync is not supported in swift-bun');
+                spawnSync: function(file, args, opts) {
+                    if (!Array.isArray(args) && args && typeof args === 'object') {
+                        opts = args;
+                        args = [];
+                    }
+                    var result = __cpRunSync(file, JSON.stringify(Array.isArray(args) ? args : []), JSON.stringify(opts || {}));
+                    if (result.error) {
+                        return { error: new Error(result.error), status: null, stdout: '', stderr: '' };
+                    }
+                    return {
+                        pid: 0,
+                        status: result.status || 0,
+                        signal: result.signal || null,
+                        stdout: Buffer.from(result.stdout || '', 'utf8'),
+                        stderr: Buffer.from(result.stderr || '', 'utf8'),
+                    };
                 },
             };
 
@@ -261,5 +444,50 @@ enum NodeStubs {
             };
         })();
         """)
+    }
+
+    private static func parseStringArray(json: String) throws -> [String] {
+        guard let data = json.data(using: .utf8), !json.isEmpty else { return [] }
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let array = object as? [Any] else { return [] }
+        return array.map { "\($0)" }
+    }
+
+    private static func parseJSONObject(json: String) throws -> [String: Any] {
+        guard let data = json.data(using: .utf8), !json.isEmpty else { return [:] }
+        let object = try JSONSerialization.jsonObject(with: data)
+        return object as? [String: Any] ?? [:]
+    }
+
+    private static func resolveExecutableURL(for executable: String) throws -> URL {
+        if executable.contains("/") {
+            let url = URL(fileURLWithPath: executable)
+            try ensureExecutableIfNeeded(at: url)
+            return url
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        let pathValue = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+        for directory in pathValue.split(separator: ":") {
+            let candidate = String(directory) + "/" + executable
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return URL(fileURLWithPath: candidate)
+            }
+        }
+
+        throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError, userInfo: [
+            NSFilePathErrorKey: executable,
+        ])
+    }
+
+    private static func ensureExecutableIfNeeded(at url: URL) throws {
+        let path = url.path
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        guard !FileManager.default.isExecutableFile(atPath: path) else { return }
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o644
+        let executablePermissions = permissions | 0o111
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: executablePermissions)], ofItemAtPath: path)
     }
 }

@@ -53,9 +53,14 @@ public final class BunProcess: Sendable {
     private nonisolated(unsafe) var refCount: Int = 0
     private nonisolated(unsafe) var exitPromise: EventLoopPromise<Int32>?
     private nonisolated(unsafe) var nextTimerID: Int32 = 1
-    private nonisolated(unsafe) var activeTimers: [Int32: Scheduled<Void>] = [:]
+    private nonisolated(unsafe) var activeTimers: [Int32: TimerState] = [:]
     private nonisolated(unsafe) var stdinValue: JSValue?
     private nonisolated(unsafe) var state: State = .idle
+
+    private struct TimerState {
+        var scheduled: Scheduled<Void>
+        var isRefed: Bool
+    }
 
     private enum State {
         case idle
@@ -179,7 +184,7 @@ public final class BunProcess: Sendable {
                 self.exitPromise = promise
                 self.state = .running
                 try self.setupContext()
-                self.checkExitCondition()
+                self.scheduleExitCheck(source: "initial")
             } catch {
                 self.state = .exited
                 self.exitPromise = nil
@@ -324,11 +329,20 @@ public final class BunProcess: Sendable {
         resolveExit(code: 0)
     }
 
+    private func scheduleExitCheck(source: String) {
+        eventLoop.preconditionInEventLoop()
+        eventLoop.execute {
+            self.eventLoop.preconditionInEventLoop()
+            self.outputContinuation.yield("[bun:lifecycle] deferred checkExitCondition (\(source))")
+            self.checkExitCondition()
+        }
+    }
+
     private func doExit(code: Int32) {
         eventLoop.preconditionInEventLoop()
         outputContinuation.yield("[bun:lifecycle] doExit(code=\(code)), activeTimers=\(activeTimers.count)")
-        for (_, scheduled) in activeTimers {
-            scheduled.cancel()
+        for (_, timerState) in activeTimers {
+            timerState.scheduled.cancel()
         }
         activeTimers.removeAll()
         refCount = 0
@@ -416,6 +430,17 @@ public final class BunProcess: Sendable {
     private func installTimerBridge(in ctx: JSContext) {
         eventLoop.preconditionInEventLoop()
 
+        let nextTickBlock: @convention(block) (JSValue, JSValue) -> Void = { [self] callback, argsArray in
+            self.ref("nextTick")
+            self.eventLoop.execute {
+                self.eventLoop.preconditionInEventLoop()
+                callback.call(withArguments: self.extractArgs(argsArray))
+                self.reportPendingJavaScriptException(source: "nextTick")
+                self.unref("nextTick")
+            }
+        }
+        ctx.setObject(nextTickBlock, forKeyedSubscript: "__nativeNextTick" as NSString)
+
         let setTimeoutBlock: @convention(block) (JSValue, JSValue, JSValue) -> Int32 = { [self] callback, delay, argsArray in
             let delayMs = delay.isUndefined ? 0 : max(0, Int64(delay.toInt32()))
             let timerID = self.nextTimerID
@@ -424,19 +449,28 @@ public final class BunProcess: Sendable {
 
             let scheduled = self.eventLoop.scheduleTask(in: .milliseconds(delayMs)) {
                 self.eventLoop.preconditionInEventLoop()
-                self.activeTimers.removeValue(forKey: timerID)
+                let timerState = self.activeTimers.removeValue(forKey: timerID)
                 callback.call(withArguments: self.extractArgs(argsArray))
-                self.unref("setTimeout:fired")
+                self.reportPendingJavaScriptException(source: "setTimeout")
+                if timerState?.isRefed == true {
+                    self.unref("setTimeout:fired")
+                } else {
+                    self.checkExitCondition()
+                }
             }
-            self.activeTimers[timerID] = scheduled
+            self.activeTimers[timerID] = TimerState(scheduled: scheduled, isRefed: true)
             return timerID
         }
         ctx.setObject(setTimeoutBlock, forKeyedSubscript: "__nativeSetTimeout" as NSString)
 
         let clearTimeoutBlock: @convention(block) (Int32) -> Void = { [self] timerID in
-            if let scheduled = self.activeTimers.removeValue(forKey: timerID) {
-                scheduled.cancel()
-                self.unref("clearTimeout")
+            if let timerState = self.activeTimers.removeValue(forKey: timerID) {
+                timerState.scheduled.cancel()
+                if timerState.isRefed {
+                    self.unref("clearTimeout")
+                } else {
+                    self.checkExitCondition()
+                }
             }
         }
         ctx.setObject(clearTimeoutBlock, forKeyedSubscript: "__nativeClearTimeout" as NSString)
@@ -451,26 +485,77 @@ public final class BunProcess: Sendable {
         }
         ctx.setObject(setIntervalBlock, forKeyedSubscript: "__nativeSetInterval" as NSString)
 
+        let timerRefBlock: @convention(block) (Int32) -> Void = { [self] timerID in
+            guard var timerState = self.activeTimers[timerID], !timerState.isRefed else { return }
+            timerState.isRefed = true
+            self.activeTimers[timerID] = timerState
+            self.ref("timer.ref")
+        }
+        ctx.setObject(timerRefBlock, forKeyedSubscript: "__nativeTimerRef" as NSString)
+
+        let timerUnrefBlock: @convention(block) (Int32) -> Void = { [self] timerID in
+            guard var timerState = self.activeTimers[timerID], timerState.isRefed else { return }
+            timerState.isRefed = false
+            self.activeTimers[timerID] = timerState
+            self.unref("timer.unref")
+        }
+        ctx.setObject(timerUnrefBlock, forKeyedSubscript: "__nativeTimerUnref" as NSString)
+
+        let timerHasRefBlock: @convention(block) (Int32) -> Bool = { [self] timerID in
+            self.activeTimers[timerID]?.isRefed ?? false
+        }
+        ctx.setObject(timerHasRefBlock, forKeyedSubscript: "__nativeTimerHasRef" as NSString)
+
         ctx.evaluateScript("""
         (function() {
+            function normalizeTimerId(handle) {
+                if (handle && typeof handle === 'object' && typeof handle._id === 'number') {
+                    return handle._id;
+                }
+                return handle;
+            }
+
+            function makeTimerHandle(id, clearFn) {
+                var handle = {
+                    _id: id,
+                    ref: function() { __nativeTimerRef(id); return handle; },
+                    unref: function() { __nativeTimerUnref(id); return handle; },
+                    hasRef: function() { return __nativeTimerHasRef(id); },
+                    refresh: function() { return handle; },
+                    close: function() { clearFn(id); return handle; }
+                };
+                if (typeof Symbol !== 'undefined' && Symbol.toPrimitive) {
+                    handle[Symbol.toPrimitive] = function() { return id; };
+                }
+                return handle;
+            }
+
+            process.nextTick = function(fn) {
+                var args = [];
+                for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
+                __nativeNextTick(fn, args);
+            };
+            globalThis.queueMicrotask = function(fn) {
+                __nativeNextTick(fn, []);
+            };
             globalThis.setTimeout = function(fn, delay) {
                 var args = [];
                 for (var i = 2; i < arguments.length; i++) args.push(arguments[i]);
-                return __nativeSetTimeout(fn, delay || 0, args);
+                return makeTimerHandle(__nativeSetTimeout(fn, delay || 0, args), __nativeClearTimeout);
             };
-            globalThis.clearTimeout = function(id) { __nativeClearTimeout(id); };
+            globalThis.clearTimeout = function(id) { __nativeClearTimeout(normalizeTimerId(id)); };
             globalThis.setInterval = function(fn, delay) {
                 var args = [];
                 for (var i = 2; i < arguments.length; i++) args.push(arguments[i]);
-                return __nativeSetInterval(fn, delay || 0, args);
+                return makeTimerHandle(__nativeSetInterval(fn, delay || 0, args), __nativeClearTimeout);
             };
-            globalThis.clearInterval = function(id) { __nativeClearTimeout(id); };
+            globalThis.clearInterval = function(id) { __nativeClearTimeout(normalizeTimerId(id)); };
             globalThis.setImmediate = function(fn) {
                 var args = [];
                 for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
-                return __nativeSetTimeout(fn, 0, args);
+                return makeTimerHandle(__nativeSetTimeout(fn, 0, args), __nativeClearTimeout);
             };
-            globalThis.clearImmediate = function(id) { __nativeClearTimeout(id); };
+            globalThis.clearImmediate = function(id) { __nativeClearTimeout(normalizeTimerId(id)); };
         })();
         """)
     }
@@ -479,11 +564,15 @@ public final class BunProcess: Sendable {
         let scheduled = eventLoop.scheduleTask(in: .milliseconds(intervalMs)) { [self] in
             self.eventLoop.preconditionInEventLoop()
             callback.call(withArguments: self.extractArgs(argsArray))
+            self.reportPendingJavaScriptException(source: "setInterval")
             if self.activeTimers[timerID] != nil {
                 self.scheduleRepeating(timerID: timerID, callback: callback, intervalMs: intervalMs, argsArray: argsArray)
+            } else {
+                self.checkExitCondition()
             }
         }
-        activeTimers[timerID] = scheduled
+        let isRefed = activeTimers[timerID]?.isRefed ?? true
+        activeTimers[timerID] = TimerState(scheduled: scheduled, isRefed: isRefed)
     }
 
     private func patchTimerModuleReferences(in ctx: JSContext) {
@@ -620,42 +709,167 @@ public final class BunProcess: Sendable {
         ctx.evaluateScript("""
         (function() {
             var stdin = process.stdin;
-            var _refed = false;
+            var _nativeRefed = false;
+            var _manualRefed = false;
+            var _listenerRefed = false;
+            var _iteratorRefs = 0;
 
-            // ref/unref for lifecycle tracking
+            function syncRefState() {
+                var shouldRef = _manualRefed || _listenerRefed || _iteratorRefs > 0;
+                if (shouldRef && !_nativeRefed) {
+                    _nativeRefed = true;
+                    __stdinRef();
+                } else if (!shouldRef && _nativeRefed) {
+                    _nativeRefed = false;
+                    __stdinUnref();
+                }
+            }
+
+            function refreshListenerRef() {
+                _listenerRefed = stdin.listenerCount('data') > 0 || stdin.listenerCount('readable') > 0;
+                syncRefState();
+            }
+
+            function releaseIteratorRef() {
+                if (_iteratorRefs > 0) {
+                    _iteratorRefs -= 1;
+                    syncRefState();
+                }
+            }
+
             stdin.ref = function() {
-                if (!_refed) { _refed = true; __stdinRef(); }
+                _manualRefed = true;
+                syncRefState();
                 return stdin;
             };
             stdin.unref = function() {
-                if (_refed) { _refed = false; __stdinUnref(); }
+                _manualRefed = false;
+                syncRefState();
                 return stdin;
             };
             stdin.setRawMode = function() { return stdin; };
+            if (typeof stdin.write !== 'function') {
+                stdin.write = function() { return false; };
+            }
 
-            // Auto-ref when data/readable listeners are added
             var _origOn = stdin.on.bind(stdin);
             stdin.on = function(event, fn) {
                 var result = _origOn(event, fn);
-                if ((event === 'data' || event === 'readable') && !_refed) {
-                    _refed = true;
-                    __stdinRef();
+                if (event === 'data' || event === 'readable') {
+                    refreshListenerRef();
                 }
                 return result;
             };
             stdin.addListener = stdin.on;
 
-            // Auto-unref on end
+            if (typeof stdin.once === 'function') {
+                var _origOnce = stdin.once.bind(stdin);
+                stdin.once = function(event, fn) {
+                    var result = _origOnce(event, fn);
+                    if (event === 'data' || event === 'readable') {
+                        refreshListenerRef();
+                    }
+                    return result;
+                };
+            }
+
+            if (typeof stdin.prependListener === 'function') {
+                var _origPrependListener = stdin.prependListener.bind(stdin);
+                stdin.prependListener = function(event, fn) {
+                    var result = _origPrependListener(event, fn);
+                    if (event === 'data' || event === 'readable') {
+                        refreshListenerRef();
+                    }
+                    return result;
+                };
+            }
+
+            if (typeof stdin.prependOnceListener === 'function') {
+                var _origPrependOnceListener = stdin.prependOnceListener.bind(stdin);
+                stdin.prependOnceListener = function(event, fn) {
+                    var result = _origPrependOnceListener(event, fn);
+                    if (event === 'data' || event === 'readable') {
+                        refreshListenerRef();
+                    }
+                    return result;
+                };
+            }
+
+            var _origRemoveListener = stdin.removeListener.bind(stdin);
+            stdin.removeListener = function(event, fn) {
+                var result = _origRemoveListener(event, fn);
+                if (event === 'data' || event === 'readable') {
+                    refreshListenerRef();
+                }
+                return result;
+            };
+
+            if (typeof stdin.off === 'function') {
+                stdin.off = function(event, fn) {
+                    return stdin.removeListener(event, fn);
+                };
+            }
+
+            if (typeof stdin.removeAllListeners === 'function') {
+                var _origRemoveAllListeners = stdin.removeAllListeners.bind(stdin);
+                stdin.removeAllListeners = function(event) {
+                    var result = _origRemoveAllListeners(event);
+                    if (event === undefined || event === 'data' || event === 'readable') {
+                        refreshListenerRef();
+                    }
+                    return result;
+                };
+            }
+
             stdin.on('end', function() {
-                if (_refed) { _refed = false; __stdinUnref(); }
+                _listenerRefed = false;
+                _iteratorRefs = 0;
+                syncRefState();
             });
 
-            // Auto-ref when async iteration starts
             var _origIterator = stdin[Symbol.asyncIterator];
             if (_origIterator) {
                 stdin[Symbol.asyncIterator] = function() {
-                    if (!_refed) { _refed = true; __stdinRef(); }
-                    return _origIterator.call(stdin);
+                    _iteratorRefs += 1;
+                    syncRefState();
+
+                    var iterator = _origIterator.call(stdin);
+                    var released = false;
+
+                    function releaseOnce() {
+                        if (released) return;
+                        released = true;
+                        releaseIteratorRef();
+                    }
+
+                    return {
+                        next: function() {
+                            return Promise.resolve(iterator.next.apply(iterator, arguments)).then(function(result) {
+                                if (result && result.done) releaseOnce();
+                                return result;
+                            }, function(error) {
+                                releaseOnce();
+                                throw error;
+                            });
+                        },
+                        return: function() {
+                            releaseOnce();
+                            if (typeof iterator.return === 'function') {
+                                return iterator.return.apply(iterator, arguments);
+                            }
+                            return Promise.resolve({ value: undefined, done: true });
+                        },
+                        throw: function() {
+                            releaseOnce();
+                            if (typeof iterator.throw === 'function') {
+                                return iterator.throw.apply(iterator, arguments);
+                            }
+                            return Promise.reject(arguments[0]);
+                        },
+                        [Symbol.asyncIterator]: function() {
+                            return this;
+                        }
+                    };
                 };
             }
         })();
@@ -668,13 +882,15 @@ public final class BunProcess: Sendable {
     private func deliverStdin(_ data: Data?) {
         eventLoop.preconditionInEventLoop()
         guard let ctx = jsContext else { return }
-        if let data {
-            let str = String(data: data, encoding: .utf8) ?? ""
-            // __deliverStdinData pushes to the readable-stream Readable
-            ctx.evaluateScript("__deliverStdinData('\(escapeJS(str))')")
+        guard let deliver = ctx.objectForKeyedSubscript("__deliverStdinData"),
+              !deliver.isUndefined else { return }
+        let argument: Any = if let data {
+            String(data: data, encoding: .utf8) ?? ""
         } else {
-            ctx.evaluateScript("__deliverStdinData(null)")
+            NSNull()
         }
+        _ = deliver.call(withArguments: [argument])
+        reportPendingJavaScriptException(source: "deliverStdin")
     }
 
     // MARK: - Helpers
@@ -685,5 +901,14 @@ public final class BunProcess: Sendable {
             .replacingOccurrences(of: "'", with: "\\'")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: "\r", with: "\\r")
+    }
+
+    private func reportPendingJavaScriptException(source: String) {
+        eventLoop.preconditionInEventLoop()
+        guard let ctx = jsContext, let exception = ctx.exception else { return }
+        ctx.exception = nil
+        guard !isProcessExitSentinel(exception) else { return }
+        let message = exception.toString() ?? "Unknown JS exception"
+        outputContinuation.yield("[bun:exception] \(source): \(message)")
     }
 }

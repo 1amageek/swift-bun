@@ -282,6 +282,38 @@ struct NodeCompatTests {
         #expect(result.stringValue == "hello from swift-bun")
     }
 
+    @Test("fs.appendFileSync appends to existing file")
+    func fsAppendFileSyncRoundtrip() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-test-\(UUID().uuidString).txt"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await process.evaluate(js: """
+            var fs = require('node:fs');
+            fs.writeFileSync('\(tmpPath)', 'hello');
+            fs.appendFileSync('\(tmpPath)', ' world');
+            fs.readFileSync('\(tmpPath)', 'utf-8');
+        """)
+        #expect(result.stringValue == "hello world")
+    }
+
+    @Test("fs.readFileSync without encoding returns Buffer")
+    func fsReadFileSyncReturnsBuffer() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-test-\(UUID().uuidString).txt"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+        try "hello".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+        let result = try await process.evaluate(js: """
+            var fs = require('node:fs');
+            var data = fs.readFileSync('\(tmpPath)');
+            Buffer.isBuffer(data) && data.toString('utf8') === 'hello';
+        """)
+        #expect(result.boolValue == true)
+    }
+
     @Test("fs.existsSync returns false for missing file")
     func fsExistsSyncMissing() async throws {
         let process = BunProcess()
@@ -290,6 +322,127 @@ struct NodeCompatTests {
             require('node:fs').existsSync('/nonexistent/file.txt')
         """)
         #expect(result.boolValue == false)
+    }
+
+    @Test("fs.readdirSync supports withFileTypes")
+    func fsReaddirWithFileTypes() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let tmpDir = NSTemporaryDirectory() + "swift-bun-dir-\(UUID().uuidString)"
+        let tmpFile = tmpDir + "/file.txt"
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        try "hello".write(toFile: tmpFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let result = try await process.evaluate(js: """
+            var fs = require('node:fs');
+            var entries = fs.readdirSync('\(tmpDir)', { withFileTypes: true });
+            entries.length === 1 &&
+                entries[0].name === 'file.txt' &&
+                entries[0].isFile() === true &&
+                entries[0].isDirectory() === false;
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.readSync reads from openSync handle")
+    func fsReadSyncFromOpenHandle() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-test-\(UUID().uuidString).txt"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+        try "abcdef".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+
+        let result = try await process.evaluate(js: """
+            var fs = require('node:fs');
+            var fd = fs.openSync('\(tmpPath)', 'r');
+            var buf = Buffer.alloc(3);
+            var bytesRead = fs.readSync(fd, buf, 0, 3, 2);
+            fs.closeSync(fd);
+            bytesRead === 3 && buf.toString('utf8') === 'cde';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("fs.renameSync overwrites existing file")
+    func fsRenameSyncOverwritesExistingFile() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let tmpDir = NSTemporaryDirectory() + "swift-bun-rename-\(UUID().uuidString)"
+        let sourcePath = tmpDir + "/source.txt"
+        let destinationPath = tmpDir + "/destination.txt"
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        try "source".write(toFile: sourcePath, atomically: true, encoding: .utf8)
+        try "destination".write(toFile: destinationPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let result = try await process.evaluate(js: """
+            var fs = require('node:fs');
+            fs.renameSync('\(sourcePath)', '\(destinationPath)');
+            !fs.existsSync('\(sourcePath)') && fs.readFileSync('\(destinationPath)', 'utf-8') === 'source';
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("child_process.execFile invokes callback")
+    func childProcessExecFile() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let result = try await process.evaluate(js: """
+            (async function() {
+                var cp = require('node:child_process');
+                return await new Promise(function(resolve) {
+                    cp.execFile('/usr/bin/printf', ['hello'], function(err, stdout, stderr) {
+                        resolve(!err && stdout === 'hello' && stderr === '');
+                    });
+                });
+            })()
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("child_process.spawn supports stdin.end")
+    func childProcessSpawnStdinEnd() async throws {
+        let process = BunProcess()
+        try await process.load()
+        let result = try await process.evaluate(js: """
+            (async function() {
+                var cp = require('node:child_process');
+                return await new Promise(function(resolve) {
+                    var child = cp.spawn('/bin/cat', [], {});
+                    var stdout = '';
+                    child.stdout.on('data', function(chunk) { stdout += chunk.toString('utf8'); });
+                    child.on('close', function(code) {
+                        resolve(code === 0 && stdout === 'hello');
+                    });
+                    child.stdin.end('hello');
+                });
+            })()
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("child_process can run non-executable absolute path")
+    func childProcessExecFileAddsExecuteBit() async throws {
+        let process = BunProcess()
+        try await process.load()
+
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-script-\(UUID().uuidString).sh"
+        try "#!/bin/sh\nprintf ready\n".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tmpPath)
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await process.evaluate(js: """
+            (async function() {
+                var cp = require('node:child_process');
+                return await new Promise(function(resolve) {
+                    cp.execFile('\(tmpPath)', [], function(err, stdout) {
+                        resolve(!err && stdout === 'ready');
+                    });
+                });
+            })()
+        """)
+        #expect(result.boolValue == true)
     }
 }
 
@@ -1291,4 +1444,3 @@ struct NodePolyfillAdditionTests {
         #expect(result.stringValue == "ok")
     }
 }
-

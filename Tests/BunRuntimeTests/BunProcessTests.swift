@@ -135,6 +135,21 @@ struct BunProcessTests {
         #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
+    @Test func timeoutHandleUnref() async throws {
+        let url = try tempBundle("""
+            var handle = setTimeout(function() { process.exit(1); }, 100);
+            process.exit(
+                typeof handle.unref === 'function' &&
+                typeof handle.ref === 'function' &&
+                typeof handle.hasRef === 'function' &&
+                handle.hasRef() === true &&
+                handle.unref().hasRef() === false ? 0 : 1
+            );
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
     @Test func requireTimers() async throws {
         let url = try tempBundle("""
             var t = require('node:timers');
@@ -200,11 +215,27 @@ struct BunProcessTests {
         #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
+    @Test func nextTickWithoutTimer() async throws {
+        let url = try tempBundle("""
+            process.nextTick(function() { process.exit(0); });
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
     @Test func microtask() async throws {
         let url = try tempBundle("""
             var called = false;
             queueMicrotask(function() { called = true; });
             setTimeout(function() { process.exit(called ? 0 : 1); }, 10);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func microtaskWithoutTimer() async throws {
+        let url = try tempBundle("""
+            queueMicrotask(function() { process.exit(0); });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(try await BunProcess(bundle: url).run() == 0)
@@ -225,6 +256,24 @@ struct BunProcessTests {
         let task = Task { try await p.run() }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("hello".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinPreservesNewlines() async throws {
+        let url = try tempBundle("""
+            process.stdin.on('data', function(c) {
+                var hasActualNewline = c.indexOf('\\n') !== -1;
+                var hasEscapedBackslashN = c.indexOf('\\\\n') !== -1;
+                setTimeout(function() {
+                    process.exit(hasActualNewline && !hasEscapedBackslashN ? 0 : 1);
+                }, 0);
+            });
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput("line1\nline2".data(using: .utf8)!)
         #expect(try await task.value == 0)
     }
 
@@ -493,6 +542,14 @@ struct BunProcessTests {
             process.exitCode = 0;
             process.exitCode = 42;
             process.exit(process.exitCode === 42 ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func processExitCodeDefaultsToUndefined() async throws {
+        let url = try tempBundle("""
+            process.exit(process.exitCode === undefined ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(try await BunProcess(bundle: url).run() == 0)

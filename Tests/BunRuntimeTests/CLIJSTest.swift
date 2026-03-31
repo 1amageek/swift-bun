@@ -75,7 +75,7 @@ struct CLIJSTest {
 
         let p = BunProcess(
             bundle: URL(fileURLWithPath: path),
-            arguments: ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"],
+            arguments: ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--debug"],
             cwd: NSHomeDirectory(),
             environment: ["HOME": NSHomeDirectory()]
         )
@@ -106,7 +106,7 @@ struct CLIJSTest {
         print("stdout: \(stdoutLogs.values.count) lines, output: \(logs.values.count) lines")
 
         // Send a message via stdin
-        let msg = #"{"type":"user_message","content":"What is 2+2? Answer in one word."}"# + "\n"
+        let msg = #"{"type":"user","session_id":"","message":{"role":"user","content":"What is 2+2? Answer in one word."},"parent_tool_use_id":null}"# + "\n"
         p.sendInput(msg.data(using: .utf8)!)
         print("=== Sent stdin ===")
 

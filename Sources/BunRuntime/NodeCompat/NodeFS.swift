@@ -34,6 +34,36 @@ enum NodeFS {
         }
         context.setObject(writeFileBlock, forKeyedSubscript: "__fsWriteFileSync" as NSString)
 
+        // appendFileSync — returns { error: string } or {}
+        let appendFileBlock: @convention(block) (String, String) -> [String: Any] = { path, content in
+            let data = Data(content.utf8)
+            if !fm.fileExists(atPath: path) {
+                do {
+                    try data.write(to: URL(fileURLWithPath: path))
+                    return [:]
+                } catch {
+                    return ["error": mapFSError(error, operation: "open", path: path)]
+                }
+            }
+
+            do {
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+                defer {
+                    do {
+                        try handle.close()
+                    } catch {
+                        // Ignore close errors to match Node's best-effort cleanup behavior.
+                    }
+                }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                return [:]
+            } catch {
+                return ["error": mapFSError(error, operation: "open", path: path)]
+            }
+        }
+        context.setObject(appendFileBlock, forKeyedSubscript: "__fsAppendFileSync" as NSString)
+
         // existsSync
         let existsBlock: @convention(block) (String) -> Bool = { path in
             fm.fileExists(atPath: path)
@@ -102,7 +132,7 @@ enum NodeFS {
         // renameSync — returns { error: string } or {}
         let renameBlock: @convention(block) (String, String) -> [String: Any] = { oldPath, newPath in
             do {
-                try fm.moveItem(atPath: oldPath, toPath: newPath)
+                try performRename(using: fm, from: oldPath, to: newPath)
                 return [:]
             } catch {
                 return ["error": mapFSError(error, operation: "rename", path: oldPath)]
@@ -172,15 +202,30 @@ enum NodeFS {
                 return res.value;
             }
 
+            function toBuffer(value) {
+                if (typeof Buffer !== 'undefined' && Array.isArray(value)) {
+                    return Buffer.from(value);
+                }
+                return value;
+            }
+
             var fs = {
                 readFileSync: function(path, options) {
                     var encoding = typeof options === 'string' ? options : (options && options.encoding);
-                    var res = __fsReadFileSync(path, encoding || 'utf-8');
-                    return checkResult(res);
+                    var res = __fsReadFileSync(path, encoding || '');
+                    return encoding ? checkResult(res) : toBuffer(checkResult(res));
                 },
                 writeFileSync: function(path, data, options) {
                     var str = typeof data === 'string' ? data : String(data);
                     var res = __fsWriteFileSync(path, str);
+                    if (res.error) throw new Error(res.error);
+                },
+                appendFileSync: function(path, data, options) {
+                    if (path && typeof path === 'object' && typeof path.path === 'string') {
+                        path = path.path;
+                    }
+                    var str = typeof data === 'string' ? data : String(data);
+                    var res = __fsAppendFileSync(path, str);
                     if (res.error) throw new Error(res.error);
                 },
                 existsSync: function(path) {
@@ -197,8 +242,27 @@ enum NodeFS {
                     var res = __fsMkdirSync(path, recursive);
                     if (res.error) throw new Error(res.error);
                 },
-                readdirSync: function(path) {
-                    return checkResult(__fsReaddirSync(path));
+                readdirSync: function(path, options) {
+                    var names = checkResult(__fsReaddirSync(path));
+                    var withFileTypes = options && typeof options === 'object' && options.withFileTypes === true;
+                    if (!withFileTypes) return names;
+
+                    return names.map(function(name) {
+                        var fullPath = path.replace(/\\/$/, '') + '/' + name;
+                        var stat = makeStatResult(__fsStatSync(fullPath));
+                        return {
+                            name: name,
+                            path: fullPath,
+                            parentPath: path,
+                            isFile: function() { return stat.isFile(); },
+                            isDirectory: function() { return stat.isDirectory(); },
+                            isSymbolicLink: function() { return stat.isSymbolicLink(); },
+                            isBlockDevice: function() { return stat.isBlockDevice(); },
+                            isCharacterDevice: function() { return stat.isCharacterDevice(); },
+                            isFIFO: function() { return stat.isFIFO(); },
+                            isSocket: function() { return stat.isSocket(); },
+                        };
+                    });
                 },
                 unlinkSync: function(path) {
                     var res = __fsUnlinkSync(path);
@@ -219,10 +283,39 @@ enum NodeFS {
                     var res = __fsChmodSync(path, mode || 0);
                     if (res.error) throw new Error(res.error);
                 },
+                openSync: function(path, flags, mode) {
+                    return { path: path, flags: flags || 'r', mode: mode, fd: path };
+                },
+                closeSync: function(fd) {
+                    return;
+                },
+                readSync: function(fd, buffer, offset, length, position) {
+                    var path = typeof fd === 'string' ? fd : (fd && fd.path);
+                    if (!path) throw new Error('EBADF: bad file descriptor');
+
+                    var data = fs.readFileSync(path);
+                    var source = typeof Buffer !== 'undefined' && Buffer.isBuffer(data) ? data : Buffer.from(data);
+                    var start = position == null ? 0 : position;
+                    var targetOffset = offset || 0;
+                    var bytesToCopy = Math.max(0, Math.min(length || source.length, source.length - start));
+                    if (bytesToCopy === 0) return 0;
+                    source.copy(buffer, targetOffset, start, start + bytesToCopy);
+                    return bytesToCopy;
+                },
                 chownSync: function() {},
                 copyFileSync: function(src, dest) {
                     var data = fs.readFileSync(src);
                     fs.writeFileSync(dest, data);
+                },
+                appendFile: function(path, data, options, callback) {
+                    var cb = typeof options === 'function' ? options : callback;
+                    try {
+                        fs.appendFileSync(path, data, options);
+                        if (cb) cb(null);
+                    } catch (e) {
+                        if (cb) cb(e);
+                        else throw e;
+                    }
                 },
                 createReadStream: function() {
                     throw new Error('createReadStream is not supported in swift-bun');
@@ -246,6 +339,12 @@ enum NodeFS {
                             catch(e) { reject(e); }
                         });
                     },
+                    appendFile: function(path, data, options) {
+                        return new Promise(function(resolve, reject) {
+                            try { fs.appendFileSync(path, data, options); resolve(); }
+                            catch(e) { reject(e); }
+                        });
+                    },
                     stat: function(path) {
                         return new Promise(function(resolve, reject) {
                             try { resolve(fs.statSync(path)); }
@@ -264,9 +363,9 @@ enum NodeFS {
                             catch(e) { reject(e); }
                         });
                     },
-                    readdir: function(path) {
+                    readdir: function(path, options) {
                         return new Promise(function(resolve, reject) {
-                            try { resolve(fs.readdirSync(path)); }
+                            try { resolve(fs.readdirSync(path, options)); }
                             catch(e) { reject(e); }
                         });
                     },
@@ -336,6 +435,30 @@ enum NodeFS {
             __nodeModules.fs = fs;
         })();
         """)
+    }
+
+    private static func performRename(using fileManager: FileManager, from oldPath: String, to newPath: String) throws {
+        let sourceURL = URL(fileURLWithPath: oldPath).standardizedFileURL
+        let destinationURL = URL(fileURLWithPath: newPath).standardizedFileURL
+
+        if sourceURL.path == destinationURL.path {
+            return
+        }
+
+        var sourceIsDirectory = ObjCBool(false)
+        guard fileManager.fileExists(atPath: sourceURL.path, isDirectory: &sourceIsDirectory) else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)
+        }
+
+        var destinationIsDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: destinationURL.path, isDirectory: &destinationIsDirectory) {
+            if sourceIsDirectory.boolValue != destinationIsDirectory.boolValue {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError)
+            }
+            try fileManager.removeItem(at: destinationURL)
+        }
+
+        try fileManager.moveItem(at: sourceURL, to: destinationURL)
     }
 
     /// Map a Swift error to a Node.js-style error string (e.g. ENOENT, EACCES).

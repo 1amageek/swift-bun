@@ -220,7 +220,6 @@ enum ESMResolver {
         process.memoryUsage = function() { return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }; };
         process.cpuUsage = function() { return { user: 0, system: 0 }; };
         process.resourceUsage = function() { return {}; };
-        process.exitCode = 0;
         process.getuid = function() { return 501; };
         process.getgid = function() { return 20; };
         process.geteuid = function() { return 501; };

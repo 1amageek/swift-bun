@@ -112,6 +112,127 @@ enum BunShims {
                 return str.length;
             };
 
+            function parseSemver(version) {
+                var value = String(version || '').trim().replace(/^v/, '');
+                var parts = value.split('-', 2);
+                var core = parts[0].split('.').map(function(part) {
+                    var number = parseInt(part, 10);
+                    return Number.isFinite(number) ? number : 0;
+                });
+                while (core.length < 3) core.push(0);
+                return {
+                    core: core,
+                    prerelease: parts.length > 1 ? parts[1] : null
+                };
+            }
+
+            function compareSemver(a, b) {
+                var left = parseSemver(a);
+                var right = parseSemver(b);
+                for (var i = 0; i < 3; i++) {
+                    if (left.core[i] > right.core[i]) return 1;
+                    if (left.core[i] < right.core[i]) return -1;
+                }
+                if (left.prerelease && !right.prerelease) return -1;
+                if (!left.prerelease && right.prerelease) return 1;
+                if (left.prerelease && right.prerelease) {
+                    if (left.prerelease > right.prerelease) return 1;
+                    if (left.prerelease < right.prerelease) return -1;
+                }
+                return 0;
+            }
+
+            function satisfiesComparator(version, comparator) {
+                comparator = String(comparator || '').trim();
+                if (!comparator || comparator === '*') return true;
+
+                var match = comparator.match(/^(<=|>=|<|>|=|\\^|~)?\\s*(.+)$/);
+                if (!match) return compareSemver(version, comparator) === 0;
+
+                var op = match[1] || '=';
+                var target = match[2];
+                var cmp = compareSemver(version, target);
+
+                if (op === '=') return cmp === 0;
+                if (op === '>') return cmp > 0;
+                if (op === '>=') return cmp >= 0;
+                if (op === '<') return cmp < 0;
+                if (op === '<=') return cmp <= 0;
+                if (op === '^') {
+                    var lower = parseSemver(target);
+                    var upper = [lower.core[0] + 1, 0, 0].join('.');
+                    return compareSemver(version, target) >= 0 && compareSemver(version, upper) < 0;
+                }
+                if (op === '~') {
+                    var base = parseSemver(target);
+                    var upperBound = [base.core[0], base.core[1] + 1, 0].join('.');
+                    return compareSemver(version, target) >= 0 && compareSemver(version, upperBound) < 0;
+                }
+                return false;
+            }
+
+            Bun.semver = {
+                order: function(a, b) {
+                    return compareSemver(a, b);
+                },
+                satisfies: function(version, range) {
+                    var disjunctions = String(range || '').split('||').map(function(part) { return part.trim(); }).filter(Boolean);
+                    if (disjunctions.length === 0) return true;
+
+                    return disjunctions.some(function(part) {
+                        var comparators = part.split(/\\s+/).filter(Boolean);
+                        return comparators.every(function(comparator) {
+                            return satisfiesComparator(version, comparator);
+                        });
+                    });
+                }
+            };
+
+            Bun.YAML = {
+                parse: function(input) {
+                    var text = String(input || '');
+                    var result = {};
+                    var currentKey = null;
+                    for (var i = 0; i < text.split(/\\r?\\n/).length; i++) {
+                        var rawLine = text.split(/\\r?\\n/)[i];
+                        var line = rawLine.trim();
+                        if (!line || line.startsWith('#')) continue;
+
+                        var listMatch = rawLine.match(/^\\s*-\\s+(.*)$/);
+                        if (listMatch && currentKey) {
+                            if (!Array.isArray(result[currentKey])) result[currentKey] = [];
+                            result[currentKey].push(listMatch[1].trim());
+                            continue;
+                        }
+
+                        var separator = rawLine.indexOf(':');
+                        if (separator === -1) continue;
+
+                        var key = rawLine.slice(0, separator).trim();
+                        var value = rawLine.slice(separator + 1).trim();
+                        currentKey = key;
+
+                        if (!value) {
+                            result[key] = [];
+                            continue;
+                        }
+
+                        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+                            value = value.slice(1, -1);
+                        } else if (value === 'true') {
+                            value = true;
+                        } else if (value === 'false') {
+                            value = false;
+                        } else if (/^-?\\d+$/.test(value)) {
+                            value = parseInt(value, 10);
+                        }
+
+                        result[key] = value;
+                    }
+                    return result;
+                }
+            };
+
             Bun.Glob = function Glob(pattern) {
                 this.pattern = pattern;
             };
