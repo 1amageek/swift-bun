@@ -110,6 +110,37 @@ enum NodeFS {
         }
         context.setObject(renameBlock, forKeyedSubscript: "__fsRenameSync" as NSString)
 
+        // realpathSync — returns { value: string } or { error: string }
+        let realpathBlock: @convention(block) (String) -> [String: Any] = { path in
+            let resolved = (path as NSString).standardizingPath
+            if fm.fileExists(atPath: resolved) {
+                return ["value": resolved]
+            }
+            return ["error": mapFSError(
+                NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError),
+                operation: "realpath", path: path
+            )]
+        }
+        context.setObject(realpathBlock, forKeyedSubscript: "__fsRealpathSync" as NSString)
+
+        // accessSync — returns { error: string } or {}
+        let accessBlock: @convention(block) (String) -> [String: Any] = { path in
+            if fm.fileExists(atPath: path) {
+                return [:]
+            }
+            return ["error": mapFSError(
+                NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError),
+                operation: "access", path: path
+            )]
+        }
+        context.setObject(accessBlock, forKeyedSubscript: "__fsAccessSync" as NSString)
+
+        // chmodSync — no-op on iOS (returns success)
+        let chmodBlock: @convention(block) (String, Int32) -> [String: Any] = { _, _ in
+            return [:]
+        }
+        context.setObject(chmodBlock, forKeyedSubscript: "__fsChmodSync" as NSString)
+
         context.evaluateScript("""
         (function() {
             function makeStatResult(res) {
@@ -177,12 +208,17 @@ enum NodeFS {
                     var res = __fsRenameSync(oldPath, newPath);
                     if (res.error) throw new Error(res.error);
                 },
-                accessSync: function(path) {
-                    if (!__fsExistsSync(path)) {
-                        throw new Error("ENOENT: no such file or directory, access '" + path + "'");
-                    }
+                realpathSync: function(path) {
+                    return checkResult(__fsRealpathSync(path));
                 },
-                chmodSync: function() {},
+                accessSync: function(path) {
+                    var res = __fsAccessSync(path);
+                    if (res.error) throw new Error(res.error);
+                },
+                chmodSync: function(path, mode) {
+                    var res = __fsChmodSync(path, mode || 0);
+                    if (res.error) throw new Error(res.error);
+                },
                 chownSync: function() {},
                 copyFileSync: function(src, dest) {
                     var data = fs.readFileSync(src);
@@ -244,6 +280,53 @@ enum NodeFS {
                         return new Promise(function(resolve, reject) {
                             try { fs.renameSync(oldPath, newPath); resolve(); }
                             catch(e) { reject(e); }
+                        });
+                    },
+                    realpath: function(path) {
+                        return new Promise(function(resolve, reject) {
+                            try { resolve(fs.realpathSync(path)); }
+                            catch(e) { reject(e); }
+                        });
+                    },
+                    chmod: function(path, mode) {
+                        return new Promise(function(resolve, reject) {
+                            try { fs.chmodSync(path, mode); resolve(); }
+                            catch(e) { reject(e); }
+                        });
+                    },
+                    lstat: function(path) {
+                        return new Promise(function(resolve, reject) {
+                            try { resolve(fs.statSync(path)); }
+                            catch(e) { reject(e); }
+                        });
+                    },
+                    rm: function(path) {
+                        return new Promise(function(resolve, reject) {
+                            try { fs.unlinkSync(path); resolve(); }
+                            catch(e) { reject(e); }
+                        });
+                    },
+                    copyFile: function(src, dest) {
+                        return new Promise(function(resolve, reject) {
+                            try { fs.copyFileSync(src, dest); resolve(); }
+                            catch(e) { reject(e); }
+                        });
+                    },
+                    open: function(path, flags) {
+                        return new Promise(function(resolve, reject) {
+                            // Return a minimal file handle stub
+                            try {
+                                var exists = fs.existsSync(path);
+                                resolve({
+                                    read: function() { return Promise.resolve({ bytesRead: 0, buffer: new Uint8Array(0) }); },
+                                    write: function(data) {
+                                        fs.writeFileSync(path, typeof data === 'string' ? data : String(data));
+                                        return Promise.resolve({ bytesWritten: data.length });
+                                    },
+                                    close: function() { return Promise.resolve(); },
+                                    stat: function() { return Promise.resolve(fs.statSync(path)); },
+                                });
+                            } catch(e) { reject(e); }
                         });
                     },
                 },

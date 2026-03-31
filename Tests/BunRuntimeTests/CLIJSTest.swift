@@ -75,32 +75,63 @@ struct CLIJSTest {
 
         let p = BunProcess(
             bundle: URL(fileURLWithPath: path),
-            arguments: ["-p", "--input-format", "stream-json"],
+            arguments: ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"],
             cwd: NSHomeDirectory(),
             environment: ["HOME": NSHomeDirectory()]
         )
 
-        // Run and wait for completion (it will exit quickly if broken)
-        let code = try await p.run()
-
-        // Consume output AFTER run() completes — buffered items are still readable
-        var logs: [String] = []
-        for await line in p.output {
-            logs.append(line)
+        // Collect output in background
+        final class LogCollector: Sendable {
+            private let storage = Mutex<[String]>([])
+            func append(_ s: String) { storage.withLock { $0.append(s) } }
+            var values: [String] { storage.withLock { $0 } }
         }
+        let logs = LogCollector()
+        let stdoutLogs = LogCollector()
+
+        let outputTask = Task { [logs] in
+            for await line in p.output { logs.append(line) }
+        }
+        let stdoutTask = Task { [stdoutLogs] in
+            for await line in p.stdout { stdoutLogs.append(line) }
+        }
+
+        // Run in background
+        let runTask = Task { try await p.run() }
+
+        // Wait for cli.js to initialize
+        try await Task.sleep(for: .seconds(3))
+
+        // cli.js should still be running (waiting for stdin)
+        // Terminate and collect results
+        p.terminate(exitCode: 0)
+        let code = try await runTask.value
+        outputTask.cancel()
+        stdoutTask.cancel()
+
+        let allLogs = logs.values
+        let allStdout = stdoutLogs.values
 
         print("\n=== CLI JS Lifecycle Summary ===")
         print("Exit code: \(code)")
-        print("Total log lines: \(logs.count)")
-        for log in logs.filter({ $0.hasPrefix("[bun:") }) {
+        print("Output lines: \(allLogs.count)")
+        print("Stdout lines: \(allStdout.count)")
+        for log in allLogs.prefix(30) {
             print("  \(log)")
         }
+        if !allStdout.isEmpty {
+            print("--- stdout ---")
+            for line in allStdout.prefix(10) {
+                print("  \(String(line.prefix(200)))")
+            }
+        }
 
-        let exitedEarly = logs.contains { $0.contains("checkExitCondition → exiting") }
-        let hasStdinRef = logs.contains { $0.contains("ref(stdin)") }
+        let exitedEarly = allLogs.contains { $0.contains("checkExitCondition → exiting") }
+        let hasStdinRef = allLogs.contains { $0.contains("ref(stdin)") }
         print("Has stdin ref: \(hasStdinRef)")
         print("Exited early: \(exitedEarly)")
 
+        // cli.js should NOT have exited on its own — we terminated it
         #expect(!exitedEarly, "cli.js exited early via checkExitCondition")
     }
 
