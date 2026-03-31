@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Synchronization
 @preconcurrency import JavaScriptCore
 @testable import BunRuntime
 
@@ -66,6 +67,52 @@ struct CLIJSTest {
         let head = String(result.prefix(600))
         #expect(head.contains("var{createRequire"))
         #expect(!head.contains("import{createRequire"))
+    }
+
+    @Test func cliJSLifecycle() async throws {
+        let path = NSHomeDirectory() + "/Library/Caches/claude-code/package/cli.js"
+        guard FileManager.default.fileExists(atPath: path) else { return }
+
+        let p = BunProcess(
+            bundle: URL(fileURLWithPath: path),
+            arguments: ["-p", "--input-format", "stream-json"],
+            cwd: NSHomeDirectory(),
+            environment: ["HOME": NSHomeDirectory()]
+        )
+
+        final class LogCollector: Sendable {
+            private let storage = Mutex<[String]>([])
+            func append(_ s: String) { storage.withLock { $0.append(s) } }
+            var values: [String] { storage.withLock { $0 } }
+        }
+        let logs = LogCollector()
+
+        let logTask = Task { [logs] in
+            for await line in p.output {
+                logs.append(line)
+                if line.hasPrefix("[bun:lifecycle]") { print(line) }
+            }
+        }
+
+        let runTask = Task { try await p.run() }
+
+        try await Task.sleep(for: .seconds(5))
+        p.terminate(exitCode: 0)
+        let code = try await runTask.value
+        logTask.cancel()
+
+        let all = logs.values
+        let exitedEarly = all.contains { $0.contains("checkExitCondition → exiting") }
+        let hasStdinRef = all.contains { $0.contains("ref(stdin)") }
+        let lifecycleCount = all.filter { $0.hasPrefix("[bun:lifecycle]") }.count
+
+        print("\n=== CLI JS Lifecycle Summary ===")
+        print("Exit code: \(code)")
+        print("Lifecycle events: \(lifecycleCount)")
+        print("Has stdin ref: \(hasStdinRef)")
+        print("Exited early: \(exitedEarly)")
+
+        #expect(!exitedEarly, "cli.js exited early via checkExitCondition")
     }
 
     @Test func noRemainingStaticImports() throws {

@@ -1,12 +1,12 @@
 import Testing
 import Foundation
+import Synchronization
 @testable import BunRuntime
 
-private final class LinesCollector: @unchecked Sendable {
-    private var storage: [String] = []
-    private let lock = NSLock()
-    func append(_ line: String) { lock.lock(); storage.append(line); lock.unlock() }
-    var values: [String] { lock.lock(); defer { lock.unlock() }; return storage }
+private final class LinesCollector: Sendable {
+    private let storage = Mutex<[String]>([])
+    func append(_ line: String) { storage.withLock { $0.append(line) } }
+    var values: [String] { storage.withLock { $0 } }
 }
 
 private func tempBundle(_ js: String) throws -> URL {
