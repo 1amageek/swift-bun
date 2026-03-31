@@ -2,8 +2,6 @@
 
 A Swift package that runs Bun-built JavaScript bundles natively on iOS and macOS via JavaScriptCore.
 
-Bun でビルドされた JS バンドルを iOS/macOS 上でネイティブ実行するための Swift ランタイムです。
-
 ## Overview
 
 swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, enabling JavaScript code bundled with Bun (or esbuild) to execute on Apple platforms without embedding a full Node.js runtime.
