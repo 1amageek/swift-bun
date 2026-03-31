@@ -259,20 +259,30 @@ struct BunProcessTests {
         #expect(try await task.value == 0)
     }
 
-    @Test func stdinUnrefOnEnd() async throws {
-        // After 'end' is emitted, stdin is no longer an active handle.
-        // If there's no other pending work, the process should exit naturally.
+    @Test func stdinUnrefOnEndWithListener() async throws {
         let url = try tempBundle("""
             process.stdin.on('data', function() {});
-            process.stdin.on('end', function() {
-                // After end, no more active handles → natural exit with code 0
-            });
+            process.stdin.on('end', function() {});
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
         let task = Task { try await p.run() }
         try await Task.sleep(for: .milliseconds(50))
-        p.sendInput(nil) // EOF
+        p.sendInput(nil)
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinUnrefOnEndWithoutListener() async throws {
+        // Even without an 'end' listener, emit('end') must still unref stdin.
+        let url = try tempBundle("""
+            process.stdin.on('data', function() {});
+            // No 'end' listener registered
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput(nil)
         #expect(try await task.value == 0)
     }
 

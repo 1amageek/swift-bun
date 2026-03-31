@@ -617,17 +617,21 @@ public final class BunProcess: Sendable {
             };
             stdin.off = stdin.removeListener;
             stdin.emit = function(event) {
-                if (!stdin._events[event]) return false;
-                var args = Array.prototype.slice.call(arguments, 1);
-                var listeners = stdin._events[event].slice();
-                for (var i = 0; i < listeners.length; i++) {
-                    listeners[i].apply(stdin, args);
+                var hasListeners = stdin._events[event] && stdin._events[event].length > 0;
+                if (hasListeners) {
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    var listeners = stdin._events[event].slice();
+                    for (var i = 0; i < listeners.length; i++) {
+                        listeners[i].apply(stdin, args);
+                    }
                 }
+                // Unref on 'end' regardless of whether there were end listeners.
+                // stdin is no longer an active handle after EOF.
                 if (event === 'end' && stdin._refed) {
                     stdin._refed = false;
                     __stdinUnref();
                 }
-                return true;
+                return hasListeners;
             };
         })();
         """)
