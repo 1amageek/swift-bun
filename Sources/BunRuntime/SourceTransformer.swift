@@ -194,9 +194,10 @@ enum SourceTransformer {
 
         guard let (moduleName, afterModule) = matchQuotedString(chars, at: j) else { return nil }
         j = afterModule
-        if j < count && chars[j] == ";" { j += 1 }
+        let semi = j < count && chars[j] == ";"
+        if semi { j += 1 }
 
-        return (Array("var{\(transformed)}=require(\"\(moduleName)\")"), j)
+        return (Array("var{\(transformed)}=require(\"\(moduleName)\")\(semi ? ";" : "")"), j)
     }
 
     private static func transformNamespaceImport(
@@ -224,9 +225,10 @@ enum SourceTransformer {
 
         guard let (moduleName, afterModule) = matchQuotedString(chars, at: j) else { return nil }
         j = afterModule
-        if j < count && chars[j] == ";" { j += 1 }
+        let semi1 = j < count && chars[j] == ";"
+        if semi1 { j += 1 }
 
-        return (Array("var \(ident)=require(\"\(moduleName)\")"), j)
+        return (Array("var \(ident)=require(\"\(moduleName)\")\(semi1 ? ";" : "")"), j)
     }
 
     private static func transformDefaultImport(
@@ -244,9 +246,10 @@ enum SourceTransformer {
 
         guard let (moduleName, afterModule) = matchQuotedString(chars, at: j) else { return nil }
         j = afterModule
-        if j < count && chars[j] == ";" { j += 1 }
+        let semi2 = j < count && chars[j] == ";"
+        if semi2 { j += 1 }
 
-        return (Array("var \(ident)=require(\"\(moduleName)\")"), j)
+        return (Array("var \(ident)=require(\"\(moduleName)\")\(semi2 ? ";" : "")"), j)
     }
 
     private static func transformSideEffectImport(
@@ -257,9 +260,10 @@ enum SourceTransformer {
 
         guard let (moduleName, afterModule) = matchQuotedString(chars, at: j) else { return nil }
         j = afterModule
-        if j < chars.count && chars[j] == ";" { j += 1 }
+        let semi3 = j < chars.count && chars[j] == ";"
+        if semi3 { j += 1 }
 
-        return (Array("require(\"\(moduleName)\")"), j)
+        return (Array("require(\"\(moduleName)\")\(semi3 ? ";" : "")"), j)
     }
 
     // MARK: - Dynamic import assertions

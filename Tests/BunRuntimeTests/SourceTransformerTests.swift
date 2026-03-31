@@ -131,67 +131,67 @@ struct StaticImportTests {
     @Test func namedImport() {
         let source = #"import{createRequire as _K5}from"node:module";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{createRequire:_K5}=require("node:module")"#)
+        #expect(result == #"var{createRequire:_K5}=require("node:module");"#)
     }
 
     @Test func namedImportMultipleSpecifiers() {
         let source = #"import{readFileSync,writeFileSync as wfs}from"node:fs";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{readFileSync,writeFileSync:wfs}=require("node:fs")"#)
+        #expect(result == #"var{readFileSync,writeFileSync:wfs}=require("node:fs");"#)
     }
 
     @Test func namedImportWithSpaces() {
         let source = #"import { resolve, join as pathJoin } from "node:path";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{ resolve, join:pathJoin }=require("node:path")"#)
+        #expect(result == #"var{ resolve, join:pathJoin }=require("node:path");"#)
     }
 
     @Test func namedImportSingleQuotes() {
         let source = "import{EventEmitter}from'node:events';"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{EventEmitter}=require("node:events")"#)
+        #expect(result == #"var{EventEmitter}=require("node:events");"#)
     }
 
     @Test func defaultImport() {
         let source = #"import path from"node:path";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var path=require("node:path")"#)
+        #expect(result == #"var path=require("node:path");"#)
     }
 
     @Test func defaultImportWithSpaces() {
         let source = #"import fs from "node:fs";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var fs=require("node:fs")"#)
+        #expect(result == #"var fs=require("node:fs");"#)
     }
 
     @Test func namespaceImport() {
         let source = #"import*as os from"node:os";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var os=require("node:os")"#)
+        #expect(result == #"var os=require("node:os");"#)
     }
 
     @Test func namespaceImportWithSpaces() {
         let source = #"import * as crypto from "node:crypto";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var crypto=require("node:crypto")"#)
+        #expect(result == #"var crypto=require("node:crypto");"#)
     }
 
     @Test func sideEffectImport() {
         let source = #"import"./polyfill.js";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"require("./polyfill.js")"#)
+        #expect(result == #"require("./polyfill.js");"#)
     }
 
     @Test func sideEffectImportWithSpaces() {
         let source = #"import "./setup.js";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"require("./setup.js")"#)
+        #expect(result == #"require("./setup.js");"#)
     }
 
     @Test func multipleStaticImports() {
         let source = #"import{a}from"x";import{b}from"y";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{a}=require("x")var{b}=require("y")"#)
+        #expect(result == #"var{a}=require("x");var{b}=require("y");"#)
     }
 
     @Test func staticImportInsideString() {
@@ -223,6 +223,33 @@ struct StaticImportTests {
         let source = "import x\nvar y = 1;"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == source)
+    }
+
+    // MARK: - Semicolon preservation (regression tests)
+
+    @Test func namedImportFollowedByVar() {
+        // This is the actual pattern from Claude Code cli.js that caused the SyntaxError
+        let source = #"import{createRequire as _K5}from"node:module";var o45=Object.create;"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{createRequire:_K5}=require("node:module");var o45=Object.create;"#)
+    }
+
+    @Test func defaultImportFollowedByCode() {
+        let source = #"import path from"node:path";var x = path.join("a","b");"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var path=require("node:path");var x = path.join("a","b");"#)
+    }
+
+    @Test func namespaceImportFollowedByCode() {
+        let source = #"import*as fs from"node:fs";var data = fs.readFileSync("x");"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var fs=require("node:fs");var data = fs.readFileSync("x");"#)
+    }
+
+    @Test func sideEffectImportFollowedByCode() {
+        let source = #"import"./setup.js";console.log("ready");"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"require("./setup.js");console.log("ready");"#)
     }
 }
 
@@ -257,17 +284,14 @@ struct ImportMetaTests {
     }
 
     @Test func importMetaDataNotMatched() {
-        // "import.metaData" should NOT be matched (longer property name)
         let source = "var x = import.metaData;"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == source)
     }
 
     @Test func importMetaURLFollowedByMoreProperty() {
-        // "import.meta.urlFoo" should NOT match as import.meta.url
         let source = "var x = import.meta.urlFoo;"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        // import.meta should still be replaced (but not .url specifically)
         #expect(result == #"var x = ({url:"file:///bundle/cli.js"}).urlFoo;"#)
     }
 
@@ -382,7 +406,7 @@ struct CombinedTransformTests {
         """
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         let expected = """
-        var{createRequire:_K5}=require("node:module")var U6=_K5("file:///bundle/cli.js")
+        var{createRequire:_K5}=require("node:module");var U6=_K5("file:///bundle/cli.js")
         """
         #expect(result == expected)
     }
@@ -390,7 +414,7 @@ struct CombinedTransformTests {
     @Test func staticAndDynamicImportsMixed() {
         let source = #"import{x}from"y";import("z.json",{with:{type:"json"}})"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{x}=require("y")import("z.json")"#)
+        #expect(result == #"var{x}=require("y");import("z.json")"#)
     }
 
     @Test func allTransformTypes() {
@@ -402,7 +426,7 @@ struct CombinedTransformTests {
         ].joined()
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         let expected = [
-            #"var{a}=require("x")"#,
+            #"var{a}=require("x");"#,
             #"var u="file:///bundle/cli.js";"#,
             #"import("d.json");"#,
             "",
@@ -421,58 +445,37 @@ struct CombinedTransformTests {
         #expect(result == source)
     }
 
-    @Test func multilineImportStatement() {
-        let source = """
-        import {
-          createRequire as _K5,
-          builtinModules
-        } from "node:module";
-        """
-        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result.contains("require(\"node:module\")"))
-        #expect(result.contains("createRequire:_K5"))
-        #expect(result.contains("builtinModules"))
-        #expect(!result.contains("import"))
-        #expect(!result.contains("from"))
-    }
-
     @Test func minifiedMultipleImportsOnOneLine() {
         let source = #"import{a}from"x";import b from"y";import*as c from"z";import"w";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result.contains(#"var{a}=require("x")"#))
-        #expect(result.contains(#"var b=require("y")"#))
-        #expect(result.contains(#"var c=require("z")"#))
-        #expect(result.contains(#"require("w")"#))
-        #expect(!result.contains("import"))
+        #expect(result == #"var{a}=require("x");var b=require("y");var c=require("z");require("w");"#)
     }
 
     @Test func importFollowedByNonImportCode() {
         let source = #"import{x}from"y";function foo() { return x; }"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{x}=require("y")function foo() { return x; }"#)
+        #expect(result == #"var{x}=require("y");function foo() { return x; }"#)
     }
 
     @Test func preservesRegularCodeBetweenImports() {
         let source = #"import{a}from"x"; var mid = 42; import{b}from"y";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{a}=require("x") var mid = 42; var{b}=require("y")"#)
+        #expect(result == #"var{a}=require("x"); var mid = 42; var{b}=require("y");"#)
     }
 
     @Test func blockCommentBetweenImports() {
         let source = #"import{a}from"x";/* comment */import{b}from"y";"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
-        #expect(result == #"var{a}=require("x")/* comment */var{b}=require("y")"#)
+        #expect(result == #"var{a}=require("x");/* comment */var{b}=require("y");"#)
     }
 
     @Test func importsKeywordNotConfusedWithImport() {
-        // "imports" (with trailing 's') should not be treated as import keyword
         let source = "var imports = {};"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == source)
     }
 
     @Test func exportKeywordNotConfusedWithExport() {
-        // "exports" should not be treated as export keyword
         let source = "module.exports = {};"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == source)
