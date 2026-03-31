@@ -770,13 +770,13 @@ public final class BunProcess: Sendable {
 
     private func deliverStdin(_ data: Data?) {
         eventLoop.preconditionInEventLoop()
-        guard let ctx = jsContext, let stdin = stdinValue else { return }
+        guard let stdin = stdinValue else { return }
         if let data {
             let str = String(data: data, encoding: .utf8) ?? ""
-            // Push to buffer first, then emit events (readable handlers call read())
-            ctx.evaluateScript("process.stdin._buffer.push('\(escapeJS(str))')")
-            stdin.invokeMethod("emit", withArguments: ["readable"])
+            // emit('data') handles buffer push, async iterator wakeup, and listener dispatch
             stdin.invokeMethod("emit", withArguments: ["data", str])
+            // emit('readable') after data so read() can pull from buffer
+            stdin.invokeMethod("emit", withArguments: ["readable"])
         } else {
             stdin.invokeMethod("emit", withArguments: ["end"])
         }
