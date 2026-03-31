@@ -67,7 +67,26 @@ BunProcess (final class, Sendable)
 Two modes, mutually exclusive per instance:
 
 - **Library mode**: `load(bundle:)` + `evaluate(js:)` / `call()` — for using JS libraries from Swift
-- **Process mode**: `run(bundle:)` — for long-lived applications (timers, fetch, stdin keep the process alive)
+- **Process mode**: `run(bundle:arguments:cwd:environment:)` — for long-lived applications (timers, fetch, stdin keep the process alive)
+
+### Streams: stdout vs output
+
+Two separate `AsyncStream<String>` channels:
+
+- **`stdout`** — `process.stdout.write()` output. Application data channel (e.g. NDJSON protocol messages from cli.js). Consumed by the caller to parse protocol data.
+- **`output`** — `console.log/error/warn` output. Diagnostic channel with level prefixes (`[log] ...`, `[error] ...`). For debugging/logging.
+
+These are intentionally separate: `process.stdout.write()` is the protocol data pipe, `console.log()` is diagnostics. Mixing them would break protocol parsers.
+
+### process.argv and process.cwd
+
+`run(bundle:arguments:cwd:)` automatically constructs `process.argv`:
+
+```
+process.argv = ["node", bundlePath, ...arguments]
+```
+
+The caller passes only the user arguments (e.g. `["-p", "--input-format", "stream-json"]`). BunProcess prepends `["node", bundlePath]` to match Node.js conventions.
 
 ### ESM transformation
 

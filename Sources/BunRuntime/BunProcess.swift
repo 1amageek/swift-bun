@@ -22,7 +22,11 @@ import NIOPosix
 ///
 /// ```swift
 /// let process = BunProcess()
-/// let exitCode = try await process.run(bundle: cliJS)
+/// let exitCode = try await process.run(
+///     bundle: cliJS,
+///     arguments: ["-p", "--input-format", "stream-json"],
+///     cwd: "/path/to/project"
+/// )
 /// ```
 ///
 /// `load()` and `run()` are mutually exclusive on a single instance.
@@ -47,20 +51,33 @@ public final class BunProcess: Sendable {
         case running  // process mode
     }
 
-    /// Stream of output lines from JS (console.log, console.error, etc.).
-    /// Finishes when the process exits or is terminated.
+    /// Stream of data written to `process.stdout.write()` from JS.
+    ///
+    /// This is the application data channel (e.g. NDJSON protocol messages).
+    /// Separate from `output` which carries diagnostic console messages.
+    public let stdout: AsyncStream<String>
+    private let stdoutContinuation: AsyncStream<String>.Continuation
+
+    /// Stream of diagnostic output from JS (console.log, console.error, etc.).
+    ///
+    /// Carries log-level-prefixed lines like `"[log] hello"`, `"[error] bad"`.
+    /// Separate from `stdout` which carries application protocol data.
     public let output: AsyncStream<String>
     private let outputContinuation: AsyncStream<String>.Continuation
 
     public init() {
-        let (stream, continuation) = AsyncStream<String>.makeStream()
-        self.output = stream
-        self.outputContinuation = continuation
+        let (stdoutStream, stdoutCont) = AsyncStream<String>.makeStream()
+        self.stdout = stdoutStream
+        self.stdoutContinuation = stdoutCont
+        let (outputStream, outputCont) = AsyncStream<String>.makeStream()
+        self.output = outputStream
+        self.outputContinuation = outputCont
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.eventLoop = eventLoopGroup.next()
     }
 
     deinit {
+        stdoutContinuation.finish()
         outputContinuation.finish()
         try? eventLoopGroup.syncShutdownGracefully()
     }
@@ -74,7 +91,12 @@ public final class BunProcess: Sendable {
     public func load(bundle url: URL, environment: [String: String] = [:]) async throws {
         try await eventLoop.submit {
             precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
-            try self.setupContext(bundle: url, environment: environment)
+            try self.setupContext(
+                bundle: url,
+                arguments: [],
+                cwd: nil,
+                environment: environment
+            )
             self.state = .loaded
         }.get()
     }
@@ -128,8 +150,18 @@ public final class BunProcess: Sendable {
     ///
     /// Returns when `process.exit(code)` is called or all pending work completes.
     /// Cannot be combined with `load()` on the same instance.
+    ///
+    /// - Parameters:
+    ///   - url: Path to the bundled JavaScript file.
+    ///   - arguments: Command-line arguments (excluding node/script path).
+    ///     `process.argv` is set to `["node", bundlePath, ...arguments]`.
+    ///   - cwd: Working directory for `process.cwd()`. Defaults to the current directory.
+    ///   - environment: Environment variables for `process.env`.
+    /// - Returns: The exit code.
     public func run(
         bundle url: URL,
+        arguments: [String] = [],
+        cwd: String? = nil,
         environment: [String: String] = [:]
     ) async throws -> Int32 {
         let promise = eventLoop.makePromise(of: Int32.self)
@@ -139,7 +171,12 @@ public final class BunProcess: Sendable {
                 precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
                 self.exitPromise = promise
                 self.state = .running
-                try self.setupContext(bundle: url, environment: environment)
+                try self.setupContext(
+                    bundle: url,
+                    arguments: arguments,
+                    cwd: cwd,
+                    environment: environment
+                )
                 self.checkExitCondition()
             } catch {
                 self.state = .idle
@@ -177,6 +214,7 @@ public final class BunProcess: Sendable {
 
         ESMResolver.installModules(in: ctx)
         installConsoleBridge(in: ctx)
+        installStdoutBridge(in: ctx)
         installTimerBridge(in: ctx)
         installFetchBridge(in: ctx)
         installProcessExitBridge(in: ctx)
@@ -185,7 +223,12 @@ public final class BunProcess: Sendable {
         ESMResolver.installRequire(in: ctx)
     }
 
-    private func setupContext(bundle url: URL, environment: [String: String]) throws {
+    private func setupContext(
+        bundle url: URL,
+        arguments: [String],
+        cwd: String?,
+        environment: [String: String]
+    ) throws {
         eventLoop.preconditionInEventLoop()
 
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -197,18 +240,31 @@ public final class BunProcess: Sendable {
 
         try setupBareContext()
 
-        if let ctx = jsContext {
-            for (key, value) in environment {
-                ctx.evaluateScript("process.env['\(escapeJS(key))'] = '\(escapeJS(value))';")
-            }
+        guard let ctx = jsContext else { return }
 
-            ctx.evaluateScript(source, withSourceURL: url)
-            if let exception = ctx.exception {
-                let message = exception.toString() ?? ""
-                ctx.exception = nil
-                if !isProcessExitSentinel(exception) {
-                    throw BunRuntimeError.javaScriptException(message)
-                }
+        // Set process.argv: ["node", bundlePath, ...arguments]
+        let argvElements = (["node", url.path] + arguments)
+            .map { "'\(escapeJS($0))'" }
+            .joined(separator: ",")
+        ctx.evaluateScript("process.argv = [\(argvElements)];")
+
+        // Set process.cwd
+        if let cwd {
+            ctx.evaluateScript("process.cwd = function() { return '\(escapeJS(cwd))'; };")
+        }
+
+        // Set environment variables
+        for (key, value) in environment {
+            ctx.evaluateScript("process.env['\(escapeJS(key))'] = '\(escapeJS(value))';")
+        }
+
+        // Evaluate the bundle
+        ctx.evaluateScript(source, withSourceURL: url)
+        if let exception = ctx.exception {
+            let message = exception.toString() ?? ""
+            ctx.exception = nil
+            if !isProcessExitSentinel(exception) {
+                throw BunRuntimeError.javaScriptException(message)
             }
         }
     }
@@ -247,6 +303,7 @@ public final class BunProcess: Sendable {
         guard let promise = exitPromise else { return }
         state = .idle
         exitPromise = nil
+        stdoutContinuation.finish()
         outputContinuation.finish()
         promise.succeed(code)
     }
@@ -266,13 +323,36 @@ public final class BunProcess: Sendable {
         }
     }
 
-    // MARK: - Console Bridge
+    // MARK: - Console Bridge (diagnostics → output stream)
 
     private func installConsoleBridge(in ctx: JSContext) {
         let logBlock: @convention(block) (String, String) -> Void = { [outputContinuation] level, message in
             outputContinuation.yield("[\(level)] \(message)")
         }
         ctx.setObject(logBlock, forKeyedSubscript: "__nativeLog" as NSString)
+    }
+
+    // MARK: - stdout Bridge (application data → stdout stream)
+
+    private func installStdoutBridge(in ctx: JSContext) {
+        let writeBlock: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
+            stdoutContinuation.yield(data)
+            return true
+        }
+        ctx.setObject(writeBlock, forKeyedSubscript: "__nativeStdoutWrite" as NSString)
+
+        ctx.evaluateScript("""
+        process.stdout = {
+            write: function(s) { return __nativeStdoutWrite(String(s)); },
+            isTTY: false,
+            columns: 80,
+            rows: 24,
+            on: function() { return this; },
+            once: function() { return this; },
+            emit: function() { return false; },
+            end: function() {},
+        };
+        """)
     }
 
     // MARK: - Timer Bridge

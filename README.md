@@ -69,9 +69,13 @@ print(greeting.stringValue) // "Hello, World!"
 let process = BunProcess()
 let exitCode = try await process.run(
     bundle: cliBundle,
+    arguments: ["-p", "--input-format", "stream-json"],
+    cwd: "/path/to/project",
     environment: ["API_KEY": "sk-ant-..."]
 )
 // Blocks until process.exit() is called or all pending work completes
+// process.argv = ["node", bundlePath, "-p", "--input-format", "stream-json"]
+// process.cwd() = "/path/to/project"
 ```
 
 ### Sending stdin input
@@ -88,19 +92,29 @@ process.sendInput(nil) // EOF
 let exitCode = try await task.value
 ```
 
-### Reading console output
+### Reading stdout (application data) and console output (diagnostics)
 
 ```swift
 let process = BunProcess()
 
+// stdout: application protocol data (e.g. NDJSON from cli.js)
+Task {
+    for await data in process.stdout {
+        let event = parseNDJSON(data)
+    }
+}
+
+// output: diagnostic console messages
 Task {
     for await line in process.output {
-        print(line) // "[log] hello world", "[error] something failed", etc.
+        print(line) // "[log] hello world", "[error] something failed"
     }
 }
 
 try await process.run(bundle: myApp)
 ```
+
+`process.stdout.write()` in JS writes to the `stdout` stream. `console.log/error` writes to the `output` stream. They are separate channels.
 
 ### Environment variables
 
@@ -178,7 +192,8 @@ Both ESM and CJS bundles are supported. ESM bundles are automatically transforme
 │     .load(bundle:) / .run(bundle:)          │
 │     .evaluate(js:) → JSResult               │
 │     .call(name, args) → JSResult            │
-│     .output → AsyncStream<String>           │
+│     .stdout → AsyncStream<String> (data)     │
+│     .output → AsyncStream<String> (console) │
 │     .sendInput(data)                        │
 │        ↓                                    │
 │   ┌─────────────────────────────────────┐   │

@@ -270,6 +270,90 @@ struct BunProcessTests {
         #expect(lines.values.contains("[error] bad"))
     }
 
+    // MARK: - stdout (separate from console output)
+
+    @Test func stdoutWrite() async throws {
+        let p = BunProcess()
+        let url = try tempBundle("""
+            process.stdout.write('line1\\n');
+            process.stdout.write('line2\\n');
+            process.exit(0);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let lines = LinesCollector()
+        let collect = Task { [lines] in
+            for await line in p.stdout { lines.append(line) }
+        }
+        _ = try await p.run(bundle: url)
+        collect.cancel()
+
+        #expect(lines.values.contains("line1\n"))
+        #expect(lines.values.contains("line2\n"))
+    }
+
+    @Test func stdoutSeparateFromConsole() async throws {
+        let p = BunProcess()
+        let url = try tempBundle("""
+            process.stdout.write('PROTOCOL_DATA\\n');
+            console.log('debug info');
+            process.exit(0);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let stdoutLines = LinesCollector()
+        let outputLines = LinesCollector()
+        let collectStdout = Task { [stdoutLines] in
+            for await line in p.stdout { stdoutLines.append(line) }
+        }
+        let collectOutput = Task { [outputLines] in
+            for await line in p.output { outputLines.append(line) }
+        }
+        _ = try await p.run(bundle: url)
+        collectStdout.cancel()
+        collectOutput.cancel()
+
+        // stdout gets protocol data only
+        #expect(stdoutLines.values.contains("PROTOCOL_DATA\n"))
+        #expect(!stdoutLines.values.contains { $0.contains("debug info") })
+
+        // output gets console only
+        #expect(outputLines.values.contains("[log] debug info"))
+        #expect(!outputLines.values.contains { $0.contains("PROTOCOL_DATA") })
+    }
+
+    // MARK: - argv and cwd
+
+    @Test func processArgv() async throws {
+        let p = BunProcess()
+        let url = try tempBundle("""
+            var ok = process.argv[0] === 'node' &&
+                     process.argv[2] === '-p' &&
+                     process.argv[3] === '--verbose';
+            process.exit(ok ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await p.run(bundle: url, arguments: ["-p", "--verbose"]) == 0)
+    }
+
+    @Test func processArgvIncludesBundlePath() async throws {
+        let p = BunProcess()
+        let url = try tempBundle("""
+            process.exit(process.argv[1].endsWith('.js') ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await p.run(bundle: url) == 0)
+    }
+
+    @Test func processCwd() async throws {
+        let p = BunProcess()
+        let url = try tempBundle("""
+            process.exit(process.cwd() === '/tmp/test' ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await p.run(bundle: url, cwd: "/tmp/test") == 0)
+    }
+
     // MARK: - Library mode
 
     @Test func loadAndEval() async throws {
