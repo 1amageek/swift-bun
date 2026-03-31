@@ -10,33 +10,45 @@ import NIOPosix
 /// and stdin delivery — enabling both library-style function calls and
 /// long-running process execution.
 ///
-/// ## Library mode
-///
-/// ```swift
-/// let process = BunProcess()
-/// try await process.load(bundle: myLib)
-/// let result = try await process.evaluate(js: "myFunction()")
-/// ```
+/// Configuration is provided at initialization. `load()` and `run()` are
+/// mutually exclusive on a single instance.
 ///
 /// ## Process mode
 ///
 /// ```swift
-/// let process = BunProcess()
-/// let exitCode = try await process.run(
+/// let process = BunProcess(
 ///     bundle: cliJS,
 ///     arguments: ["-p", "--input-format", "stream-json"],
-///     cwd: "/path/to/project"
+///     cwd: "/path/to/project",
+///     environment: ["HOME": NSHomeDirectory()]
 /// )
+/// Task { for await data in process.stdout { parse(data) } }
+/// let exitCode = try await process.run()
 /// ```
 ///
-/// `load()` and `run()` are mutually exclusive on a single instance.
+/// ## Library mode
+///
+/// ```swift
+/// let runtime = BunProcess(bundle: myLib)
+/// try await runtime.load()
+/// let result = try await runtime.evaluate(js: "myFunction()")
+/// ```
 public final class BunProcess: Sendable {
+
+    // MARK: - Configuration (immutable, set at init)
+
+    private let bundle: URL?
+    private let arguments: [String]
+    private let cwd: String?
+    private let environment: [String: String]
+
+    // MARK: - EventLoop
 
     private let eventLoopGroup: MultiThreadedEventLoopGroup
     private let eventLoop: EventLoop
 
-    // All fields below are accessed exclusively on the EventLoop thread.
-    // preconditionInEventLoop() guards every access point.
+    // MARK: - EventLoop-thread state
+
     private nonisolated(unsafe) var jsContext: JSContext?
     private nonisolated(unsafe) var refCount: Int = 0
     private nonisolated(unsafe) var exitPromise: EventLoopPromise<Int32>?
@@ -47,31 +59,49 @@ public final class BunProcess: Sendable {
 
     private enum State {
         case idle
-        case loaded   // library mode
-        case running  // process mode
+        case loaded
+        case running
     }
 
-    /// Stream of data written to `process.stdout.write()` from JS.
-    ///
-    /// This is the application data channel (e.g. NDJSON protocol messages).
-    /// Separate from `output` which carries diagnostic console messages.
+    // MARK: - Streams
+
+    /// Data written to `process.stdout.write()` from JS.
+    /// Application data channel (e.g. NDJSON protocol messages).
     public let stdout: AsyncStream<String>
     private let stdoutContinuation: AsyncStream<String>.Continuation
 
-    /// Stream of diagnostic output from JS (console.log, console.error, etc.).
-    ///
-    /// Carries log-level-prefixed lines like `"[log] hello"`, `"[error] bad"`.
-    /// Separate from `stdout` which carries application protocol data.
+    /// Diagnostic output from JS (`console.log`, `console.error`, etc.).
     public let output: AsyncStream<String>
     private let outputContinuation: AsyncStream<String>.Continuation
 
-    public init() {
+    // MARK: - Init
+
+    /// Create a JavaScript process with the given configuration.
+    ///
+    /// - Parameters:
+    ///   - bundle: URL to the `.js` bundle file. Required for `run()`, optional for `load()`.
+    ///   - arguments: Command-line arguments (excluding node/script path).
+    ///     `process.argv` is set to `["node", bundlePath, ...arguments]`.
+    ///   - cwd: Working directory for `process.cwd()`. Defaults to `"/"`.
+    ///   - environment: Environment variables for `process.env`.
+    public init(
+        bundle: URL? = nil,
+        arguments: [String] = [],
+        cwd: String? = nil,
+        environment: [String: String] = [:]
+    ) {
+        self.bundle = bundle
+        self.arguments = arguments
+        self.cwd = cwd
+        self.environment = environment
+
         let (stdoutStream, stdoutCont) = AsyncStream<String>.makeStream()
         self.stdout = stdoutStream
         self.stdoutContinuation = stdoutCont
         let (outputStream, outputCont) = AsyncStream<String>.makeStream()
         self.output = outputStream
         self.outputContinuation = outputCont
+
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.eventLoop = eventLoopGroup.next()
     }
@@ -84,37 +114,19 @@ public final class BunProcess: Sendable {
 
     // MARK: - Public API
 
-    /// Load a JavaScript bundle for library-style usage.
+    /// Load the bundle for library-style usage.
     ///
-    /// After loading, call `evaluate(js:)` to execute code.
-    /// Cannot be combined with `run()` on the same instance.
-    public func load(bundle url: URL, environment: [String: String] = [:]) async throws {
+    /// If no bundle was specified at init, creates a bare context with polyfills.
+    /// After loading, call `evaluate(js:)` or `call()` to execute code.
+    public func load() async throws {
         try await eventLoop.submit {
             precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
-            try self.setupContext(
-                bundle: url,
-                arguments: [],
-                cwd: nil,
-                environment: environment
-            )
-            self.state = .loaded
-        }.get()
-    }
-
-    /// Create a bare context without loading a bundle.
-    ///
-    /// Installs Node.js/Bun polyfills. Call `evaluate(js:)` to run code.
-    public func createContext() async throws {
-        try await eventLoop.submit {
-            precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
-            try self.setupBareContext()
+            try self.setupContext()
             self.state = .loaded
         }.get()
     }
 
     /// Evaluate JavaScript and return the result.
-    ///
-    /// Runs on the EventLoop thread. Must be called after `load(bundle:)` or `createContext()`.
     @discardableResult
     public func evaluate(js source: String) async throws -> JSResult {
         try await eventLoop.submit {
@@ -128,7 +140,7 @@ public final class BunProcess: Sendable {
         }.get()
     }
 
-    /// Call a global JavaScript function by name and return the result.
+    /// Call a global JavaScript function by name.
     @discardableResult
     public func call(_ function: String, arguments: [Any] = []) async throws -> JSResult {
         try await eventLoop.submit {
@@ -146,37 +158,22 @@ public final class BunProcess: Sendable {
         }.get()
     }
 
-    /// Run a JavaScript bundle as a long-lived process.
+    /// Run the bundle as a long-lived process.
     ///
     /// Returns when `process.exit(code)` is called or all pending work completes.
-    /// Cannot be combined with `load()` on the same instance.
-    ///
-    /// - Parameters:
-    ///   - url: Path to the bundled JavaScript file.
-    ///   - arguments: Command-line arguments (excluding node/script path).
-    ///     `process.argv` is set to `["node", bundlePath, ...arguments]`.
-    ///   - cwd: Working directory for `process.cwd()`. Defaults to the current directory.
-    ///   - environment: Environment variables for `process.env`.
-    /// - Returns: The exit code.
-    public func run(
-        bundle url: URL,
-        arguments: [String] = [],
-        cwd: String? = nil,
-        environment: [String: String] = [:]
-    ) async throws -> Int32 {
+    /// Requires a bundle to be specified at init.
+    public func run() async throws -> Int32 {
         let promise = eventLoop.makePromise(of: Int32.self)
 
         eventLoop.execute {
             do {
                 precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
+                guard self.bundle != nil else {
+                    throw BunRuntimeError.bundleNotFound(URL(fileURLWithPath: "<none>"))
+                }
                 self.exitPromise = promise
                 self.state = .running
-                try self.setupContext(
-                    bundle: url,
-                    arguments: arguments,
-                    cwd: cwd,
-                    environment: environment
-                )
+                try self.setupContext()
                 self.checkExitCondition()
             } catch {
                 self.state = .idle
@@ -204,7 +201,7 @@ public final class BunProcess: Sendable {
 
     // MARK: - Context Setup
 
-    private func setupBareContext() throws {
+    private func setupContext() throws {
         eventLoop.preconditionInEventLoop()
 
         guard let ctx = JSContext() else {
@@ -212,6 +209,7 @@ public final class BunProcess: Sendable {
         }
         self.jsContext = ctx
 
+        // Install polyfills
         ESMResolver.installModules(in: ctx)
         installConsoleBridge(in: ctx)
         installStdoutBridge(in: ctx)
@@ -221,34 +219,16 @@ public final class BunProcess: Sendable {
         installStdinBridge(in: ctx)
         patchTimerModuleReferences(in: ctx)
         ESMResolver.installRequire(in: ctx)
-    }
 
-    private func setupContext(
-        bundle url: URL,
-        arguments: [String],
-        cwd: String?,
-        environment: [String: String]
-    ) throws {
-        eventLoop.preconditionInEventLoop()
-
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw BunRuntimeError.bundleNotFound(url)
+        // Configure process.argv
+        if let bundle {
+            let argvElements = (["node", bundle.path] + arguments)
+                .map { "'\(escapeJS($0))'" }
+                .joined(separator: ",")
+            ctx.evaluateScript("process.argv = [\(argvElements)];")
         }
 
-        let rawSource = try String(contentsOf: url, encoding: .utf8)
-        let source = try ESMTransformer.transform(rawSource, bundleURL: url)
-
-        try setupBareContext()
-
-        guard let ctx = jsContext else { return }
-
-        // Set process.argv: ["node", bundlePath, ...arguments]
-        let argvElements = (["node", url.path] + arguments)
-            .map { "'\(escapeJS($0))'" }
-            .joined(separator: ",")
-        ctx.evaluateScript("process.argv = [\(argvElements)];")
-
-        // Set process.cwd
+        // Configure process.cwd
         if let cwd {
             ctx.evaluateScript("process.cwd = function() { return '\(escapeJS(cwd))'; };")
         }
@@ -258,13 +238,20 @@ public final class BunProcess: Sendable {
             ctx.evaluateScript("process.env['\(escapeJS(key))'] = '\(escapeJS(value))';")
         }
 
-        // Evaluate the bundle
-        ctx.evaluateScript(source, withSourceURL: url)
-        if let exception = ctx.exception {
-            let message = exception.toString() ?? ""
-            ctx.exception = nil
-            if !isProcessExitSentinel(exception) {
-                throw BunRuntimeError.javaScriptException(message)
+        // Evaluate bundle if present
+        if let bundle {
+            guard FileManager.default.fileExists(atPath: bundle.path) else {
+                throw BunRuntimeError.bundleNotFound(bundle)
+            }
+            let rawSource = try String(contentsOf: bundle, encoding: .utf8)
+            let source = try ESMTransformer.transform(rawSource, bundleURL: bundle)
+            ctx.evaluateScript(source, withSourceURL: bundle)
+            if let exception = ctx.exception {
+                let message = exception.toString() ?? ""
+                ctx.exception = nil
+                if !isProcessExitSentinel(exception) {
+                    throw BunRuntimeError.javaScriptException(message)
+                }
             }
         }
     }
@@ -323,7 +310,7 @@ public final class BunProcess: Sendable {
         }
     }
 
-    // MARK: - Console Bridge (diagnostics → output stream)
+    // MARK: - Console Bridge
 
     private func installConsoleBridge(in ctx: JSContext) {
         let logBlock: @convention(block) (String, String) -> Void = { [outputContinuation] level, message in
@@ -332,7 +319,7 @@ public final class BunProcess: Sendable {
         ctx.setObject(logBlock, forKeyedSubscript: "__nativeLog" as NSString)
     }
 
-    // MARK: - stdout Bridge (application data → stdout stream)
+    // MARK: - stdout Bridge
 
     private func installStdoutBridge(in ctx: JSContext) {
         let writeBlock: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
@@ -474,13 +461,11 @@ public final class BunProcess: Sendable {
 
         let fetchBlock: @convention(block) (String, String, JSValue, JSValue) -> Void = { [self] urlString, optionsJSON, resolveCallback, rejectCallback in
             self.ref()
-
             guard let url = URL(string: urlString) else {
                 rejectCallback.call(withArguments: ["Invalid URL: \(urlString)"])
                 self.unref()
                 return
             }
-
             var request = URLRequest(url: url)
             if let data = optionsJSON.data(using: .utf8),
                let options = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -498,7 +483,6 @@ public final class BunProcess: Sendable {
                     request.timeoutInterval = timeout / 1000.0
                 }
             }
-
             let task = URLSession.shared.dataTask(with: request) { [self] data, response, error in
                 self.eventLoop.execute {
                     defer { self.unref() }
@@ -532,7 +516,6 @@ public final class BunProcess: Sendable {
             }
             task.resume()
         }
-
         ctx.setObject(fetchBlock, forKeyedSubscript: "__nativeFetch" as NSString)
     }
 

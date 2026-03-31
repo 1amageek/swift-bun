@@ -9,12 +9,12 @@ import Foundation
 struct ESMTransformTests {
 
     private func transform(_ source: String) async throws -> String {
-        let process = BunProcess()
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".js")
         try source.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        try await process.load(bundle: tmp)
+        let process = BunProcess(bundle: tmp)
+        try await process.load()
         return ""
     }
 

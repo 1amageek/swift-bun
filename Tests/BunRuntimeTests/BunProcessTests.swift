@@ -22,92 +22,91 @@ struct BunProcessTests {
     // MARK: - Lifecycle
 
     @Test func exitWithCode() async throws {
-        let p = BunProcess()
         let url = try tempBundle("process.exit(42);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 42)
+        let p = BunProcess(bundle: url)
+        #expect(try await p.run() == 42)
     }
 
-    @Test func exitCodeZeroByDefault() async throws {
-        let p = BunProcess()
+    @Test func exitZero() async throws {
         let url = try tempBundle("process.exit();")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func naturalExit() async throws {
-        let p = BunProcess()
         let url = try tempBundle("setTimeout(function() {}, 10);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func terminate() async throws {
-        let p = BunProcess()
         let url = try tempBundle("setInterval(function() {}, 1000);")
         defer { try? FileManager.default.removeItem(at: url) }
-        let task = Task { try await p.run(bundle: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
         try await Task.sleep(for: .milliseconds(50))
         p.terminate(exitCode: 7)
         #expect(try await task.value == 7)
     }
 
     @Test func envVars() async throws {
-        let p = BunProcess()
         let url = try tempBundle("process.exit(process.env.K === 'V' ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url, environment: ["K": "V"]) == 0)
+        #expect(try await BunProcess(bundle: url, environment: ["K": "V"]).run() == 0)
     }
 
     @Test func bundleNotFound() async throws {
-        let p = BunProcess()
+        let p = BunProcess(bundle: URL(fileURLWithPath: "/nonexistent.js"))
         await #expect(throws: BunRuntimeError.self) {
-            try await p.run(bundle: URL(fileURLWithPath: "/nonexistent.js"))
+            try await p.run()
         }
     }
 
     @Test func jsException() async throws {
-        let p = BunProcess()
         let url = try tempBundle("throw new Error('boom');")
         defer { try? FileManager.default.removeItem(at: url) }
         await #expect(throws: BunRuntimeError.self) {
-            try await p.run(bundle: url)
+            try await BunProcess(bundle: url).run()
+        }
+    }
+
+    @Test func runWithoutBundle() async throws {
+        let p = BunProcess()
+        await #expect(throws: BunRuntimeError.self) {
+            try await p.run()
         }
     }
 
     // MARK: - Timers
 
     @Test func setTimeout() async throws {
-        let p = BunProcess()
         let url = try tempBundle("setTimeout(function() { process.exit(0); }, 10);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func setTimeoutArgs() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             setTimeout(function(a, b) {
                 process.exit(a + b === 30 ? 0 : 1);
             }, 10, 10, 20);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func clearTimeout() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             var id = setTimeout(function() { process.exit(1); }, 200);
             clearTimeout(id);
             setTimeout(function() { process.exit(0); }, 50);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func nestedTimeout() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             setTimeout(function() {
                 setTimeout(function() {
@@ -116,11 +115,10 @@ struct BunProcessTests {
             }, 5);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func setInterval() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             var c = 0;
             var id = setInterval(function() {
@@ -128,51 +126,46 @@ struct BunProcessTests {
             }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func setImmediate() async throws {
-        let p = BunProcess()
         let url = try tempBundle("setImmediate(function() { process.exit(0); });")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func requireTimers() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             var t = require('node:timers');
             t.setTimeout(function() { process.exit(0); }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func timersPromises() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             require('node:timers/promises').setTimeout(10)
                 .then(function() { process.exit(0); });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     // MARK: - Promises & async
 
     @Test func promiseResolve() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             Promise.resolve(42).then(function(v) {
                 process.exit(v === 42 ? 0 : 1);
             });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func promiseWithTimeout() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             new Promise(function(resolve) {
                 setTimeout(function() { resolve('ok'); }, 10);
@@ -181,11 +174,10 @@ struct BunProcessTests {
             });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func asyncAwait() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             (async function() {
                 var r = await new Promise(function(resolve) {
@@ -195,137 +187,117 @@ struct BunProcessTests {
             })();
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func nextTick() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             var called = false;
             process.nextTick(function() { called = true; });
             setTimeout(function() { process.exit(called ? 0 : 1); }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func microtask() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             var called = false;
             queueMicrotask(function() { called = true; });
             setTimeout(function() { process.exit(called ? 0 : 1); }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     // MARK: - stdin
 
     @Test func stdinData() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             process.stdin.on('data', function(c) {
                 process.exit(c === 'hello' ? 0 : 1);
             });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        let task = Task { try await p.run(bundle: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("hello".data(using: .utf8)!)
         #expect(try await task.value == 0)
     }
 
     @Test func stdinEOF() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             process.stdin.on('end', function() { process.exit(0); });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        let task = Task { try await p.run(bundle: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput(nil)
         #expect(try await task.value == 0)
     }
 
-    // MARK: - Output
-
-    @Test func consoleOutput() async throws {
-        let p = BunProcess()
-        let url = try tempBundle("""
-            console.log('hello');
-            console.error('bad');
-            process.exit(0);
-        """)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let lines = LinesCollector()
-        let collect = Task { [lines] in
-            for await line in p.output { lines.append(line) }
-        }
-        _ = try await p.run(bundle: url)
-        collect.cancel()
-
-        #expect(lines.values.contains("[log] hello"))
-        #expect(lines.values.contains("[error] bad"))
-    }
-
-    // MARK: - stdout (separate from console output)
+    // MARK: - stdout and output
 
     @Test func stdoutWrite() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             process.stdout.write('line1\\n');
             process.stdout.write('line2\\n');
             process.exit(0);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-
+        let p = BunProcess(bundle: url)
         let lines = LinesCollector()
         let collect = Task { [lines] in
             for await line in p.stdout { lines.append(line) }
         }
-        _ = try await p.run(bundle: url)
+        _ = try await p.run()
         collect.cancel()
-
         #expect(lines.values.contains("line1\n"))
         #expect(lines.values.contains("line2\n"))
     }
 
     @Test func stdoutSeparateFromConsole() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
-            process.stdout.write('PROTOCOL_DATA\\n');
-            console.log('debug info');
+            process.stdout.write('DATA\\n');
+            console.log('debug');
             process.exit(0);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-
+        let p = BunProcess(bundle: url)
         let stdoutLines = LinesCollector()
         let outputLines = LinesCollector()
-        let collectStdout = Task { [stdoutLines] in
-            for await line in p.stdout { stdoutLines.append(line) }
-        }
-        let collectOutput = Task { [outputLines] in
-            for await line in p.output { outputLines.append(line) }
-        }
-        _ = try await p.run(bundle: url)
-        collectStdout.cancel()
-        collectOutput.cancel()
+        let c1 = Task { [stdoutLines] in for await l in p.stdout { stdoutLines.append(l) } }
+        let c2 = Task { [outputLines] in for await l in p.output { outputLines.append(l) } }
+        _ = try await p.run()
+        c1.cancel(); c2.cancel()
 
-        // stdout gets protocol data only
-        #expect(stdoutLines.values.contains("PROTOCOL_DATA\n"))
-        #expect(!stdoutLines.values.contains { $0.contains("debug info") })
+        #expect(stdoutLines.values.contains("DATA\n"))
+        #expect(!stdoutLines.values.contains { $0.contains("debug") })
+        #expect(outputLines.values.contains("[log] debug"))
+        #expect(!outputLines.values.contains { $0.contains("DATA") })
+    }
 
-        // output gets console only
-        #expect(outputLines.values.contains("[log] debug info"))
-        #expect(!outputLines.values.contains { $0.contains("PROTOCOL_DATA") })
+    @Test func consoleOutput() async throws {
+        let url = try tempBundle("""
+            console.log('hello');
+            console.error('bad');
+            process.exit(0);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let lines = LinesCollector()
+        let collect = Task { [lines] in for await l in p.output { lines.append(l) } }
+        _ = try await p.run()
+        collect.cancel()
+        #expect(lines.values.contains("[log] hello"))
+        #expect(lines.values.contains("[error] bad"))
     }
 
     // MARK: - argv and cwd
 
     @Test func processArgv() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             var ok = process.argv[0] === 'node' &&
                      process.argv[2] === '-p' &&
@@ -333,42 +305,46 @@ struct BunProcessTests {
             process.exit(ok ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url, arguments: ["-p", "--verbose"]) == 0)
+        #expect(try await BunProcess(bundle: url, arguments: ["-p", "--verbose"]).run() == 0)
     }
 
-    @Test func processArgvIncludesBundlePath() async throws {
-        let p = BunProcess()
+    @Test func processArgvBundlePath() async throws {
         let url = try tempBundle("""
             process.exit(process.argv[1].endsWith('.js') ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url) == 0)
+        #expect(try await BunProcess(bundle: url).run() == 0)
     }
 
     @Test func processCwd() async throws {
-        let p = BunProcess()
         let url = try tempBundle("""
             process.exit(process.cwd() === '/tmp/test' ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await p.run(bundle: url, cwd: "/tmp/test") == 0)
+        #expect(try await BunProcess(bundle: url, cwd: "/tmp/test").run() == 0)
     }
 
     // MARK: - Library mode
 
     @Test func loadAndEval() async throws {
-        let p = BunProcess()
         let url = try tempBundle("function add(a, b) { return a + b; }")
         defer { try? FileManager.default.removeItem(at: url) }
-        try await p.load(bundle: url)
+        let p = BunProcess(bundle: url)
+        try await p.load()
         #expect(try await p.evaluate(js: "add(2, 3)").int32Value == 5)
     }
 
     @Test func requireAfterLoad() async throws {
-        let p = BunProcess()
         let url = try tempBundle("var path = require('node:path');")
         defer { try? FileManager.default.removeItem(at: url) }
-        try await p.load(bundle: url)
+        let p = BunProcess(bundle: url)
+        try await p.load()
         #expect(try await p.evaluate(js: "path.join('/usr', 'local')").stringValue == "/usr/local")
+    }
+
+    @Test func bareContext() async throws {
+        let p = BunProcess()
+        try await p.load()
+        #expect(try await p.evaluate(js: "1 + 2").int32Value == 3)
     }
 }

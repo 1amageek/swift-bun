@@ -13,7 +13,7 @@ struct FetchRoundtripTests {
     @Test("GET request returns status 200 and body")
     func getRequest() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/get').then(function(res) {
@@ -32,7 +32,7 @@ struct FetchRoundtripTests {
     @Test("GET request response headers are accessible")
     func getResponseHeaders() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/get').then(function(res) {
@@ -47,7 +47,7 @@ struct FetchRoundtripTests {
     @Test("GET request response body parses as JSON")
     func getResponseJSON() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/get?foo=bar').then(function(res) {
@@ -65,7 +65,7 @@ struct FetchRoundtripTests {
     @Test("POST request sends body and receives echo")
     func postRequestWithBody() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/post', {
@@ -86,7 +86,7 @@ struct FetchRoundtripTests {
     @Test("POST request custom headers are sent")
     func postRequestCustomHeaders() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/post', {
@@ -111,7 +111,7 @@ struct FetchRoundtripTests {
     @Test("PUT request works")
     func putRequest() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/put', {
@@ -131,7 +131,7 @@ struct FetchRoundtripTests {
     @Test("DELETE request works")
     func deleteRequest() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/delete', { method: 'DELETE' })
@@ -146,7 +146,7 @@ struct FetchRoundtripTests {
     @Test("404 response is not ok but does not reject")
     func notFoundResponse() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/status/404').then(function(res) {
@@ -162,7 +162,7 @@ struct FetchRoundtripTests {
     @Test("fetch rejects on network error")
     func networkError() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://this-domain-does-not-exist-12345.invalid/')
@@ -178,7 +178,7 @@ struct FetchRoundtripTests {
     @Test("Response.text() returns string body")
     func responseText() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/html').then(function(res) {
@@ -194,7 +194,7 @@ struct FetchRoundtripTests {
     @Test("Response.json() parses body")
     func responseJSON() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/json').then(function(res) {
@@ -212,7 +212,7 @@ struct FetchRoundtripTests {
     @Test("Anthropic API pattern: POST JSON and receive response")
     func anthropicPattern() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         // Simulate Anthropic API request pattern (POST JSON, receive JSON)
         // Using httpbin.org/post as a safe echo endpoint
@@ -254,7 +254,7 @@ struct FetchRoundtripTests {
     @Test("evaluate with synchronous value returns immediately")
     func evaluateSync() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: "1 + 2")
         #expect(result.int32Value == 3)
@@ -263,7 +263,7 @@ struct FetchRoundtripTests {
     @Test("evaluate with resolved Promise returns value")
     func evaluateResolvedPromise() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         let result = try await process.evaluate(js: "Promise.resolve(42)")
         #expect(result.int32Value == 42)
@@ -272,7 +272,7 @@ struct FetchRoundtripTests {
     @Test("evaluate with rejected Promise throws")
     func evaluateRejectedPromise() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
 
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: "Promise.reject(new Error('test rejection'))")

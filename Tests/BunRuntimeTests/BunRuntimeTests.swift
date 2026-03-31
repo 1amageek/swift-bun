@@ -8,7 +8,7 @@ struct BunRuntimeTests {
     @Test("Create context and evaluate basic JS")
     func evaluateBasicJS() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "1 + 2")
         #expect(result.int32Value == 3)
     }
@@ -16,7 +16,7 @@ struct BunRuntimeTests {
     @Test("String evaluation")
     func evaluateString() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "'hello' + ' ' + 'world'")
         #expect(result.stringValue == "hello world")
     }
@@ -24,7 +24,7 @@ struct BunRuntimeTests {
     @Test("Call global function")
     func callGlobalFunction() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         try await process.evaluate(js: "function add(a, b) { return a + b; }")
         let result = try await process.call("add", arguments: [3, 4])
         #expect(result.int32Value == 7)
@@ -33,7 +33,7 @@ struct BunRuntimeTests {
     @Test("JavaScript exception is thrown")
     func javaScriptException() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: "throw new Error('test error')")
         }
@@ -42,7 +42,7 @@ struct BunRuntimeTests {
     @Test("Function not found throws error")
     func functionNotFound() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.call("nonexistentFunction")
         }
@@ -55,7 +55,7 @@ struct NodeCompatTests {
     @Test("require('node:path') works")
     func requireNodePath() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var path = require('node:path');
             path.join('/foo', 'bar', 'baz');
@@ -66,7 +66,7 @@ struct NodeCompatTests {
     @Test("path.basename")
     func pathBasename() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').basename('/foo/bar/baz.txt')
         """)
@@ -76,7 +76,7 @@ struct NodeCompatTests {
     @Test("path.dirname")
     func pathDirname() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').dirname('/foo/bar/baz.txt')
         """)
@@ -86,7 +86,7 @@ struct NodeCompatTests {
     @Test("path.extname")
     func pathExtname() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').extname('/foo/bar/baz.txt')
         """)
@@ -96,7 +96,7 @@ struct NodeCompatTests {
     @Test("path.isAbsolute")
     func pathIsAbsolute() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').isAbsolute('/foo')
         """)
@@ -106,7 +106,7 @@ struct NodeCompatTests {
     @Test("Buffer.from string")
     func bufferFromString() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.from('hello').toString('utf-8')
         """)
@@ -116,7 +116,7 @@ struct NodeCompatTests {
     @Test("Buffer.from hex encoding")
     func bufferHex() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.from('hello').toString('hex')
         """)
@@ -126,7 +126,7 @@ struct NodeCompatTests {
     @Test("Buffer.concat")
     func bufferConcat() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.concat([Buffer.from('hello'), Buffer.from(' world')]).toString('utf-8')
         """)
@@ -136,7 +136,7 @@ struct NodeCompatTests {
     @Test("require('node:crypto') randomUUID")
     func cryptoRandomUUID() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').randomUUID()
         """)
@@ -148,7 +148,7 @@ struct NodeCompatTests {
     @Test("crypto.createHash('sha256')")
     func cryptoHash() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').createHash('sha256').update('hello').digest('hex')
         """)
@@ -158,7 +158,7 @@ struct NodeCompatTests {
     @Test("process.env is accessible")
     func processEnv() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             typeof process.env
         """)
@@ -168,7 +168,7 @@ struct NodeCompatTests {
     @Test("process.platform is darwin")
     func processPlatform() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "process.platform")
         #expect(result.stringValue == "darwin")
     }
@@ -176,14 +176,14 @@ struct NodeCompatTests {
     @Test("console.log does not crash")
     func consoleLog() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         try await process.evaluate(js: "console.log('test message from JS')")
     }
 
     @Test("TextEncoder/TextDecoder roundtrip")
     func textEncoderDecoder() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new TextEncoder().encode('hello'))
         """)
@@ -193,7 +193,7 @@ struct NodeCompatTests {
     @Test("require('node:url').parse")
     func urlParse() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var u = require('node:url').parse('https://example.com/path?q=1');
             u.hostname;
@@ -204,7 +204,7 @@ struct NodeCompatTests {
     @Test("require('node:util').format")
     func utilFormat() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:util').format('hello %s, you are %d', 'world', 42)
         """)
@@ -214,7 +214,7 @@ struct NodeCompatTests {
     @Test("require('node:os').platform()")
     func osPlatform() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:os').platform()
         """)
@@ -224,7 +224,7 @@ struct NodeCompatTests {
     @Test("EventEmitter basic usage")
     func eventEmitter() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var EventEmitter = require('node:events').EventEmitter;
             var ee = new EventEmitter();
@@ -239,7 +239,7 @@ struct NodeCompatTests {
     @Test("require without node: prefix")
     func requireWithoutPrefix() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var path = require('path');
             path.join('a', 'b');
@@ -250,7 +250,7 @@ struct NodeCompatTests {
     @Test("require unknown module throws")
     func requireUnknown() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: "require('unknown-module')")
         }
@@ -259,7 +259,7 @@ struct NodeCompatTests {
     @Test("fs.readFileSync throws ENOENT for missing file")
     func fsReadFileThrowsENOENT() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: """
                 require('node:fs').readFileSync('/nonexistent/path/file.txt')
@@ -270,7 +270,7 @@ struct NodeCompatTests {
     @Test("fs.writeFileSync and readFileSync roundtrip")
     func fsWriteReadRoundtrip() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let tmpPath = NSTemporaryDirectory() + "swift-bun-test-\(UUID().uuidString).txt"
         defer { try? FileManager.default.removeItem(atPath: tmpPath) }
 
@@ -285,7 +285,7 @@ struct NodeCompatTests {
     @Test("fs.existsSync returns false for missing file")
     func fsExistsSyncMissing() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:fs').existsSync('/nonexistent/file.txt')
         """)
@@ -299,7 +299,7 @@ struct BunAPITests {
     @Test("Bun.version is set")
     func bunVersion() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "Bun.version")
         #expect(result.stringValue == "swift-bun-shim")
     }
@@ -307,7 +307,7 @@ struct BunAPITests {
     @Test("Bun.nanoseconds returns number")
     func bunNanoseconds() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "typeof Bun.nanoseconds()")
         #expect(result.stringValue == "number")
     }
@@ -315,7 +315,7 @@ struct BunAPITests {
     @Test("Bun.env mirrors process.env")
     func bunEnvMirror() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             process.env.TEST_KEY = 'test_value';
             Bun.env.TEST_KEY;
@@ -326,7 +326,7 @@ struct BunAPITests {
     @Test("Bun.escapeHTML")
     func bunEscapeHTML() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Bun.escapeHTML('<script>alert("xss")</script>')
         """)
@@ -337,7 +337,7 @@ struct BunAPITests {
     @Test("Bun.deepEquals")
     func bunDeepEquals() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Bun.deepEquals({a: 1, b: [2, 3]}, {a: 1, b: [2, 3]})
         """)
@@ -347,7 +347,7 @@ struct BunAPITests {
     @Test("Bun.hash returns number")
     func bunHash() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "typeof Bun.hash('hello')")
         #expect(result.stringValue == "number")
     }
@@ -355,7 +355,7 @@ struct BunAPITests {
     @Test("Bun.fileURLToPath converts correctly")
     func bunFileURLToPath() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "Bun.fileURLToPath('file:///tmp/test.js')")
         #expect(result.stringValue == "/tmp/test.js")
     }
@@ -363,7 +363,7 @@ struct BunAPITests {
     @Test("Bun.serve throws not supported")
     func bunServeNotSupported() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: "Bun.serve({})")
         }
@@ -372,7 +372,7 @@ struct BunAPITests {
     @Test("Bun.spawn throws not supported")
     func bunSpawnNotSupported() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: "Bun.spawn(['echo', 'hello'])")
         }
@@ -387,7 +387,7 @@ struct TextCodecEdgeCaseTests {
     @Test("ASCII roundtrip")
     func asciiRoundtrip() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new TextEncoder().encode('Hello, World!'))
         """)
@@ -397,7 +397,7 @@ struct TextCodecEdgeCaseTests {
     @Test("Multibyte UTF-8 roundtrip (Japanese)")
     func multibyteCJK() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new TextEncoder().encode('こんにちは'))
         """)
@@ -407,7 +407,7 @@ struct TextCodecEdgeCaseTests {
     @Test("4-byte UTF-8 emoji roundtrip")
     func fourByteEmoji() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new TextEncoder().encode('🎉🚀'))
         """)
@@ -417,7 +417,7 @@ struct TextCodecEdgeCaseTests {
     @Test("Empty string roundtrip")
     func emptyString() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new TextEncoder().encode(''))
         """)
@@ -427,7 +427,7 @@ struct TextCodecEdgeCaseTests {
     @Test("Truncated 2-byte sequence does not crash")
     func truncated2Byte() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         // 0xC3 starts a 2-byte sequence but is alone
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new Uint8Array([0x41, 0xC3]))
@@ -439,7 +439,7 @@ struct TextCodecEdgeCaseTests {
     @Test("Truncated 3-byte sequence does not crash")
     func truncated3Byte() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         // 0xE3 starts a 3-byte sequence but only has 1 continuation byte
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new Uint8Array([0x42, 0xE3, 0x81]))
@@ -450,7 +450,7 @@ struct TextCodecEdgeCaseTests {
     @Test("Truncated 4-byte sequence does not crash")
     func truncated4Byte() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         // 0xF0 0x9F starts a 4-byte sequence but is incomplete
         let result = try await process.evaluate(js: """
             new TextDecoder().decode(new Uint8Array([0x43, 0xF0, 0x9F]))
@@ -465,7 +465,7 @@ struct URLEdgeCaseTests {
     @Test("Parse HTTPS URL with path and query")
     func parseHTTPS() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var u = new URL('https://api.example.com:8080/v1/chat?model=claude');
             u.hostname + '|' + u.port + '|' + u.pathname + '|' + u.searchParams.get('model');
@@ -476,7 +476,7 @@ struct URLEdgeCaseTests {
     @Test("Parse file:/// URL with empty hostname")
     func parseFileURL() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var u = new URL('file:///tmp/test.js');
             u.protocol + '|' + u.pathname;
@@ -487,7 +487,7 @@ struct URLEdgeCaseTests {
     @Test("Parse URL with auth")
     func parseURLWithAuth() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var u = new URL('https://user:pass@example.com/path');
             u.username + '|' + u.password + '|' + u.hostname;
@@ -498,7 +498,7 @@ struct URLEdgeCaseTests {
     @Test("Parse URL with hash fragment")
     func parseURLWithHash() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var u = new URL('https://example.com/page#section');
             u.hash;
@@ -509,7 +509,7 @@ struct URLEdgeCaseTests {
     @Test("URLSearchParams multiple values")
     func searchParamsMultiple() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var sp = new URLSearchParams('a=1&b=2&c=hello%20world');
             sp.get('a') + '|' + sp.get('b') + '|' + sp.get('c');
@@ -524,7 +524,7 @@ struct PathEdgeCaseTests {
     @Test("path.join with .. normalization")
     func joinWithDotDot() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').join('/foo/bar', '..', 'baz')
         """)
@@ -534,7 +534,7 @@ struct PathEdgeCaseTests {
     @Test("path.join with . normalization")
     func joinWithDot() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').join('/foo', '.', 'bar')
         """)
@@ -544,7 +544,7 @@ struct PathEdgeCaseTests {
     @Test("path.relative between two absolute paths")
     func relative() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').relative('/data/orandea/test/aaa', '/data/orandea/impl/bbb')
         """)
@@ -554,7 +554,7 @@ struct PathEdgeCaseTests {
     @Test("path.parse extracts all components")
     func parse() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var p = require('node:path').parse('/home/user/dir/file.txt');
             p.root + '|' + p.base + '|' + p.ext + '|' + p.name;
@@ -565,7 +565,7 @@ struct PathEdgeCaseTests {
     @Test("path.basename with extension removal")
     func basenameWithExt() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:path').basename('/foo/bar.html', '.html')
         """)
@@ -579,7 +579,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.from base64 encoding")
     func base64Roundtrip() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.from('SGVsbG8gV29ybGQ=', 'base64').toString('utf-8')
         """)
@@ -589,7 +589,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.from hex roundtrip")
     func hexRoundtrip() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.from(Buffer.from('test data').toString('hex'), 'hex').toString('utf-8')
         """)
@@ -599,7 +599,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.alloc creates zeroed buffer")
     func allocZeroed() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var b = Buffer.alloc(4);
             b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 0;
@@ -610,7 +610,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.isBuffer distinguishes Buffer from Uint8Array")
     func isBuffer() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.isBuffer(Buffer.from('x')) + '|' + Buffer.isBuffer(new Uint8Array(1));
         """)
@@ -620,7 +620,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.byteLength for multibyte UTF-8")
     func byteLengthMultibyte() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.byteLength('café')
         """)
@@ -631,7 +631,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.concat with empty array")
     func concatEmpty() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             Buffer.concat([]).length
         """)
@@ -641,7 +641,7 @@ struct BufferEdgeCaseTests {
     @Test("Buffer.compare ordering")
     func compare() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var a = Buffer.from('abc');
             var b = Buffer.from('abd');
@@ -658,7 +658,7 @@ struct CryptoEdgeCaseTests {
     @Test("SHA-256 of empty string")
     func sha256Empty() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').createHash('sha256').update('').digest('hex')
         """)
@@ -668,7 +668,7 @@ struct CryptoEdgeCaseTests {
     @Test("SHA-512 produces correct length")
     func sha512Length() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').createHash('sha512').update('test').digest('hex').length
         """)
@@ -678,7 +678,7 @@ struct CryptoEdgeCaseTests {
     @Test("HMAC-SHA256")
     func hmacSHA256() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').createHmac('sha256', 'secret').update('message').digest('hex')
         """)
@@ -688,7 +688,7 @@ struct CryptoEdgeCaseTests {
     @Test("Hash chaining with multiple updates")
     func hashChaining() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var h = require('node:crypto').createHash('sha256');
             h.update('hello');
@@ -702,7 +702,7 @@ struct CryptoEdgeCaseTests {
     @Test("randomBytes returns correct length")
     func randomBytesLength() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').randomBytes(16).length
         """)
@@ -712,7 +712,7 @@ struct CryptoEdgeCaseTests {
     @Test("Unsupported hash algorithm throws")
     func unsupportedAlgorithm() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: """
                 require('node:crypto').createHash('md5').update('test').digest('hex')
@@ -723,7 +723,7 @@ struct CryptoEdgeCaseTests {
     @Test("Hash digest base64 encoding")
     func hashBase64() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             require('node:crypto').createHash('sha256').update('hello').digest('base64')
         """)
@@ -737,7 +737,7 @@ struct FSEdgeCaseTests {
     @Test("fs.statSync throws for missing file")
     func statSyncMissing() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: """
                 require('node:fs').statSync('/nonexistent/file.txt')
@@ -748,7 +748,7 @@ struct FSEdgeCaseTests {
     @Test("fs.statSync returns correct isDirectory")
     func statSyncIsDirectory() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         // Use /private/tmp instead of /tmp (macOS symlink)
         let result = try await process.evaluate(js: """
             require('node:fs').statSync('/private/tmp').isDirectory()
@@ -759,7 +759,7 @@ struct FSEdgeCaseTests {
     @Test("fs.statSync returns correct isFile")
     func statSyncIsFile() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let tmpPath = NSTemporaryDirectory() + "swift-bun-stat-test-\(UUID().uuidString).txt"
         try "test".write(toFile: tmpPath, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(atPath: tmpPath) }
@@ -773,7 +773,7 @@ struct FSEdgeCaseTests {
     @Test("fs.readdirSync throws for missing directory")
     func readdirMissing() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         await #expect(throws: BunRuntimeError.self) {
             try await process.evaluate(js: """
                 require('node:fs').readdirSync('/nonexistent/dir')
@@ -784,7 +784,7 @@ struct FSEdgeCaseTests {
     @Test("fs.mkdirSync recursive creates nested dirs")
     func mkdirRecursive() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let tmpDir = NSTemporaryDirectory() + "swift-bun-mkdir-\(UUID().uuidString)/a/b/c"
         let baseDir = (tmpDir as NSString).deletingLastPathComponent
         let rootDir = ((baseDir as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
@@ -802,7 +802,7 @@ struct FSEdgeCaseTests {
     @Test("fs.promises.readFile async")
     func promisesReadFile() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let tmpPath = NSTemporaryDirectory() + "swift-bun-async-test-\(UUID().uuidString).txt"
         try "async content".write(toFile: tmpPath, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(atPath: tmpPath) }
@@ -825,7 +825,7 @@ struct EventEmitterEdgeCaseTests {
     @Test("once fires only once")
     func onceFiresOnce() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var EE = require('node:events').EventEmitter;
             var ee = new EE();
@@ -842,7 +842,7 @@ struct EventEmitterEdgeCaseTests {
     @Test("removeListener removes correct listener")
     func removeListener() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var EE = require('node:events').EventEmitter;
             var ee = new EE();
@@ -862,7 +862,7 @@ struct EventEmitterEdgeCaseTests {
     @Test("listenerCount returns correct count")
     func listenerCount() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var EE = require('node:events').EventEmitter;
             var ee = new EE();
@@ -877,7 +877,7 @@ struct EventEmitterEdgeCaseTests {
     @Test("emit returns false for no listeners")
     func emitNoListeners() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var ee = new (require('node:events').EventEmitter)();
             ee.emit('nonexistent');
@@ -892,7 +892,7 @@ struct JSResultEdgeCaseTests {
     @Test("Number result preserves integer")
     func integerResult() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "42")
         #expect(result == .number(42))
         #expect(result.int32Value == 42)
@@ -902,7 +902,7 @@ struct JSResultEdgeCaseTests {
     @Test("Number result preserves float")
     func floatResult() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "3.14")
         #expect(result == .number(3.14))
         #expect(result.stringValue == "3.14")
@@ -911,7 +911,7 @@ struct JSResultEdgeCaseTests {
     @Test("Boolean true")
     func boolTrue() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "true")
         #expect(result == .bool(true))
         #expect(result.boolValue == true)
@@ -921,7 +921,7 @@ struct JSResultEdgeCaseTests {
     @Test("Null result")
     func nullResult() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "null")
         #expect(result == .null)
         #expect(result.isNull == true)
@@ -932,7 +932,7 @@ struct JSResultEdgeCaseTests {
     @Test("Undefined result")
     func undefinedResult() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "undefined")
         #expect(result == .undefined)
         #expect(result.isUndefined == true)
@@ -942,7 +942,7 @@ struct JSResultEdgeCaseTests {
     @Test("Object result serialized as JSON")
     func objectResult() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "({key: 'value', num: 42})")
         if case .json(let j) = result {
             #expect(j.contains("\"key\""))
@@ -955,7 +955,7 @@ struct JSResultEdgeCaseTests {
     @Test("Array result serialized as JSON")
     func arrayResult() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: "[1, 2, 3]")
         if case .json(let j) = result {
             #expect(j == "[1,2,3]")
@@ -971,7 +971,7 @@ struct AsyncLocalStorageTests {
     @Test("AsyncLocalStorage run and getStore")
     func runAndGetStore() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var als = new (require('node:async_hooks').AsyncLocalStorage)();
             var captured = null;
@@ -986,7 +986,7 @@ struct AsyncLocalStorageTests {
     @Test("AsyncLocalStorage nested run")
     func nestedRun() async throws {
         let process = BunProcess()
-        try await process.createContext()
+        try await process.load()
         let result = try await process.evaluate(js: """
             var als = new (require('node:async_hooks').AsyncLocalStorage)();
             var log = '';

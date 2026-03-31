@@ -18,9 +18,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Bundle loads without JavaScript exceptions")
     func bundleLoads() async throws {
-        let process = BunProcess()
-        let bundleURL = try bundleURL()
-        try await process.load(bundle: bundleURL)
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         // The bundle sets globalThis.__bundleLoaded = true on successful load
         let result = try await process.evaluate(js: "__bundleLoaded")
@@ -29,8 +28,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Bundle reports all required modules available")
     func bundleModulesAvailable() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         let info = try await process.evaluate(js: "JSON.stringify(__bundleInfo)")
         guard case .string(let json) = info else {
@@ -55,8 +54,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Anthropic client initializes with API key")
     func clientInitializes() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         // Initialize the Anthropic client with a test key
         let result = try await process.evaluate(js: """
@@ -74,8 +73,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Client rejects missing API key gracefully")
     func clientRejectsMissingKey() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         // Anthropic SDK should throw/report when no API key is provided
         // The behavior depends on the SDK version but it should not crash
@@ -95,8 +94,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Message function exists after init")
     func messageFunctionExists() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
         try await process.evaluate(js: "__claudeInit('sk-ant-test-key')")
 
         let result = try await process.evaluate(js: "typeof __claudeMessage")
@@ -105,8 +104,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Message call returns a Promise")
     func messageReturnsPromise() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
         try await process.evaluate(js: "__claudeInit('sk-ant-test-key')")
 
         // Call the message function — it will fail at the network level
@@ -122,8 +121,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("fetch is available and callable")
     func fetchAvailable() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         let result = try await process.evaluate(js: "typeof fetch")
         #expect(result.stringValue == "function")
@@ -131,8 +130,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("process.env is writable from Swift")
     func processEnvWritable() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         try await process.evaluate(js: "process.env.ANTHROPIC_API_KEY = 'test-key-from-swift'")
         let result = try await process.evaluate(js: "process.env.ANTHROPIC_API_KEY")
@@ -141,8 +140,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Bun global is available")
     func bunGlobalAvailable() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         let result = try await process.evaluate(js: "typeof Bun")
         #expect(result.stringValue == "object")
@@ -150,8 +149,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("console.log works inside bundle context")
     func consoleLogWorks() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         // Should not throw
         try await process.evaluate(js: "console.log('Bundle loaded:', __bundleInfo.name)")
@@ -159,8 +158,8 @@ struct ClaudeBundleIntegrationTests {
 
     @Test("Console output is captured via output stream")
     func consoleOutputWorks() async throws {
-        let process = BunProcess()
-        try await process.load(bundle: try bundleURL())
+        let process = BunProcess(bundle: try bundleURL())
+        try await process.load()
 
         try await process.evaluate(js: "console.log('bundle test output');")
 
