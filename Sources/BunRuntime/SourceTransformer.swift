@@ -505,6 +505,26 @@ enum SourceTransformer {
         var j = i + 1
         while j < chars.count {
             if chars[j] == "\\" { j += 2; continue }
+            // Handle template literal interpolation: ${...}
+            if c == "`" && chars[j] == "$" && j + 1 < chars.count && chars[j + 1] == "{" {
+                j += 2  // skip "${"
+                var depth = 1
+                while j < chars.count && depth > 0 {
+                    if chars[j] == "\\" { j += 2; continue }
+                    if chars[j] == "{" { depth += 1 }
+                    else if chars[j] == "}" { depth -= 1 }
+                    else if chars[j] == "'" || chars[j] == "\"" || chars[j] == "`" {
+                        // Skip nested string literals inside interpolation
+                        if let end = skipString(chars, at: j) {
+                            j = end
+                            continue
+                        }
+                    }
+                    if depth > 0 { j += 1 }
+                }
+                if depth == 0 { j += 1 }  // skip closing "}"
+                continue
+            }
             if chars[j] == c { return j + 1 }
             j += 1
         }
