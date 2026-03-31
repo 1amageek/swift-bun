@@ -102,8 +102,20 @@ struct CLIJSTest {
         // Wait for cli.js to initialize
         try await Task.sleep(for: .seconds(3))
 
-        // cli.js should still be running (waiting for stdin)
-        // Terminate and collect results
+        print("=== After 3s init ===")
+        print("stdout: \(stdoutLogs.values.count) lines, output: \(logs.values.count) lines")
+
+        // Send a message via stdin
+        let msg = #"{"type":"user_message","content":"What is 2+2? Answer in one word."}"# + "\n"
+        p.sendInput(msg.data(using: .utf8)!)
+        print("=== Sent stdin ===")
+
+        // Wait for response
+        try await Task.sleep(for: .seconds(5))
+
+        print("=== After 5s response wait ===")
+
+        // Terminate and collect
         p.terminate(exitCode: 0)
         let code = try await runTask.value
         outputTask.cancel()
@@ -112,13 +124,11 @@ struct CLIJSTest {
         let allLogs = logs.values
         let allStdout = stdoutLogs.values
 
-        print("\n=== CLI JS Lifecycle Summary ===")
         print("Exit code: \(code)")
         print("Output lines: \(allLogs.count)")
         print("Stdout lines: \(allStdout.count)")
-        for log in allLogs.prefix(30) {
-            print("  \(log)")
-        }
+
+        // Show stdout content
         if !allStdout.isEmpty {
             print("--- stdout ---")
             for line in allStdout.prefix(10) {
@@ -126,12 +136,16 @@ struct CLIJSTest {
             }
         }
 
+        // Show relevant output (skip bun:setup, show errors and lifecycle)
+        for log in allLogs.filter({ !$0.hasPrefix("[bun:setup]") }).prefix(20) {
+            print("  \(String(log.prefix(200)))")
+        }
+
         let exitedEarly = allLogs.contains { $0.contains("checkExitCondition → exiting") }
         let hasStdinRef = allLogs.contains { $0.contains("ref(stdin)") }
         print("Has stdin ref: \(hasStdinRef)")
         print("Exited early: \(exitedEarly)")
 
-        // cli.js should NOT have exited on its own — we terminated it
         #expect(!exitedEarly, "cli.js exited early via checkExitCondition")
     }
 

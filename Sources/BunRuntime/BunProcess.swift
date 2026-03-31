@@ -643,10 +643,49 @@ public final class BunProcess: Sendable {
             var stdin = process.stdin;
             stdin._events = {};
             stdin._refed = false;
+            stdin._buffer = [];
+            stdin._waiting = null;
+            stdin._ended = false;
             stdin.readable = true;
-            stdin.setEncoding = function() { return stdin; };
-            stdin.resume = function() { return stdin; };
-            stdin.pause = function() { return stdin; };
+            stdin.readableEnded = false;
+            stdin.readableFlowing = null;
+            stdin.destroyed = false;
+            stdin.setEncoding = function(enc) { stdin._encoding = enc; return stdin; };
+            stdin.resume = function() { stdin.readableFlowing = true; return stdin; };
+            stdin.pause = function() { stdin.readableFlowing = false; return stdin; };
+            stdin.read = function() {
+                if (stdin._buffer.length > 0) return stdin._buffer.shift();
+                return null;
+            };
+            stdin.pipe = function(dest) {
+                stdin.on('data', function(chunk) { dest.write(chunk); });
+                stdin.on('end', function() { if (dest.end) dest.end(); });
+                return dest;
+            };
+            stdin.unpipe = function() { return stdin; };
+            stdin.unshift = function(chunk) { stdin._buffer.unshift(chunk); };
+            stdin.destroy = function() { stdin.destroyed = true; stdin.readable = false; return stdin; };
+
+            // AsyncIterable support — enables `for await (const chunk of process.stdin)`
+            stdin[Symbol.asyncIterator] = function() {
+                return {
+                    next: function() {
+                        if (stdin._buffer.length > 0) {
+                            return Promise.resolve({ value: stdin._buffer.shift(), done: false });
+                        }
+                        if (stdin._ended) {
+                            return Promise.resolve({ value: undefined, done: true });
+                        }
+                        return new Promise(function(resolve) {
+                            stdin._waiting = resolve;
+                        });
+                    },
+                    return: function() {
+                        stdin._ended = true;
+                        return Promise.resolve({ value: undefined, done: true });
+                    }
+                };
+            };
 
             function checkRef() {
                 var hasListeners = (stdin._events['data'] && stdin._events['data'].length > 0) ||
@@ -685,6 +724,27 @@ public final class BunProcess: Sendable {
             };
             stdin.off = stdin.removeListener;
             stdin.emit = function(event) {
+                // Feed data into the async iterator and buffer
+                if (event === 'data') {
+                    var chunk = arguments[1];
+                    stdin._buffer.push(chunk);
+                    if (stdin._waiting) {
+                        var resolve = stdin._waiting;
+                        stdin._waiting = null;
+                        resolve({ value: stdin._buffer.shift(), done: false });
+                    }
+                }
+                if (event === 'end') {
+                    stdin._ended = true;
+                    stdin.readableEnded = true;
+                    stdin.readable = false;
+                    if (stdin._waiting) {
+                        var resolve = stdin._waiting;
+                        stdin._waiting = null;
+                        resolve({ value: undefined, done: true });
+                    }
+                }
+
                 var hasListeners = stdin._events[event] && stdin._events[event].length > 0;
                 if (hasListeners) {
                     var args = Array.prototype.slice.call(arguments, 1);
@@ -710,9 +770,12 @@ public final class BunProcess: Sendable {
 
     private func deliverStdin(_ data: Data?) {
         eventLoop.preconditionInEventLoop()
-        guard let stdin = stdinValue else { return }
+        guard let ctx = jsContext, let stdin = stdinValue else { return }
         if let data {
             let str = String(data: data, encoding: .utf8) ?? ""
+            // Push to buffer first, then emit events (readable handlers call read())
+            ctx.evaluateScript("process.stdin._buffer.push('\(escapeJS(str))')")
+            stdin.invokeMethod("emit", withArguments: ["readable"])
             stdin.invokeMethod("emit", withArguments: ["data", str])
         } else {
             stdin.invokeMethod("emit", withArguments: ["end"])

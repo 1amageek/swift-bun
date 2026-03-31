@@ -238,6 +238,65 @@ struct BunProcessTests {
         #expect(try await task.value == 0)
     }
 
+    @Test func stdinAsyncIterator() async throws {
+        let url = try tempBundle("""
+            (async function() {
+                var chunks = [];
+                for await (var chunk of process.stdin) {
+                    chunks.push(chunk);
+                    if (chunks.length >= 2) break;
+                }
+                process.exit(chunks.join(',') === 'a,b' ? 0 : 1);
+            })();
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput("a".data(using: .utf8)!)
+        try await Task.sleep(for: .milliseconds(10))
+        p.sendInput("b".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinPipe() async throws {
+        let url = try tempBundle("""
+            var output = '';
+            var writable = {
+                write: function(chunk) { output += chunk; },
+                end: function() {
+                    process.exit(output === 'hello' ? 0 : 1);
+                }
+            };
+            process.stdin.pipe(writable);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput("hello".data(using: .utf8)!)
+        try await Task.sleep(for: .milliseconds(10))
+        p.sendInput(nil) // EOF triggers end
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinRead() async throws {
+        let url = try tempBundle("""
+            process.stdin.on('readable', function() {
+                var chunk = process.stdin.read();
+                if (chunk !== null) {
+                    process.exit(chunk === 'test' ? 0 : 1);
+                }
+            });
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput("test".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
     @Test func stdinKeepsProcessAlive() async throws {
         // Process registers stdin.on('data') but receives no data yet.
         // The process must NOT exit immediately — stdin listener is an active handle.
