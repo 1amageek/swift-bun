@@ -70,6 +70,18 @@ enum NodeUtil {
                     }
                     return result;
                 },
+                debuglog: function(section) {
+                    var enabled = (process.env.NODE_DEBUG || '').split(',')
+                        .some(function(s) { return s.trim().toLowerCase() === section.toLowerCase(); });
+                    var fn = function() {
+                        if (enabled) {
+                            var msg = util.format.apply(null, arguments);
+                            console.error(section.toUpperCase() + ' ' + process.pid + ': ' + msg);
+                        }
+                    };
+                    fn.enabled = enabled;
+                    return fn;
+                },
                 types: {
                     isDate: function(v) { return v instanceof Date; },
                     isRegExp: function(v) { return v instanceof RegExp; },

@@ -35,6 +35,63 @@ enum ESMResolver {
     // MARK: - Private
 
     private static func installGlobals(in context: JSContext) {
+        // Node.js and Web API global aliases
+        context.evaluateScript("""
+        if (typeof globalThis.global === 'undefined') globalThis.global = globalThis;
+        if (typeof globalThis.self === 'undefined') globalThis.self = globalThis;
+
+        // Event / EventTarget polyfill (required by many npm packages)
+        if (typeof globalThis.Event === 'undefined') {
+            globalThis.Event = function Event(type, options) {
+                this.type = type;
+                this.bubbles = (options && options.bubbles) || false;
+                this.cancelable = (options && options.cancelable) || false;
+                this.defaultPrevented = false;
+                this.target = null;
+            };
+            Event.prototype.preventDefault = function() { this.defaultPrevented = true; };
+            Event.prototype.stopPropagation = function() {};
+            Event.prototype.stopImmediatePropagation = function() {};
+        }
+        if (typeof globalThis.EventTarget === 'undefined') {
+            globalThis.EventTarget = function EventTarget() { this._listeners = {}; };
+            EventTarget.prototype.addEventListener = function(type, fn) {
+                if (!this._listeners[type]) this._listeners[type] = [];
+                this._listeners[type].push(fn);
+            };
+            EventTarget.prototype.removeEventListener = function(type, fn) {
+                if (!this._listeners[type]) return;
+                this._listeners[type] = this._listeners[type].filter(function(f) { return f !== fn; });
+            };
+            EventTarget.prototype.dispatchEvent = function(event) {
+                event.target = this;
+                var listeners = this._listeners[event.type] || [];
+                for (var i = 0; i < listeners.length; i++) listeners[i].call(this, event);
+                return !event.defaultPrevented;
+            };
+        }
+        if (typeof globalThis.CustomEvent === 'undefined') {
+            globalThis.CustomEvent = function CustomEvent(type, options) {
+                Event.call(this, type, options);
+                this.detail = (options && options.detail) || null;
+            };
+            CustomEvent.prototype = Object.create(Event.prototype);
+            CustomEvent.prototype.constructor = CustomEvent;
+        }
+
+        // structuredClone polyfill
+        if (typeof globalThis.structuredClone === 'undefined') {
+            globalThis.structuredClone = function(obj) {
+                return JSON.parse(JSON.stringify(obj));
+            };
+        }
+
+        // navigator stub
+        if (typeof globalThis.navigator === 'undefined') {
+            globalThis.navigator = { userAgent: 'swift-bun', platform: 'darwin' };
+        }
+        """)
+
         // performance polyfill (not available in standalone JSContext)
         context.evaluateScript("""
         (function() {

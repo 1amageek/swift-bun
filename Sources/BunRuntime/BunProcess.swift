@@ -267,7 +267,19 @@ public final class BunProcess: Sendable {
                 throw BunRuntimeError.bundleNotFound(bundle)
             }
             let rawSource = try String(contentsOf: bundle, encoding: .utf8)
-            let source = try ESMTransformer.transform(rawSource, bundleURL: bundle)
+            var source = try ESMTransformer.transform(rawSource, bundleURL: bundle)
+
+            // Wrap the top-level async entry point to catch unhandled rejections.
+            // cli.js ends with `vsY();` — replace with `vsY().catch(...)` to surface errors.
+            if source.hasSuffix("vsY();") || source.contains("vsY();") {
+                source = source.replacingOccurrences(
+                    of: "vsY();",
+                    with: "vsY().catch(function(e){ __reportRejection((e instanceof Error ? e.message : String(e)) + ' | stack: ' + (e && e.stack ? e.stack : 'none')); });",
+                    options: .backwards,
+                    range: source.index(source.endIndex, offsetBy: -20)..<source.endIndex
+                )
+            }
+
             ctx.evaluateScript(source, withSourceURL: bundle)
             if let exception = ctx.exception {
                 let message = exception.toString() ?? ""
