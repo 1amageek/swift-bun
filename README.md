@@ -139,44 +139,67 @@ public final class BunProcess: Sendable {
 
 `process.argv` is automatically set to `["node", bundlePath, ...arguments]`.
 
-## Supported Modules
+## Polyfill Coverage
 
-### Node.js built-in modules
+JSCore's `evaluateScript()` provides only ECMAScript language features. All platform APIs are polyfilled in three layers:
 
-| Module | Implementation | Notes |
-|--------|---------------|-------|
-| `node:path` | Pure JS | Full POSIX path API |
-| `node:buffer` | Pure JS | Uint8Array-based Buffer |
-| `node:url` | Pure JS | URL/URLSearchParams polyfill |
-| `node:util` | Pure JS | format, promisify, types |
-| `node:os` | Native bridge | ProcessInfo-backed |
-| `node:fs` | Native bridge | FileManager-backed (sync + promises) |
-| `node:crypto` | Native bridge | CryptoKit (SHA-256/512, HMAC, randomBytes) |
-| `node:http/https` | Native bridge | URLSession-backed fetch + http.request |
-| `node:stream` | Pure JS | Readable, Writable, Transform, EventEmitter |
-| `node:timers` | NIO bridge | EventLoop-backed setTimeout/setInterval |
-| `node:events` | Pure JS | EventEmitter |
-| `node:async_hooks` | Stub | AsyncLocalStorage with basic run/getStore |
-| `node:child_process` | Stub | Throws (not available on iOS) |
+- **Layer 0**: `polyfills.bundle.js` — Web APIs (npm packages, esbuild bundled)
+- **Layer 1**: ESMResolver — Node.js globals + modules (Swift strings)
+- **Layer 2**: NIO bridges — EventLoop-backed overrides (Swift closures)
+
+### Web APIs (Layer 0)
+
+| API | Status | Notes |
+|-----|--------|-------|
+| ReadableStream / WritableStream / TransformStream | ✅ Full | web-streams-polyfill (npm) |
+| Event / EventTarget / CustomEvent | ✅ Full | |
+| Blob / File | ✅ Basic | text, arrayBuffer, stream |
+| FormData | ✅ Full | |
+| MessageChannel / MessagePort | ✅ Basic | |
+| crypto.getRandomValues / randomUUID | ✅ Basic | |
+| structuredClone | ✅ Basic | JSON roundtrip |
+| Symbol.dispose / asyncDispose | ✅ Full | |
+| WebSocket | ⚠️ Stub | Class exists, no connection |
+| Worker | ⚠️ Stub | Throws |
+| crypto.subtle | ⚠️ Stub | Returns empty buffers |
+
+### Node.js Modules (Layer 1)
+
+| Module | Status | Notes |
+|--------|--------|-------|
+| `node:path` | ✅ | Full POSIX path API |
+| `node:buffer` | ✅ | Uint8Array-based Buffer |
+| `node:url` | ✅ | URL/URLSearchParams |
+| `node:util` | ✅ | format, promisify, debuglog, types |
+| `node:os` | ✅ | ProcessInfo-backed |
+| `node:fs` | ✅ | FileManager-backed (sync + promises) |
+| `node:crypto` | ✅ | CryptoKit (SHA-256/512, HMAC, randomBytes) |
+| `node:http/https` | ✅ | URLSession-backed fetch + http.request |
+| `node:stream` | ✅ | Readable, Writable, Transform, EventEmitter |
+| `node:events` | ✅ | EventEmitter (supports extends) |
+| `node:timers` | ✅ | NIO EventLoop-backed |
+| `node:async_hooks` | ⚠️ Partial | AsyncLocalStorage only |
+| `node:child_process` | ⚠️ Stub | **Not available on iOS** |
+| `node:net` / `node:tls` | ⚠️ Stub | TCP/TLS not implemented |
+| `node:zlib` | ⚠️ Stub | Compression not implemented |
 
 ### Bun APIs
 
 | API | Status |
 |-----|--------|
-| `Bun.file(path)` | Supported (text, json, exists) |
-| `Bun.write(path, data)` | Supported |
-| `Bun.env` | Supported (alias for process.env) |
-| `Bun.version` | Returns `"swift-bun-shim"` |
-| `Bun.nanoseconds()` | Supported |
-| `Bun.sleep(ms)` | Supported |
-| `Bun.hash(data)` | Supported (djb2) |
-| `Bun.escapeHTML(str)` | Supported |
-| `Bun.spawn()` | Delegate pattern (throws by default) |
-| `Bun.serve()` | Not supported |
+| `Bun.file(path)` | ✅ (text, json, exists) |
+| `Bun.write(path, data)` | ✅ |
+| `Bun.env` | ✅ (alias for process.env) |
+| `Bun.version` | ✅ |
+| `Bun.nanoseconds()` | ✅ |
+| `Bun.hash(data)` | ✅ (djb2) |
+| `Bun.escapeHTML(str)` | ✅ |
+| `Bun.spawn()` | ⚠️ (throws by default) |
+| `Bun.serve()` | ❌ Not supported |
 
 ### Global APIs
 
-`fetch`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `AbortController`, `AbortSignal`, `Buffer`, `console`, `process`, `setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`, `atob`, `btoa`
+`fetch`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `AbortController`, `AbortSignal`, `Buffer`, `console`, `process`, `setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`, `atob`, `btoa`, `ReadableStream`, `WritableStream`, `TransformStream`, `Event`, `EventTarget`, `Blob`, `File`, `FormData`, `crypto`, `navigator`, `structuredClone`
 
 ## Building a JS bundle
 
