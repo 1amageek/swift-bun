@@ -200,9 +200,9 @@ enum ESMResolver {
         process.pid = 1;
         process.cwd = function() { return '/'; };
         process.exit = function(code) { throw new Error('process.exit(' + code + ') called'); };
-        process.stdout = { write: function(s) { __nativeLog('log', s); return true; }, isTTY: false };
-        process.stderr = { write: function(s) { __nativeLog('error', s); return true; }, isTTY: false };
-        process.stdin = { isTTY: false };
+        process.stdout = process.stdout || { write: function() { return true; }, isTTY: false };
+        process.stderr = process.stderr || { write: function() { return true; }, isTTY: false };
+        process.stdin = process.stdin || { isTTY: false };
         process.nextTick = function(fn) { Promise.resolve().then(fn); };
         process.hrtime = function(prev) {
             var now = performance.now();

@@ -128,12 +128,14 @@ public final class BunProcess: Sendable {
     }
 
     /// Evaluate JavaScript and return the result.
+    ///
+    /// Must be called after `load()`. Cannot be called after `run()` exits.
     @discardableResult
     public func evaluate(js source: String) async throws -> JSResult {
         try await eventLoop.submit {
             self.eventLoop.preconditionInEventLoop()
-            guard let ctx = self.jsContext else {
-                throw BunRuntimeError.contextCreationFailed
+            guard self.state == .loaded, let ctx = self.jsContext else {
+                throw BunRuntimeError.contextNotReady
             }
             let result = ctx.evaluateScript(source)
             try self.checkException()
@@ -142,12 +144,14 @@ public final class BunProcess: Sendable {
     }
 
     /// Call a global JavaScript function by name.
+    ///
+    /// Must be called after `load()`. Cannot be called after `run()` exits.
     @discardableResult
     public func call(_ function: String, arguments: [Any] = []) async throws -> JSResult {
         try await eventLoop.submit {
             self.eventLoop.preconditionInEventLoop()
-            guard let ctx = self.jsContext else {
-                throw BunRuntimeError.contextCreationFailed
+            guard self.state == .loaded, let ctx = self.jsContext else {
+                throw BunRuntimeError.contextNotReady
             }
             guard let fn = ctx.objectForKeyedSubscript(function),
                   !fn.isUndefined else {
@@ -213,7 +217,7 @@ public final class BunProcess: Sendable {
         // Install polyfills
         ESMResolver.installModules(in: ctx)
         installConsoleBridge(in: ctx)
-        installStdoutBridge(in: ctx)
+        installStdioBridges(in: ctx)
         installTimerBridge(in: ctx)
         installFetchBridge(in: ctx)
         installProcessExitBridge(in: ctx)
@@ -320,14 +324,22 @@ public final class BunProcess: Sendable {
         ctx.setObject(logBlock, forKeyedSubscript: "__nativeLog" as NSString)
     }
 
-    // MARK: - stdout Bridge
+    // MARK: - stdout/stderr Bridge
 
-    private func installStdoutBridge(in ctx: JSContext) {
-        let writeBlock: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
+    private func installStdioBridges(in ctx: JSContext) {
+        // stdout → stdout stream (application protocol data)
+        let stdoutWrite: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
             stdoutContinuation.yield(data)
             return true
         }
-        ctx.setObject(writeBlock, forKeyedSubscript: "__nativeStdoutWrite" as NSString)
+        ctx.setObject(stdoutWrite, forKeyedSubscript: "__nativeStdoutWrite" as NSString)
+
+        // stderr → output stream (diagnostic data, tagged as stderr)
+        let stderrWrite: @convention(block) (String) -> Bool = { [outputContinuation] data in
+            outputContinuation.yield("[stderr] \(data)")
+            return true
+        }
+        ctx.setObject(stderrWrite, forKeyedSubscript: "__nativeStderrWrite" as NSString)
 
         ctx.evaluateScript("""
         process.stdout = {
@@ -335,6 +347,14 @@ public final class BunProcess: Sendable {
             isTTY: false,
             columns: 80,
             rows: 24,
+            on: function() { return this; },
+            once: function() { return this; },
+            emit: function() { return false; },
+            end: function() {},
+        };
+        process.stderr = {
+            write: function(s) { return __nativeStderrWrite(String(s)); },
+            isTTY: false,
             on: function() { return this; },
             once: function() { return this; },
             emit: function() { return false; },

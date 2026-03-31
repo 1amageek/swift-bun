@@ -9,4 +9,5 @@ public enum BunRuntimeError: Error, Sendable {
     case functionNotFound(String)
     case transformerNotFound
     case transformFailed
+    case contextNotReady
 }
