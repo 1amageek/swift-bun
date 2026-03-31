@@ -192,6 +192,60 @@ enum NodeStubs {
                 },
             };
 
+            // http2
+            __nodeModules.http2 = {
+                constants: {},
+                connect: function() {
+                    throw new Error('node:http2 is not supported in swift-bun');
+                },
+                createServer: function() {
+                    throw new Error('node:http2 is not supported in swift-bun');
+                },
+                createSecureServer: function() {
+                    throw new Error('node:http2 is not supported in swift-bun');
+                },
+            };
+
+            // inspector
+            __nodeModules.inspector = {
+                open: function() {},
+                close: function() {},
+                url: function() { return undefined; },
+                Session: function() {
+                    this.connect = function() {};
+                    this.post = function(method, params, cb) { if (cb) cb(new Error('not supported')); };
+                    this.disconnect = function() {};
+                    this.on = function() { return this; };
+                },
+            };
+
+            // v8
+            __nodeModules.v8 = {
+                getHeapStatistics: function() { return {}; },
+                getHeapSnapshot: function() { return ''; },
+                serialize: function(v) { return JSON.stringify(v); },
+                deserialize: function(v) { return JSON.parse(v); },
+            };
+
+            // dns
+            __nodeModules.dns = {
+                lookup: function(host, opts, cb) {
+                    if (typeof opts === 'function') cb = opts;
+                    if (cb) cb(null, '127.0.0.1', 4);
+                },
+                resolve: function(host, rrtype, cb) {
+                    if (typeof rrtype === 'function') cb = rrtype;
+                    if (cb) cb(new Error('dns.resolve not supported'));
+                },
+                promises: {
+                    lookup: function() { return Promise.resolve({ address: '127.0.0.1', family: 4 }); },
+                    resolve: function() { return Promise.reject(new Error('dns.resolve not supported')); },
+                },
+            };
+
+            // constants
+            __nodeModules.constants = __nodeModules.fs.constants || {};
+
             // diagnostics_channel
             __nodeModules.diagnostics_channel = {
                 channel: function(name) {

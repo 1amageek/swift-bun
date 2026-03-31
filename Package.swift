@@ -11,9 +11,16 @@ let package = Package(
     products: [
         .library(name: "BunRuntime", targets: ["BunRuntime"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.0"),
+    ],
     targets: [
         .target(
             name: "BunRuntime",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ],
             resources: [
                 .copy("Resources/esm-transformer.bundle.js"),
             ]

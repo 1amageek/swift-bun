@@ -5,7 +5,15 @@ enum ESMResolver {
 
     /// Install the `require()` function and all built-in modules into the given context.
     static func install(in context: JSContext) {
-        // Install each module's native bridges and JS polyfills
+        installModules(in: context)
+        installRequire(in: context)
+    }
+
+    /// Install all module polyfills without `require()`.
+    ///
+    /// `BunProcess` calls this, then installs its NIO-backed timer/fetch bridges
+    /// (which override the default ones), then calls `installRequire()` separately.
+    static func installModules(in context: JSContext) {
         installGlobals(in: context)
         NodePath.install(in: context)
         NodeBuffer.install(in: context)
@@ -22,7 +30,6 @@ enum ESMResolver {
         BunEnv.install(in: context)
         BunFile.install(in: context)
         BunSpawn.install(in: context)
-        installRequire(in: context)
     }
 
     // MARK: - Private
@@ -391,7 +398,8 @@ enum ESMResolver {
         """)
     }
 
-    private static func installRequire(in context: JSContext) {
+    /// Install the `require()` function. Must be called after all modules are registered.
+    static func installRequire(in context: JSContext) {
         context.evaluateScript("""
         (function() {
             var moduleCache = {};
@@ -455,6 +463,27 @@ enum ESMResolver {
                 'node:perf_hooks': __nodeModules.perf_hooks,
                 'diagnostics_channel': __nodeModules.diagnostics_channel,
                 'node:diagnostics_channel': __nodeModules.diagnostics_channel,
+                'process': globalThis.process,
+                'node:process': globalThis.process,
+                'http2': __nodeModules.http2,
+                'node:http2': __nodeModules.http2,
+                'inspector': __nodeModules.inspector,
+                'node:inspector': __nodeModules.inspector,
+                'node:inspector/promises': __nodeModules.inspector,
+                'path/posix': __nodeModules.path,
+                'path/win32': __nodeModules.path,
+                'node:path/posix': __nodeModules.path,
+                'node:path/win32': __nodeModules.path,
+                'stream/consumers': __nodeModules.stream,
+                'node:stream/consumers': __nodeModules.stream,
+                'stream/promises': __nodeModules.stream,
+                'node:stream/promises': __nodeModules.stream,
+                'v8': __nodeModules.v8,
+                'node:v8': __nodeModules.v8,
+                'dns': __nodeModules.dns,
+                'node:dns': __nodeModules.dns,
+                'constants': __nodeModules.constants,
+                'node:constants': __nodeModules.constants,
             };
 
             globalThis.require = function require(id) {
