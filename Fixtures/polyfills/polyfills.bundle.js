@@ -1559,7 +1559,7 @@ var require_polyfill = __commonJS({
         })(a2, `${t2} has member 'signal' that`), { preventAbort: Boolean(r2), preventCancel: Boolean(o2), preventClose: Boolean(n2), signal: a2 };
       }
       Object.defineProperties(ReadableStreamDefaultController.prototype, { close: { enumerable: true }, enqueue: { enumerable: true }, error: { enumerable: true }, desiredSize: { enumerable: true } }), o(ReadableStreamDefaultController.prototype.close, "close"), o(ReadableStreamDefaultController.prototype.enqueue, "enqueue"), o(ReadableStreamDefaultController.prototype.error, "error"), "symbol" == typeof Symbol.toStringTag && Object.defineProperty(ReadableStreamDefaultController.prototype, Symbol.toStringTag, { value: "ReadableStreamDefaultController", configurable: true });
-      class ReadableStream {
+      class ReadableStream2 {
         constructor(e2 = {}, t2 = {}) {
           void 0 === e2 ? e2 = null : I(e2, "First parameter");
           const r2 = dt(t2, "Second parameter"), o2 = (function(e3, t3) {
@@ -1652,12 +1652,12 @@ var require_polyfill = __commonJS({
         }
       }
       function Cr(e2, t2, r2, o2 = 1, n2 = () => 1) {
-        const a2 = Object.create(ReadableStream.prototype);
+        const a2 = Object.create(ReadableStream2.prototype);
         qr(a2);
         return _r(a2, Object.create(ReadableStreamDefaultController.prototype), e2, t2, r2, o2, n2), a2;
       }
       function Pr(e2, t2, r2) {
-        const o2 = Object.create(ReadableStream.prototype);
+        const o2 = Object.create(ReadableStream2.prototype);
         qr(o2);
         return Je(o2, Object.create(ReadableByteStreamController.prototype), e2, t2, r2, 0, void 0), o2;
       }
@@ -1665,7 +1665,7 @@ var require_polyfill = __commonJS({
         e2._state = "readable", e2._reader = void 0, e2._storedError = void 0, e2._disturbed = false;
       }
       function Er(e2) {
-        return !!t(e2) && (!!Object.prototype.hasOwnProperty.call(e2, "_readableStreamController") && e2 instanceof ReadableStream);
+        return !!t(e2) && (!!Object.prototype.hasOwnProperty.call(e2, "_readableStreamController") && e2 instanceof ReadableStream2);
       }
       function Wr(e2) {
         return void 0 !== e2._reader;
@@ -1706,7 +1706,7 @@ var require_polyfill = __commonJS({
         const r2 = null == e2 ? void 0 : e2.highWaterMark;
         return M(r2, "highWaterMark", "QueuingStrategyInit"), { highWaterMark: Y(r2) };
       }
-      Object.defineProperties(ReadableStream, { from: { enumerable: true } }), Object.defineProperties(ReadableStream.prototype, { cancel: { enumerable: true }, getReader: { enumerable: true }, pipeThrough: { enumerable: true }, pipeTo: { enumerable: true }, tee: { enumerable: true }, values: { enumerable: true }, locked: { enumerable: true } }), o(ReadableStream.from, "from"), o(ReadableStream.prototype.cancel, "cancel"), o(ReadableStream.prototype.getReader, "getReader"), o(ReadableStream.prototype.pipeThrough, "pipeThrough"), o(ReadableStream.prototype.pipeTo, "pipeTo"), o(ReadableStream.prototype.tee, "tee"), o(ReadableStream.prototype.values, "values"), "symbol" == typeof Symbol.toStringTag && Object.defineProperty(ReadableStream.prototype, Symbol.toStringTag, { value: "ReadableStream", configurable: true }), Object.defineProperty(ReadableStream.prototype, de, { value: ReadableStream.prototype.values, writable: true, configurable: true });
+      Object.defineProperties(ReadableStream2, { from: { enumerable: true } }), Object.defineProperties(ReadableStream2.prototype, { cancel: { enumerable: true }, getReader: { enumerable: true }, pipeThrough: { enumerable: true }, pipeTo: { enumerable: true }, tee: { enumerable: true }, values: { enumerable: true }, locked: { enumerable: true } }), o(ReadableStream2.from, "from"), o(ReadableStream2.prototype.cancel, "cancel"), o(ReadableStream2.prototype.getReader, "getReader"), o(ReadableStream2.prototype.pipeThrough, "pipeThrough"), o(ReadableStream2.prototype.pipeTo, "pipeTo"), o(ReadableStream2.prototype.tee, "tee"), o(ReadableStream2.prototype.values, "values"), "symbol" == typeof Symbol.toStringTag && Object.defineProperty(ReadableStream2.prototype, Symbol.toStringTag, { value: "ReadableStream", configurable: true }), Object.defineProperty(ReadableStream2.prototype, de, { value: ReadableStream2.prototype.values, writable: true, configurable: true });
       const zr = (e2) => e2.byteLength;
       o(zr, "size");
       class ByteLengthQueuingStrategy {
@@ -1947,7 +1947,7 @@ var require_polyfill = __commonJS({
         return new TypeError(`TransformStream.prototype.${e2} can only be used on a TransformStream`);
       }
       Object.defineProperties(TransformStreamDefaultController.prototype, { enqueue: { enumerable: true }, error: { enumerable: true }, terminate: { enumerable: true }, desiredSize: { enumerable: true } }), o(TransformStreamDefaultController.prototype.enqueue, "enqueue"), o(TransformStreamDefaultController.prototype.error, "error"), o(TransformStreamDefaultController.prototype.terminate, "terminate"), "symbol" == typeof Symbol.toStringTag && Object.defineProperty(TransformStreamDefaultController.prototype, Symbol.toStringTag, { value: "TransformStreamDefaultController", configurable: true });
-      const no = { ReadableStream, ReadableStreamDefaultController, ReadableByteStreamController, ReadableStreamBYOBRequest, ReadableStreamDefaultReader, ReadableStreamBYOBReader, WritableStream, WritableStreamDefaultController, WritableStreamDefaultWriter, ByteLengthQueuingStrategy, CountQueuingStrategy, TransformStream, TransformStreamDefaultController };
+      const no = { ReadableStream: ReadableStream2, ReadableStreamDefaultController, ReadableByteStreamController, ReadableStreamBYOBRequest, ReadableStreamDefaultReader, ReadableStreamBYOBReader, WritableStream, WritableStreamDefaultController, WritableStreamDefaultWriter, ByteLengthQueuingStrategy, CountQueuingStrategy, TransformStream, TransformStreamDefaultController };
       for (const e2 in no) Object.prototype.hasOwnProperty.call(no, e2) && Object.defineProperty(nr, e2, { value: no[e2], writable: true, configurable: true });
     })();
   }
@@ -1993,8 +1993,7 @@ if (typeof globalThis.EventTarget === "undefined") {
     if (!fn) return;
     if (!this._listeners[type]) this._listeners[type] = [];
     var once = options && (options.once || options === true);
-    var entry = { fn, once };
-    this._listeners[type].push(entry);
+    this._listeners[type].push({ fn, once });
   };
   EventTarget.prototype.removeEventListener = function(type, fn) {
     if (!this._listeners[type]) return;
@@ -2022,7 +2021,7 @@ var EventTarget2;
 if (typeof globalThis.CustomEvent === "undefined") {
   let CustomEvent = function(type, options) {
     Event2.call(this, type, options);
-    this.detail = (options && options.detail) !== void 0 ? options.detail : null;
+    this.detail = options && options.detail !== void 0 ? options.detail : null;
   };
   CustomEvent2 = CustomEvent;
   CustomEvent.prototype = Object.create(Event2.prototype);
@@ -2030,6 +2029,233 @@ if (typeof globalThis.CustomEvent === "undefined") {
   globalThis.CustomEvent = CustomEvent;
 }
 var CustomEvent2;
+if (typeof globalThis.Blob === "undefined") {
+  globalThis.Blob = function Blob2(parts, options) {
+    options = options || {};
+    this.type = options.type || "";
+    this._parts = parts || [];
+    var size = 0;
+    for (var i = 0; i < this._parts.length; i++) {
+      var p = this._parts[i];
+      if (typeof p === "string") size += p.length;
+      else if (p instanceof ArrayBuffer) size += p.byteLength;
+      else if (p instanceof Uint8Array) size += p.byteLength;
+      else if (p instanceof Blob2) size += p.size;
+    }
+    this.size = size;
+  };
+  Blob.prototype.text = function() {
+    var result = "";
+    for (var i = 0; i < this._parts.length; i++) {
+      var p = this._parts[i];
+      if (typeof p === "string") result += p;
+    }
+    return Promise.resolve(result);
+  };
+  Blob.prototype.arrayBuffer = function() {
+    return this.text().then(function(t) {
+      var enc = new TextEncoder();
+      return enc.encode(t).buffer;
+    });
+  };
+  Blob.prototype.slice = function(start, end, type) {
+    return new Blob([], { type: type || this.type });
+  };
+  Blob.prototype.stream = function() {
+    var blob = this;
+    return new ReadableStream({
+      start: function(controller) {
+        blob.text().then(function(t) {
+          controller.enqueue(new TextEncoder().encode(t));
+          controller.close();
+        });
+      }
+    });
+  };
+}
+if (typeof globalThis.File === "undefined") {
+  globalThis.File = function File2(parts, name, options) {
+    Blob.call(this, parts, options);
+    this.name = name;
+    this.lastModified = options && options.lastModified || Date.now();
+  };
+  File.prototype = Object.create(Blob.prototype);
+  File.prototype.constructor = File;
+}
+if (typeof globalThis.FormData === "undefined") {
+  globalThis.FormData = function FormData2() {
+    this._entries = [];
+  };
+  FormData.prototype.append = function(name, value, filename) {
+    this._entries.push({ name, value, filename });
+  };
+  FormData.prototype.get = function(name) {
+    for (var i = 0; i < this._entries.length; i++) {
+      if (this._entries[i].name === name) return this._entries[i].value;
+    }
+    return null;
+  };
+  FormData.prototype.getAll = function(name) {
+    return this._entries.filter(function(e) {
+      return e.name === name;
+    }).map(function(e) {
+      return e.value;
+    });
+  };
+  FormData.prototype.has = function(name) {
+    return this._entries.some(function(e) {
+      return e.name === name;
+    });
+  };
+  FormData.prototype.set = function(name, value, filename) {
+    this._entries = this._entries.filter(function(e) {
+      return e.name !== name;
+    });
+    this.append(name, value, filename);
+  };
+  FormData.prototype.delete = function(name) {
+    this._entries = this._entries.filter(function(e) {
+      return e.name !== name;
+    });
+  };
+  FormData.prototype.forEach = function(cb) {
+    for (var i = 0; i < this._entries.length; i++) {
+      cb(this._entries[i].value, this._entries[i].name, this);
+    }
+  };
+  FormData.prototype.entries = function() {
+    var arr = this._entries.map(function(e) {
+      return [e.name, e.value];
+    });
+    return arr[Symbol.iterator]();
+  };
+  FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
+}
+if (typeof globalThis.WebSocket === "undefined") {
+  let WebSocket = function(url, protocols) {
+    EventTarget2.call(this);
+    this.url = url;
+    this.readyState = WebSocket.CONNECTING;
+    this.protocol = "";
+    this.extensions = "";
+    this.binaryType = "blob";
+    this.bufferedAmount = 0;
+    this.onopen = null;
+    this.onclose = null;
+    this.onmessage = null;
+    this.onerror = null;
+  };
+  WebSocket2 = WebSocket;
+  WebSocket.prototype = Object.create(EventTarget2.prototype);
+  WebSocket.prototype.constructor = WebSocket;
+  WebSocket.prototype.send = function() {
+  };
+  WebSocket.prototype.close = function() {
+    this.readyState = WebSocket.CLOSED;
+  };
+  WebSocket.CONNECTING = 0;
+  WebSocket.OPEN = 1;
+  WebSocket.CLOSING = 2;
+  WebSocket.CLOSED = 3;
+  globalThis.WebSocket = WebSocket;
+}
+var WebSocket2;
+if (typeof globalThis.MessageChannel === "undefined") {
+  let MessagePort = function() {
+    EventTarget2.call(this);
+    this.onmessage = null;
+    this.onmessageerror = null;
+  }, MessageChannel = function() {
+    this.port1 = new MessagePort();
+    this.port2 = new MessagePort();
+    this.port1._other = this.port2;
+    this.port2._other = this.port1;
+  };
+  MessagePort2 = MessagePort, MessageChannel2 = MessageChannel;
+  MessagePort.prototype = Object.create(EventTarget2.prototype);
+  MessagePort.prototype.constructor = MessagePort;
+  MessagePort.prototype.postMessage = function(data) {
+    var self2 = this;
+    if (self2._other && self2._other.onmessage) {
+      Promise.resolve().then(function() {
+        self2._other.onmessage({ data });
+      });
+    }
+  };
+  MessagePort.prototype.start = function() {
+  };
+  MessagePort.prototype.close = function() {
+  };
+  globalThis.MessagePort = MessagePort;
+  globalThis.MessageChannel = MessageChannel;
+}
+var MessagePort2;
+var MessageChannel2;
+if (typeof globalThis.Worker === "undefined") {
+  globalThis.Worker = function Worker() {
+    throw new Error("Worker is not supported in swift-bun");
+  };
+}
+if (typeof globalThis.XMLHttpRequest === "undefined") {
+  globalThis.XMLHttpRequest = function XMLHttpRequest2() {
+    this.readyState = 0;
+    this.status = 0;
+    this.responseText = "";
+  };
+  XMLHttpRequest.prototype.open = function() {
+  };
+  XMLHttpRequest.prototype.send = function() {
+  };
+  XMLHttpRequest.prototype.setRequestHeader = function() {
+  };
+  XMLHttpRequest.prototype.abort = function() {
+  };
+  XMLHttpRequest.UNSENT = 0;
+  XMLHttpRequest.OPENED = 1;
+  XMLHttpRequest.HEADERS_RECEIVED = 2;
+  XMLHttpRequest.LOADING = 3;
+  XMLHttpRequest.DONE = 4;
+}
+if (typeof globalThis.crypto === "undefined") {
+  globalThis.crypto = {
+    getRandomValues: function(arr) {
+      for (var i = 0; i < arr.length; i++) {
+        arr[i] = Math.floor(Math.random() * 256);
+      }
+      return arr;
+    },
+    randomUUID: function() {
+      var bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      bytes[6] = bytes[6] & 15 | 64;
+      bytes[8] = bytes[8] & 63 | 128;
+      var hex = [];
+      for (var i = 0; i < 16; i++)
+        hex.push(("0" + bytes[i].toString(16)).slice(-2));
+      return hex.slice(0, 4).join("") + "-" + hex.slice(4, 6).join("") + "-" + hex.slice(6, 8).join("") + "-" + hex.slice(8, 10).join("") + "-" + hex.slice(10).join("");
+    },
+    subtle: {
+      digest: function(algo, data) {
+        return Promise.resolve(new ArrayBuffer(32));
+      },
+      importKey: function() {
+        return Promise.resolve({});
+      },
+      sign: function() {
+        return Promise.resolve(new ArrayBuffer(32));
+      },
+      verify: function() {
+        return Promise.resolve(true);
+      },
+      encrypt: function() {
+        return Promise.resolve(new ArrayBuffer(0));
+      },
+      decrypt: function() {
+        return Promise.resolve(new ArrayBuffer(0));
+      }
+    }
+  };
+}
 if (typeof globalThis.structuredClone === "undefined") {
   globalThis.structuredClone = function(obj) {
     if (obj === void 0) return void 0;
@@ -2043,6 +2269,12 @@ if (typeof globalThis.navigator === "undefined") {
     language: "en",
     languages: ["en"]
   };
+}
+if (!Symbol.dispose) {
+  Symbol.dispose = /* @__PURE__ */ Symbol.for("Symbol.dispose");
+}
+if (!Symbol.asyncDispose) {
+  Symbol.asyncDispose = /* @__PURE__ */ Symbol.for("Symbol.asyncDispose");
 }
 /*! Bundled license information:
 
