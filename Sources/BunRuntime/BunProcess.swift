@@ -668,12 +668,22 @@ public final class BunProcess: Sendable {
 
             // AsyncIterable support — enables `for await (const chunk of process.stdin)`
             stdin[Symbol.asyncIterator] = function() {
+                // Ref when iteration starts — stdin is an active handle
+                if (!stdin._refed) {
+                    stdin._refed = true;
+                    __stdinRef();
+                }
                 return {
                     next: function() {
                         if (stdin._buffer.length > 0) {
                             return Promise.resolve({ value: stdin._buffer.shift(), done: false });
                         }
                         if (stdin._ended) {
+                            // Unref when iteration ends
+                            if (stdin._refed) {
+                                stdin._refed = false;
+                                __stdinUnref();
+                            }
                             return Promise.resolve({ value: undefined, done: true });
                         }
                         return new Promise(function(resolve) {
@@ -682,6 +692,10 @@ public final class BunProcess: Sendable {
                     },
                     return: function() {
                         stdin._ended = true;
+                        if (stdin._refed) {
+                            stdin._refed = false;
+                            __stdinUnref();
+                        }
                         return Promise.resolve({ value: undefined, done: true });
                     }
                 };

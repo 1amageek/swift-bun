@@ -238,6 +238,26 @@ struct BunProcessTests {
         #expect(try await task.value == 0)
     }
 
+    @Test func stdinAsyncIteratorKeepsAlive() async throws {
+        // for await on stdin should ref() and keep the process alive
+        let url = try tempBundle("""
+            (async function() {
+                for await (var chunk of process.stdin) {
+                    process.exit(chunk === 'ok' ? 0 : 1);
+                }
+            })();
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+
+        // Process should still be alive after 200ms (waiting for stdin)
+        try await Task.sleep(for: .milliseconds(200))
+
+        p.sendInput("ok".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
     @Test func stdinAsyncIterator() async throws {
         let url = try tempBundle("""
             (async function() {
