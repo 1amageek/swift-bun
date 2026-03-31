@@ -47,16 +47,29 @@ swift-bun provides a Bun-compatible JavaScript runtime for iOS/macOS by wrapping
 
 ### Execution model: BunProcess
 
-`BunProcess` is the sole execution model. All JSContext access is serialized on a dedicated NIO EventLoop thread, guaranteeing thread safety.
+`BunProcess` is the sole execution model. Configuration is provided at `init`, execution via `load()` or `run()`.
+
+```swift
+// All configuration at init
+BunProcess(bundle: URL?, arguments: [String], cwd: String?, environment: [String: String])
+
+// Two modes (mutually exclusive per instance):
+.load()  // Library mode — then evaluate(js:) / call()
+.run()   // Process mode — blocks until exit
+```
+
+All JSContext access is serialized on a dedicated NIO EventLoop thread, guaranteeing thread safety. `preconditionInEventLoop()` guards every access point.
 
 ```
 BunProcess (final class, Sendable)
+├── Configuration (immutable): bundle, arguments, cwd, environment
 ├── EventLoop thread (NIO MultiThreadedEventLoopGroup, 1 thread)
 │   ├── JSContext (all access pinned to this thread)
 │   ├── ESMResolver polyfills (require, Node.js modules, Bun APIs)
 │   └── NIO-backed bridges:
 │       ├── setTimeout/setInterval → eventLoop.scheduleTask
 │       ├── fetch (__nativeFetch) → URLSession + eventLoop.execute
+│       ├── process.stdout.write → stdout AsyncStream
 │       ├── process.stdin → sendInput() from Swift
 │       ├── process.exit → resolveExit()
 │       └── console.log → output AsyncStream
@@ -64,26 +77,22 @@ BunProcess (final class, Sendable)
 └── ESM transformer (es-module-lexer WASM, temporary JSContext)
 ```
 
-Two modes, mutually exclusive per instance:
-
-- **Library mode**: `load(bundle:)` + `evaluate(js:)` / `call()` — for using JS libraries from Swift
-- **Process mode**: `run(bundle:arguments:cwd:environment:)` — for long-lived applications (timers, fetch, stdin keep the process alive)
-
 ### Streams: stdout vs output
 
-Two separate `AsyncStream<String>` channels:
+Two separate `AsyncStream<String>` channels, available immediately after init:
 
-- **`stdout`** — `process.stdout.write()` output. Application data channel (e.g. NDJSON protocol messages from cli.js). Consumed by the caller to parse protocol data.
+- **`stdout`** — `process.stdout.write()` output. Application data channel (e.g. NDJSON protocol messages). Consumed by the caller to parse protocol data.
 - **`output`** — `console.log/error/warn` output. Diagnostic channel with level prefixes (`[log] ...`, `[error] ...`). For debugging/logging.
 
 These are intentionally separate: `process.stdout.write()` is the protocol data pipe, `console.log()` is diagnostics. Mixing them would break protocol parsers.
 
 ### process.argv and process.cwd
 
-`run(bundle:arguments:cwd:)` automatically constructs `process.argv`:
+`init(bundle:arguments:cwd:)` configures `process.argv` and `process.cwd()` before bundle evaluation:
 
 ```
 process.argv = ["node", bundlePath, ...arguments]
+process.cwd = function() { return cwd; }
 ```
 
 The caller passes only the user arguments (e.g. `["-p", "--input-format", "stream-json"]`). BunProcess prepends `["node", bundlePath]` to match Node.js conventions.
@@ -111,8 +120,10 @@ Order matters — later modules depend on earlier ones:
 1. **Globals**: `performance`, `URL`, `URLSearchParams`, `console`, `process`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `AbortController`
 2. **Node modules**: Path → Buffer → URL → Util → OS → FS → Crypto → HTTP → Stream → Timers → Stubs
 3. **Bun APIs**: Shims → Env → File → Spawn
-4. **NIO bridges** (BunProcess only): Timer override → Fetch override → process.exit → stdin → timer module patch
+4. **NIO bridges**: Console → stdout → Timer override → Fetch override → process.exit → stdin → timer module patch
 5. **`require()`**: Installed last — reads from `globalThis.__nodeModules` populated by steps 2-3
+6. **Configuration**: process.argv, process.cwd, process.env
+7. **Bundle evaluation**: evaluateScript(source)
 
 ### Timer bridge (NIO-backed)
 
@@ -152,15 +163,11 @@ Modules needing system APIs use `@convention(block)` closures registered on JSCo
 
 - **NodeFS**: `__fsReadFileSync` etc. → `FileManager` — returns `{value: ...}` or `{error: "ENOENT: ..."}`
 - **NodeCrypto**: `__cryptoSHA256` etc. → `CryptoKit`
-- **NodeHTTP**: `__nativeFetch` → `URLSession` (EventLoop-safe in BunProcess)
+- **NodeHTTP**: `__nativeFetch` → `URLSession` (EventLoop-safe)
 - **NodeOS**: `__osHostname` etc. → `ProcessInfo`
-
-### Output stream
-
-`BunProcess.output` is an `AsyncStream<String>`. `console.log/error/warn` are routed through `__nativeLog` which yields to the output continuation. The stream finishes when the process exits.
 
 ### Known limitations
 
-- `process.exit()` uses `throw new Error('__PROCESS_EXIT__')` to unwind the JS stack. If JS code catches this exception, the exit may be suppressed.
+- `process.exit()` throws a frozen sentinel object to unwind the JS stack. If JS code catches this, the exit may be suppressed.
 - `node:child_process` is stubbed (throws) — not available on iOS.
 - `Bun.serve()` is not supported.

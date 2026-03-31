@@ -12,7 +12,7 @@ swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, e
 - Bridges `fetch()` to `URLSession` for real HTTP networking
 - Provides `Bun.*` API shims (`Bun.file()`, `Bun.env`, `Bun.write()`, etc.)
 - Runs long-lived JS applications with a NIO EventLoop (timers, fetch, stdin)
-- Bridges JS console output to Swift via `AsyncStream`
+- Separates `process.stdout.write` (application data) from `console.log` (diagnostics)
 
 **What it doesn't do:**
 - Bundle or transpile JavaScript (use Bun or esbuild for that)
@@ -44,47 +44,43 @@ targets: [
 
 ## Usage
 
-### Library mode: load a bundle and call functions
+### Process mode: run a long-lived application
 
 ```swift
 import BunRuntime
 
-let process = BunProcess()
-try await process.load(
-    bundle: Bundle.main.url(forResource: "app.bundle", withExtension: "js")!
-)
-
-// Evaluate JavaScript
-let result = try await process.evaluate(js: "1 + 2")
-print(result.int32Value) // 3
-
-// Call a global function
-let greeting = try await process.call("greet", arguments: ["World"])
-print(greeting.stringValue) // "Hello, World!"
-```
-
-### Process mode: run a long-lived application
-
-```swift
-let process = BunProcess()
-let exitCode = try await process.run(
+let process = BunProcess(
     bundle: cliBundle,
     arguments: ["-p", "--input-format", "stream-json"],
     cwd: "/path/to/project",
     environment: ["API_KEY": "sk-ant-..."]
 )
-// Blocks until process.exit() is called or all pending work completes
-// process.argv = ["node", bundlePath, "-p", "--input-format", "stream-json"]
-// process.cwd() = "/path/to/project"
+
+// Read application protocol data from stdout
+Task {
+    for await data in process.stdout {
+        let event = parseNDJSON(data)
+    }
+}
+
+// Read diagnostic console output
+Task {
+    for await line in process.output {
+        print(line) // "[log] hello", "[error] bad"
+    }
+}
+
+// Run until process.exit() or all pending work completes
+let exitCode = try await process.run()
 ```
+
+`process.stdout.write()` in JS writes to `stdout`. `console.log/error` writes to `output`. They are separate channels — stdout carries protocol data, output carries diagnostics.
 
 ### Sending stdin input
 
 ```swift
-let process = BunProcess()
-let task = Task {
-    try await process.run(bundle: interactiveApp)
-}
+let process = BunProcess(bundle: interactiveApp)
+let task = Task { try await process.run() }
 
 process.sendInput("user input\n".data(using: .utf8)!)
 process.sendInput(nil) // EOF
@@ -92,43 +88,56 @@ process.sendInput(nil) // EOF
 let exitCode = try await task.value
 ```
 
-### Reading stdout (application data) and console output (diagnostics)
+### Library mode: load a bundle and call functions
 
 ```swift
-let process = BunProcess()
-
-// stdout: application protocol data (e.g. NDJSON from cli.js)
-Task {
-    for await data in process.stdout {
-        let event = parseNDJSON(data)
-    }
-}
-
-// output: diagnostic console messages
-Task {
-    for await line in process.output {
-        print(line) // "[log] hello world", "[error] something failed"
-    }
-}
-
-try await process.run(bundle: myApp)
-```
-
-`process.stdout.write()` in JS writes to the `stdout` stream. `console.log/error` writes to the `output` stream. They are separate channels.
-
-### Environment variables
-
-```swift
-let process = BunProcess()
-try await process.run(
-    bundle: myApp,
-    environment: [
-        "API_KEY": "sk-ant-...",
-        "NODE_ENV": "production",
-    ]
+let runtime = BunProcess(
+    bundle: Bundle.main.url(forResource: "app.bundle", withExtension: "js")!
 )
-// Accessible in JS as process.env.API_KEY and Bun.env.API_KEY
+try await runtime.load()
+
+let result = try await runtime.evaluate(js: "1 + 2")
+print(result.int32Value) // 3
+
+let greeting = try await runtime.call("greet", arguments: ["World"])
+print(greeting.stringValue) // "Hello, World!"
 ```
+
+### Bare context (no bundle)
+
+```swift
+let runtime = BunProcess()
+try await runtime.load()
+try await runtime.evaluate(js: "var path = require('node:path')")
+let result = try await runtime.evaluate(js: "path.join('/usr', 'local')")
+```
+
+## API
+
+```swift
+public final class BunProcess: Sendable {
+    // Configuration at init
+    init(bundle: URL? = nil, arguments: [String] = [], cwd: String? = nil, environment: [String: String] = [:])
+
+    // Streams (available immediately after init)
+    let stdout: AsyncStream<String>   // process.stdout.write() data
+    let output: AsyncStream<String>   // console.log/error diagnostics
+
+    // Library mode
+    func load() async throws
+    func evaluate(js: String) async throws -> JSResult
+    func call(_ function: String, arguments: [Any]) async throws -> JSResult
+
+    // Process mode
+    func run() async throws -> Int32
+    func sendInput(_ data: Data?)
+    func terminate(exitCode: Int32)
+}
+```
+
+`load()` and `run()` are mutually exclusive on a single instance.
+
+`process.argv` is automatically set to `["node", bundlePath, ...arguments]`.
 
 ## Supported Modules
 
@@ -185,36 +194,36 @@ Both ESM and CJS bundles are supported. ESM bundles are automatically transforme
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Your Swift App                 │
-│                                             │
-│   BunProcess()                              │
-│     .load(bundle:) / .run(bundle:)          │
-│     .evaluate(js:) → JSResult               │
-│     .call(name, args) → JSResult            │
-│     .stdout → AsyncStream<String> (data)     │
-│     .output → AsyncStream<String> (console) │
-│     .sendInput(data)                        │
-│        ↓                                    │
-│   ┌─────────────────────────────────────┐   │
-│   │     NIO EventLoop (dedicated thread) │  │
-│   │  ┌───────────────────────────────┐  │   │
-│   │  │  JavaScriptCore.framework     │  │   │
-│   │  │  ┌─────────────────────────┐  │  │   │
-│   │  │  │  ESMResolver polyfills  │  │  │   │
-│   │  │  │  • Node.js modules      │  │  │   │
-│   │  │  │  • Bun API shims        │  │  │   │
-│   │  │  └─────────────────────────┘  │  │   │
-│   │  │  ┌─────────────────────────┐  │  │   │
-│   │  │  │  NIO-backed bridges     │  │  │   │
-│   │  │  │  • setTimeout → sched   │  │  │   │
-│   │  │  │  • fetch → URLSession   │  │  │   │
-│   │  │  │  • stdin → sendInput    │  │  │   │
-│   │  │  │  • console → output     │  │  │   │
-│   │  │  └─────────────────────────┘  │  │   │
-│   │  └───────────────────────────────┘  │   │
-│   └─────────────────────────────────────┘   │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│               Your Swift App                 │
+│                                              │
+│   BunProcess(bundle:arguments:cwd:env:)      │
+│     .run()  → Int32      (process mode)      │
+│     .load() → evaluate() (library mode)      │
+│     .stdout → AsyncStream (protocol data)    │
+│     .output → AsyncStream (console logs)     │
+│     .sendInput(data)                         │
+│        ↓                                     │
+│   ┌──────────────────────────────────────┐   │
+│   │     NIO EventLoop (dedicated thread)  │  │
+│   │  ┌────────────────────────────────┐  │   │
+│   │  │  JavaScriptCore.framework      │  │   │
+│   │  │  ┌──────────────────────────┐  │  │   │
+│   │  │  │  ESMResolver polyfills   │  │  │   │
+│   │  │  │  • Node.js modules       │  │  │   │
+│   │  │  │  • Bun API shims         │  │  │   │
+│   │  │  └──────────────────────────┘  │  │   │
+│   │  │  ┌──────────────────────────┐  │  │   │
+│   │  │  │  NIO-backed bridges      │  │  │   │
+│   │  │  │  • setTimeout → sched    │  │  │   │
+│   │  │  │  • fetch → URLSession    │  │  │   │
+│   │  │  │  • stdin → sendInput     │  │  │   │
+│   │  │  │  • stdout.write → stdout │  │  │   │
+│   │  │  │  • console → output      │  │  │   │
+│   │  │  └──────────────────────────┘  │  │   │
+│   │  └────────────────────────────────┘  │   │
+│   └──────────────────────────────────────┘   │
+└──────────────────────────────────────────────┘
 ```
 
 ## License
