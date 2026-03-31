@@ -585,4 +585,78 @@ struct CombinedTransformTests {
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == source)
     }
+
+    // MARK: - Regex literal safety
+
+    @Test func importInsideRegexLiteral() {
+        // /import{x}from"y"/ is a regex, not an import
+        let source = #"var r = /import{x}from"y"/;"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func regexAfterAssignment() {
+        let source = #"var r = /pattern/g;"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func divisionNotConfusedWithRegex() {
+        let source = "var x = a / b / c;"
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func regexAfterReturn() {
+        let source = #"return /import\s*\{/g.test(s);"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func regexAfterOpenParen() {
+        let source = #"if(/import/.test(s)){}"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    // MARK: - Combined default + named import
+
+    @Test func combinedDefaultAndNamedImport() {
+        let source = #"import fs,{readFileSync}from"node:fs";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var fs=require("node:fs"),{readFileSync}=fs;"#)
+    }
+
+    @Test func combinedDefaultAndNamedImportWithSpaces() {
+        let source = #"import fs, { readFileSync, writeFileSync as wfs } from "node:fs";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var fs=require("node:fs"),{ readFileSync, writeFileSync:wfs }=fs;"#)
+    }
+
+    @Test func combinedDefaultAndNamedImportNoSemicolon() {
+        let source = #"import fs,{readFileSync}from"node:fs""#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var fs=require("node:fs"),{readFileSync}=fs"#)
+    }
+
+    // MARK: - Real cli.js patterns
+
+    @Test func cliJSFirstImport() {
+        let source = #"import{createRequire as _K5}from"node:module";var o45=Object.create;"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{createRequire:_K5}=require("node:module");var o45=Object.create;"#)
+        #expect(!result.contains("import"))
+    }
+
+    @Test func cliJSLazyBlockFollowedByImport() {
+        let source = #"LX6=Y_5});import{randomUUID as Sn8}from"crypto";var Jj7=()=>{};"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"LX6=Y_5});var{randomUUID:Sn8}=require("crypto");var Jj7=()=>{};"#)
+    }
+
+    @Test func cliJSDefaultImportFromNodeModule() {
+        let source = #"import HQ9 from"node:process";import{promisify as JQ9}from"node:util";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(!result.contains("import"))
+    }
 }

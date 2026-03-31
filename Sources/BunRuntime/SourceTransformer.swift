@@ -40,6 +40,9 @@ enum SourceTransformer {
             } else if let end = skipComment(chars, at: i) {
                 result.append(contentsOf: chars[i..<end])
                 i = end
+            } else if let end = skipRegex(chars, at: i, result: result) {
+                result.append(contentsOf: chars[i..<end])
+                i = end
             } else if isImportKeyword(chars, at: i) {
                 if let (transformed, end) = handleImport(chars, at: i, urlString: urlString) {
                     result.append(contentsOf: transformed)
@@ -83,6 +86,9 @@ enum SourceTransformer {
                 result.append(contentsOf: chars[i..<end])
                 i = end
             } else if let end = skipComment(chars, at: i) {
+                result.append(contentsOf: chars[i..<end])
+                i = end
+            } else if let end = skipRegex(chars, at: i, result: result) {
                 result.append(contentsOf: chars[i..<end])
                 i = end
             } else if let (transformed, end) = transformDynamicImport(chars, at: i) {
@@ -242,15 +248,60 @@ enum SourceTransformer {
         guard let (ident, afterIdent) = matchIdentifier(chars, at: j) else { return nil }
         j = afterIdent
 
+        // Check for combined import: import x, {y, z} from "mod"
+        var k = j
+        while k < count && chars[k].isWhitespace { k += 1 }
+        if k < count && chars[k] == "," {
+            k += 1
+            while k < count && chars[k].isWhitespace { k += 1 }
+            if k < count && chars[k] == "{" {
+                return transformCombinedImport(chars, at: i, ident: ident, bracePos: k)
+            }
+        }
+
         guard let afterFrom = matchFrom(chars, at: j) else { return nil }
         j = afterFrom
 
         guard let (moduleName, afterModule) = matchQuotedString(chars, at: j) else { return nil }
         j = afterModule
-        let semi2 = j < count && chars[j] == ";"
-        if semi2 { j += 1 }
+        let semi = j < count && chars[j] == ";"
+        if semi { j += 1 }
 
-        return (Array("var \(ident)=require(\"\(moduleName)\")\(semi2 ? ";" : "")"), j)
+        return (Array("var \(ident)=require(\"\(moduleName)\")\(semi ? ";" : "")"), j)
+    }
+
+    /// Combined import: `import x, {y as z} from "mod"` → `var x=require("mod"),{y:z}=x;`
+    private static func transformCombinedImport(
+        _ chars: [Character], at i: Int, ident: String, bracePos: Int
+    ) -> ([Character], Int)? {
+        let count = chars.count
+        var j = bracePos + 1
+
+        let specStart = j
+        var braceDepth = 1
+        while j < count && braceDepth > 0 {
+            if chars[j] == "{" { braceDepth += 1 }
+            else if chars[j] == "}" { braceDepth -= 1 }
+            if braceDepth > 0 { j += 1 }
+        }
+        guard braceDepth == 0 else { return nil }
+
+        let specifiers = String(chars[specStart..<j])
+        j += 1
+
+        let transformed = specifiers.replacingOccurrences(
+            of: #"\s+as\s+"#, with: ":", options: .regularExpression
+        )
+
+        guard let afterFrom = matchFrom(chars, at: j) else { return nil }
+        j = afterFrom
+
+        guard let (moduleName, afterModule) = matchQuotedString(chars, at: j) else { return nil }
+        j = afterModule
+        let semi = j < count && chars[j] == ";"
+        if semi { j += 1 }
+
+        return (Array("var \(ident)=require(\"\(moduleName)\"),{\(transformed)}=\(ident)\(semi ? ";" : "")"), j)
     }
 
     private static func transformSideEffectImport(
@@ -545,6 +596,58 @@ enum SourceTransformer {
                 j += 1
             }
             return chars.count
+        }
+        return nil
+    }
+
+    /// Skip a regex literal `/pattern/flags`. Uses the already-emitted result
+    /// to determine whether `/` is a regex start or a division operator.
+    private static func skipRegex(_ chars: [Character], at i: Int, result: [Character]) -> Int? {
+        guard chars[i] == "/" else { return nil }
+        // Already handled by skipComment
+        if i + 1 < chars.count && (chars[i + 1] == "/" || chars[i + 1] == "*") {
+            return nil
+        }
+        // Empty regex `//` is not valid — already caught above
+        // Check previous non-whitespace character in emitted result to decide regex vs division
+        var p = result.count - 1
+        while p >= 0 && (result[p] == " " || result[p] == "\t" || result[p] == "\n" || result[p] == "\r") {
+            p -= 1
+        }
+        if p >= 0 {
+            let c = result[p]
+            // After expression-ending tokens, `/` is division
+            if c == ")" || c == "]" || c.isLetter || c.isNumber || c == "_" || c == "$" {
+                return nil
+            }
+            // After ++/--, `/` is division
+            if (c == "+" || c == "-") && p > 0 && result[p - 1] == c {
+                return nil
+            }
+        }
+        // Scan regex body
+        var j = i + 1
+        while j < chars.count {
+            let c = chars[j]
+            if c == "\\" { j += 2; continue }
+            if c == "[" {
+                // Character class — scan until ]
+                j += 1
+                while j < chars.count && chars[j] != "]" {
+                    if chars[j] == "\\" { j += 1 }
+                    j += 1
+                }
+                if j < chars.count { j += 1 }
+                continue
+            }
+            if c == "/" {
+                j += 1
+                // Skip flags: g, i, m, s, u, v, y, d
+                while j < chars.count && chars[j].isLetter { j += 1 }
+                return j
+            }
+            if c == "\n" || c == "\r" { return nil } // Regex cannot span lines
+            j += 1
         }
         return nil
     }
