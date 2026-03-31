@@ -206,7 +206,7 @@ public final class BunProcess: Sendable {
             if let exception = ctx.exception {
                 let message = exception.toString() ?? ""
                 ctx.exception = nil
-                if !message.contains("__PROCESS_EXIT__") {
+                if !isProcessExitSentinel(exception) {
                     throw BunRuntimeError.javaScriptException(message)
                 }
             }
@@ -251,12 +251,17 @@ public final class BunProcess: Sendable {
         promise.succeed(code)
     }
 
+    private func isProcessExitSentinel(_ value: JSValue) -> Bool {
+        guard let flag = value.objectForKeyedSubscript("__processExit") else { return false }
+        return flag.toBool()
+    }
+
     private func checkException() throws {
         eventLoop.preconditionInEventLoop()
         guard let ctx = jsContext, let exception = ctx.exception else { return }
         ctx.exception = nil
         let message = exception.toString() ?? "Unknown JS exception"
-        if !message.contains("__PROCESS_EXIT__") {
+        if !isProcessExitSentinel(exception) {
             throw BunRuntimeError.javaScriptException(message)
         }
     }
@@ -461,9 +466,10 @@ public final class BunProcess: Sendable {
         ctx.setObject(exitBlock, forKeyedSubscript: "__processExit" as NSString)
 
         ctx.evaluateScript("""
+        globalThis.__PROCESS_EXIT_SENTINEL__ = Object.freeze({ __processExit: true });
         process.exit = function(code) {
             __processExit(code === undefined ? 0 : (code | 0));
-            throw new Error('__PROCESS_EXIT__');
+            throw globalThis.__PROCESS_EXIT_SENTINEL__;
         };
         """)
     }
