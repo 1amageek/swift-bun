@@ -215,15 +215,25 @@ public final class BunProcess: Sendable {
         self.jsContext = ctx
 
         // Install polyfills
+        outputContinuation.yield("[bun:setup] step 1: installModules")
         ESMResolver.installModules(in: ctx)
+        outputContinuation.yield("[bun:setup] step 2: consoleBridge")
         installConsoleBridge(in: ctx)
+        outputContinuation.yield("[bun:setup] step 3: stdioBridges")
         installStdioBridges(in: ctx)
+        outputContinuation.yield("[bun:setup] step 4: timerBridge")
         installTimerBridge(in: ctx)
+        outputContinuation.yield("[bun:setup] step 5: fetchBridge")
         installFetchBridge(in: ctx)
+        outputContinuation.yield("[bun:setup] step 6: processExitBridge")
         installProcessExitBridge(in: ctx)
+        outputContinuation.yield("[bun:setup] step 7: stdinBridge")
         installStdinBridge(in: ctx)
+        outputContinuation.yield("[bun:setup] step 8: patchTimerRefs")
         patchTimerModuleReferences(in: ctx)
+        outputContinuation.yield("[bun:setup] step 9: installRequire")
         ESMResolver.installRequire(in: ctx)
+        outputContinuation.yield("[bun:setup] step 10: configuring argv/cwd/env")
 
         // Configure process.argv
         if let bundle {
@@ -243,6 +253,14 @@ public final class BunProcess: Sendable {
             ctx.evaluateScript("process.env['\(escapeJS(key))'] = '\(escapeJS(value))';")
         }
 
+        // Install unhandled Promise rejection reporter
+        let rejectionBlock: @convention(block) (String) -> Void = { [outputContinuation] message in
+            outputContinuation.yield("[bun:rejection] \(message)")
+        }
+        ctx.setObject(rejectionBlock, forKeyedSubscript: "__reportRejection" as NSString)
+        // Unhandled rejection tracking is available via __reportRejection
+        // but Promise.prototype.then is not modified to avoid side effects.
+
         // Evaluate bundle if present
         if let bundle {
             guard FileManager.default.fileExists(atPath: bundle.path) else {
@@ -254,10 +272,16 @@ public final class BunProcess: Sendable {
             if let exception = ctx.exception {
                 let message = exception.toString() ?? ""
                 ctx.exception = nil
-                if !isProcessExitSentinel(exception) {
+                let isSentinel = isProcessExitSentinel(exception)
+                outputContinuation.yield("[bun:diag] exception after evaluateScript: \(String(message.prefix(300)))")
+                outputContinuation.yield("[bun:diag] isProcessExitSentinel: \(isSentinel)")
+                if !isSentinel {
                     throw BunRuntimeError.javaScriptException(message)
                 }
+            } else {
+                outputContinuation.yield("[bun:diag] evaluateScript completed without exception")
             }
+            outputContinuation.yield("[bun:diag] refCount after evaluateScript: \(refCount)")
         }
     }
 
