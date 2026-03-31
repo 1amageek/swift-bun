@@ -395,59 +395,20 @@ public final class BunProcess: Sendable {
     // MARK: - stdout/stderr Bridge
 
     private func installStdioBridges(in ctx: JSContext) {
-        // stdout → stdout stream (application protocol data)
+        // Register native write bridges.
+        // polyfills.bundle.js has already created process.stdout/stderr as
+        // readable-stream Writable instances that call these bridges.
         let stdoutWrite: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
             stdoutContinuation.yield(data)
             return true
         }
         ctx.setObject(stdoutWrite, forKeyedSubscript: "__nativeStdoutWrite" as NSString)
 
-        // stderr → output stream (diagnostic data, tagged as stderr)
         let stderrWrite: @convention(block) (String) -> Bool = { [outputContinuation] data in
             outputContinuation.yield("[stderr] \(data)")
             return true
         }
         ctx.setObject(stderrWrite, forKeyedSubscript: "__nativeStderrWrite" as NSString)
-
-        ctx.evaluateScript("""
-        process.stdout = {
-            write: function(s) { return __nativeStdoutWrite(String(s)); },
-            isTTY: false,
-            writable: true,
-            fd: 1,
-            columns: 80,
-            rows: 24,
-            on: function() { return this; },
-            once: function() { return this; },
-            off: function() { return this; },
-            removeListener: function() { return this; },
-            removeAllListeners: function() { return this; },
-            emit: function() { return false; },
-            end: function() {},
-            destroy: function() { this.writable = false; return this; },
-            cork: function() {},
-            uncork: function() {},
-            setDefaultEncoding: function() { return this; },
-        };
-        process.stderr = {
-            write: function(s) { return __nativeStderrWrite(String(s)); },
-            isTTY: false,
-            writable: true,
-            fd: 2,
-            on: function() { return this; },
-            once: function() { return this; },
-            off: function() { return this; },
-            removeListener: function() { return this; },
-            removeAllListeners: function() { return this; },
-            emit: function() { return false; },
-            end: function() {},
-            destroy: function() { this.writable = false; return this; },
-            pipe: function(dest) { return dest; },
-            cork: function() {},
-            uncork: function() {},
-            setDefaultEncoding: function() { return this; },
-        };
-        """)
     }
 
     // MARK: - Timer Bridge
@@ -648,10 +609,9 @@ public final class BunProcess: Sendable {
     // MARK: - stdin Bridge
 
     private func installStdinBridge(in ctx: JSContext) {
-        // Native ref/unref for stdin active handle tracking.
-        // When a 'data' or 'readable' listener is registered, stdin becomes an
-        // active handle (ref). When 'end' fires or all listeners are removed, unref.
-        // This matches Node.js semantics where stdin keeps the event loop alive.
+        // polyfills.bundle.js created process.stdin as a readable-stream Readable
+        // with __deliverStdinData for pushing data. We add ref/unref tracking and
+        // setRawMode here.
         let stdinRefBlock: @convention(block) () -> Void = { [self] in self.ref("stdin") }
         let stdinUnrefBlock: @convention(block) () -> Void = { [self] in self.unref("stdin") }
         ctx.setObject(stdinRefBlock, forKeyedSubscript: "__stdinRef" as NSString)
@@ -660,165 +620,44 @@ public final class BunProcess: Sendable {
         ctx.evaluateScript("""
         (function() {
             var stdin = process.stdin;
-            stdin._events = {};
-            stdin._refed = false;
-            stdin._buffer = [];
-            stdin._waiting = null;
-            stdin._ended = false;
-            stdin.fd = 0;
-            stdin.readable = true;
-            stdin.write = function() { return false; };
-            stdin.readableEnded = false;
-            stdin.readableFlowing = null;
-            stdin.destroyed = false;
-            stdin.setEncoding = function(enc) { stdin._encoding = enc; return stdin; };
-            stdin.resume = function() { stdin.readableFlowing = true; return stdin; };
-            stdin.pause = function() { stdin.readableFlowing = false; return stdin; };
+            var _refed = false;
+
+            // ref/unref for lifecycle tracking
             stdin.ref = function() {
-                if (!stdin._refed) { stdin._refed = true; __stdinRef(); }
+                if (!_refed) { _refed = true; __stdinRef(); }
                 return stdin;
             };
             stdin.unref = function() {
-                if (stdin._refed) { stdin._refed = false; __stdinUnref(); }
+                if (_refed) { _refed = false; __stdinUnref(); }
                 return stdin;
             };
-            stdin.setRawMode = function(mode) { return stdin; };
-            stdin.listenerCount = function(event) {
-                return (stdin._events[event] && stdin._events[event].length) || 0;
-            };
-            stdin.eventNames = function() {
-                return Object.keys(stdin._events).filter(function(k) {
-                    return stdin._events[k] && stdin._events[k].length > 0;
-                });
-            };
-            stdin.listeners = function(event) {
-                return (stdin._events[event] || []).map(function(e) { return e; });
-            };
-            stdin.rawListeners = stdin.listeners;
-            stdin.prependListener = stdin.on;
-            stdin.prependOnceListener = stdin.once;
-            stdin.read = function() {
-                if (stdin._buffer.length > 0) return stdin._buffer.shift();
-                return null;
-            };
-            stdin.pipe = function(dest) {
-                stdin.on('data', function(chunk) { dest.write(chunk); });
-                stdin.on('end', function() { if (dest.end) dest.end(); });
-                return dest;
-            };
-            stdin.unpipe = function() { return stdin; };
-            stdin.unshift = function(chunk) { stdin._buffer.unshift(chunk); };
-            stdin.destroy = function() { stdin.destroyed = true; stdin.readable = false; return stdin; };
+            stdin.setRawMode = function() { return stdin; };
 
-            // AsyncIterable support — enables `for await (const chunk of process.stdin)`
-            stdin[Symbol.asyncIterator] = function() {
-                // Ref when iteration starts — stdin is an active handle
-                if (!stdin._refed) {
-                    stdin._refed = true;
-                    __stdinRef();
-                }
-                return {
-                    next: function() {
-                        if (stdin._buffer.length > 0) {
-                            return Promise.resolve({ value: stdin._buffer.shift(), done: false });
-                        }
-                        if (stdin._ended) {
-                            // Unref when iteration ends
-                            if (stdin._refed) {
-                                stdin._refed = false;
-                                __stdinUnref();
-                            }
-                            return Promise.resolve({ value: undefined, done: true });
-                        }
-                        return new Promise(function(resolve) {
-                            stdin._waiting = resolve;
-                        });
-                    },
-                    return: function() {
-                        stdin._ended = true;
-                        if (stdin._refed) {
-                            stdin._refed = false;
-                            __stdinUnref();
-                        }
-                        return Promise.resolve({ value: undefined, done: true });
-                    }
-                };
-            };
-
-            function checkRef() {
-                var hasListeners = (stdin._events['data'] && stdin._events['data'].length > 0) ||
-                                   (stdin._events['readable'] && stdin._events['readable'].length > 0);
-                if (hasListeners && !stdin._refed) {
-                    stdin._refed = true;
-                    __stdinRef();
-                } else if (!hasListeners && stdin._refed) {
-                    stdin._refed = false;
-                    __stdinUnref();
-                }
-            }
-
+            // Auto-ref when data/readable listeners are added
+            var _origOn = stdin.on.bind(stdin);
             stdin.on = function(event, fn) {
-                if (!stdin._events[event]) stdin._events[event] = [];
-                stdin._events[event].push(fn);
-                checkRef();
-                return stdin;
+                var result = _origOn(event, fn);
+                if ((event === 'data' || event === 'readable') && !_refed) {
+                    _refed = true;
+                    __stdinRef();
+                }
+                return result;
             };
             stdin.addListener = stdin.on;
-            stdin.once = function(event, fn) {
-                function wrapper() {
-                    stdin.removeListener(event, wrapper);
-                    fn.apply(this, arguments);
-                }
-                wrapper._original = fn;
-                return stdin.on(event, wrapper);
-            };
-            stdin.removeListener = function(event, fn) {
-                if (!stdin._events[event]) return stdin;
-                stdin._events[event] = stdin._events[event].filter(function(f) {
-                    return f !== fn && f._original !== fn;
-                });
-                checkRef();
-                return stdin;
-            };
-            stdin.off = stdin.removeListener;
-            stdin.emit = function(event) {
-                // Feed data into the async iterator and buffer
-                if (event === 'data') {
-                    var chunk = arguments[1];
-                    stdin._buffer.push(chunk);
-                    if (stdin._waiting) {
-                        var resolve = stdin._waiting;
-                        stdin._waiting = null;
-                        resolve({ value: stdin._buffer.shift(), done: false });
-                    }
-                }
-                if (event === 'end') {
-                    stdin._ended = true;
-                    stdin.readableEnded = true;
-                    stdin.readable = false;
-                    if (stdin._waiting) {
-                        var resolve = stdin._waiting;
-                        stdin._waiting = null;
-                        resolve({ value: undefined, done: true });
-                    }
-                }
 
-                var hasListeners = stdin._events[event] && stdin._events[event].length > 0;
-                if (hasListeners) {
-                    var args = Array.prototype.slice.call(arguments, 1);
-                    var listeners = stdin._events[event].slice();
-                    for (var i = 0; i < listeners.length; i++) {
-                        listeners[i].apply(stdin, args);
-                    }
-                }
-                // Unref on 'end' regardless of whether there were end listeners.
-                // stdin is no longer an active handle after EOF.
-                if (event === 'end' && stdin._refed) {
-                    stdin._refed = false;
-                    __stdinUnref();
-                }
-                return hasListeners;
-            };
+            // Auto-unref on end
+            stdin.on('end', function() {
+                if (_refed) { _refed = false; __stdinUnref(); }
+            });
+
+            // Auto-ref when async iteration starts
+            var _origIterator = stdin[Symbol.asyncIterator];
+            if (_origIterator) {
+                stdin[Symbol.asyncIterator] = function() {
+                    if (!_refed) { _refed = true; __stdinRef(); }
+                    return _origIterator.call(stdin);
+                };
+            }
         })();
         """)
 
@@ -828,15 +667,13 @@ public final class BunProcess: Sendable {
 
     private func deliverStdin(_ data: Data?) {
         eventLoop.preconditionInEventLoop()
-        guard let stdin = stdinValue else { return }
+        guard let ctx = jsContext else { return }
         if let data {
             let str = String(data: data, encoding: .utf8) ?? ""
-            // emit('data') handles buffer push, async iterator wakeup, and listener dispatch
-            stdin.invokeMethod("emit", withArguments: ["data", str])
-            // emit('readable') after data so read() can pull from buffer
-            stdin.invokeMethod("emit", withArguments: ["readable"])
+            // __deliverStdinData pushes to the readable-stream Readable
+            ctx.evaluateScript("__deliverStdinData('\(escapeJS(str))')")
         } else {
-            stdin.invokeMethod("emit", withArguments: ["end"])
+            ctx.evaluateScript("__deliverStdinData(null)")
         }
     }
 

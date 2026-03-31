@@ -243,7 +243,16 @@ enum NodeStream {
             stream.default = stream;
 
             if (!globalThis.__nodeModules) globalThis.__nodeModules = {};
-            __nodeModules.stream = stream;
+            // Use readable-stream from polyfills.bundle.js if available (proper Node.js streams),
+            // otherwise fall back to the basic implementation above.
+            if (globalThis.__readableStream) {
+                var rs = globalThis.__readableStream;
+                rs.EventEmitter = EventEmitter;
+                rs.Stream = rs.Readable;
+                __nodeModules.stream = rs;
+            } else {
+                __nodeModules.stream = stream;
+            }
             // require('events') returns EventEmitter constructor directly (Node.js compat)
             // so that `class X extends require('events') {}` works.
             EventEmitter.EventEmitter = EventEmitter;
