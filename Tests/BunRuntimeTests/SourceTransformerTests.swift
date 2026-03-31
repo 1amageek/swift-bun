@@ -228,7 +228,6 @@ struct StaticImportTests {
     // MARK: - Semicolon preservation (regression tests)
 
     @Test func namedImportFollowedByVar() {
-        // This is the actual pattern from Claude Code cli.js that caused the SyntaxError
         let source = #"import{createRequire as _K5}from"node:module";var o45=Object.create;"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == #"var{createRequire:_K5}=require("node:module");var o45=Object.create;"#)
@@ -250,6 +249,50 @@ struct StaticImportTests {
         let source = #"import"./setup.js";console.log("ready");"#
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == #"require("./setup.js");console.log("ready");"#)
+    }
+
+    // MARK: - Keyword boundary edge cases
+
+    @Test func fromAsIdentifierPrefix() {
+        let source = "import x fromData;"
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func fromFollowedByDollarSign() {
+        let source = #"import{x}from$mod;"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func namedImportSpecifierWithBraceInString() {
+        let source = #"import{a}from"mod";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{a}=require("mod");"#)
+    }
+
+    @Test func namedImportPreservesWhitespaceInSpecifiers() {
+        let source = #"import{ a , b }from"mod";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{ a , b }=require("mod");"#)
+    }
+
+    @Test func defaultImportUnderscoredName() {
+        let source = #"import _K5 from "node:module";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var _K5=require("node:module");"#)
+    }
+
+    @Test func defaultImportDollarName() {
+        let source = #"import $mod from "node:module";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var $mod=require("node:module");"#)
+    }
+
+    @Test func importEscapedQuoteInModuleName() {
+        let source = #"import{x}from"mod\"name";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{x}=require("mod\"name");"#)
     }
 }
 
@@ -389,6 +432,68 @@ struct ExportTests {
 
     @Test func identifierExportNotTransformed() {
         let source = "reexport{x};"
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    // Re-exports must produce require(), not be silently removed
+
+    @Test func reExportNamed() {
+        let source = #"export{EventEmitter}from"node:events";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{EventEmitter}=require("node:events");"#)
+    }
+
+    @Test func reExportNamedWithAlias() {
+        let source = #"export{resolve as pathResolve}from"node:path";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{resolve:pathResolve}=require("node:path");"#)
+    }
+
+    @Test func reExportMultiple() {
+        let source = #"export{a,b as c}from"mod";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{a,b:c}=require("mod");"#)
+    }
+
+    @Test func reExportSingleQuotes() {
+        let source = "export{x}from'mod';"
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{x}=require("mod");"#)
+    }
+
+    @Test func reExportWithSpaces() {
+        let source = #"export { foo } from "bar";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{ foo }=require("bar");"#)
+    }
+
+    @Test func reExportFollowedByCode() {
+        let source = #"export{x}from"mod";var y = 1;"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"var{x}=require("mod");var y = 1;"#)
+    }
+
+    @Test func exportStarFrom() {
+        let source = #"export*from"mod";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"require("mod");"#)
+    }
+
+    @Test func exportStarWithSpaces() {
+        let source = #"export * from "mod";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == #"require("mod");"#)
+    }
+
+    @Test func exportInsideString() {
+        let source = #"var s = "export{x}from'y'";"#
+        let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
+        #expect(result == source)
+    }
+
+    @Test func exportInsideComment() {
+        let source = "// export{x}from\"y\"\nvar a = 1;"
         let result = SourceTransformer.transformForJSC(source, bundleURL: bundleURL)
         #expect(result == source)
     }

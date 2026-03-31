@@ -20,8 +20,9 @@ enum SourceTransformer {
     /// - `import.meta` → `({url:"<bundleURL>"})`
     /// - `import(expr, { with: ... })` → `import(expr)`
     /// - `export { ... }` → removed
-    /// - `export default expr` → `var __esModule_default = expr`
+    /// - `export default expr` → strip `export default`, keep expression
     /// - `export function/var/let/const/class ...` → strip `export` keyword
+    /// - `export { a } from "mod"` → `var { a } = require("mod")`
     static func transformForJSC(_ source: String, bundleURL: URL) -> String {
         guard source.contains("import") || source.contains("export") else { return source }
 
@@ -362,8 +363,24 @@ enum SourceTransformer {
         while j < count && chars[j].isWhitespace { j += 1 }
         guard j < count else { return nil }
 
+        // export * from "mod" — namespace re-export
+        if chars[j] == "*" {
+            var k = j + 1
+            while k < count && chars[k].isWhitespace { k += 1 }
+            if let afterFrom = matchFrom(chars, at: k) {
+                if let (moduleName, afterModule) = matchQuotedString(chars, at: afterFrom) {
+                    j = afterModule
+                    let semi = j < count && chars[j] == ";"
+                    if semi { j += 1 }
+                    return (Array("require(\"\(moduleName)\")\(semi ? ";" : "")"), j)
+                }
+            }
+            return nil
+        }
+
         if chars[j] == "{" {
             // export { a, b } or export { a } from "mod"
+            let braceStart = j
             j += 1
             var braceDepth = 1
             while j < count && braceDepth > 0 {
@@ -372,17 +389,27 @@ enum SourceTransformer {
                 if braceDepth > 0 { j += 1 }
             }
             guard braceDepth == 0 else { return nil }
+            let braceEnd = j
             j += 1
 
             // Check for re-export: export { a } from "mod"
             var k = j
             while k < count && chars[k].isWhitespace { k += 1 }
             if let afterFrom = matchFrom(chars, at: k) {
-                if let (_, afterModule) = matchQuotedString(chars, at: afterFrom) {
+                if let (moduleName, afterModule) = matchQuotedString(chars, at: afterFrom) {
                     j = afterModule
+                    let semi = j < count && chars[j] == ";"
+                    if semi { j += 1 }
+                    // Transform re-export to require(): export{a}from"mod" → var{a}=require("mod")
+                    let specifiers = String(chars[(braceStart + 1)..<braceEnd])
+                    let transformed = specifiers.replacingOccurrences(
+                        of: #"\s+as\s+"#, with: ":", options: .regularExpression
+                    )
+                    return (Array("var{\(transformed)}=require(\"\(moduleName)\")\(semi ? ";" : "")"), j)
                 }
             }
 
+            // Plain export { a, b } — just remove
             if j < count && chars[j] == ";" { j += 1 }
             return ([], j)
         }
@@ -514,7 +541,7 @@ enum SourceTransformer {
         let afterFrom = j + 4
         // Ensure "from" is not a prefix of a longer identifier
         if afterFrom < chars.count &&
-           (chars[afterFrom].isLetter || chars[afterFrom].isNumber || chars[afterFrom] == "_") {
+           (chars[afterFrom].isLetter || chars[afterFrom].isNumber || chars[afterFrom] == "_" || chars[afterFrom] == "$") {
             return nil
         }
         return afterFrom
