@@ -61,6 +61,7 @@ public final class BunProcess: Sendable {
         case idle
         case loaded
         case running
+        case exited
     }
 
     // MARK: - Streams
@@ -176,7 +177,7 @@ public final class BunProcess: Sendable {
                 try self.setupContext()
                 self.checkExitCondition()
             } catch {
-                self.state = .idle
+                self.state = .exited
                 self.exitPromise = nil
                 promise.fail(error)
             }
@@ -288,7 +289,7 @@ public final class BunProcess: Sendable {
     private func resolveExit(code: Int32) {
         eventLoop.preconditionInEventLoop()
         guard let promise = exitPromise else { return }
-        state = .idle
+        state = .exited
         exitPromise = nil
         stdoutContinuation.finish()
         outputContinuation.finish()
