@@ -263,25 +263,29 @@ public final class BunProcess: Sendable {
 
     // MARK: - Lifecycle
 
-    private func ref() {
+    private func ref(_ source: String = "") {
         eventLoop.preconditionInEventLoop()
         refCount += 1
+        outputContinuation.yield("[bun:lifecycle] ref(\(source)) → refCount=\(refCount)")
     }
 
-    private func unref() {
+    private func unref(_ source: String = "") {
         eventLoop.preconditionInEventLoop()
         refCount -= 1
+        outputContinuation.yield("[bun:lifecycle] unref(\(source)) → refCount=\(refCount)")
         checkExitCondition()
     }
 
     private func checkExitCondition() {
         eventLoop.preconditionInEventLoop()
         guard state == .running, refCount <= 0 else { return }
+        outputContinuation.yield("[bun:lifecycle] checkExitCondition → exiting (refCount=\(refCount))")
         resolveExit(code: 0)
     }
 
     private func doExit(code: Int32) {
         eventLoop.preconditionInEventLoop()
+        outputContinuation.yield("[bun:lifecycle] doExit(code=\(code)), activeTimers=\(activeTimers.count)")
         for (_, scheduled) in activeTimers {
             scheduled.cancel()
         }
@@ -293,6 +297,7 @@ public final class BunProcess: Sendable {
     private func resolveExit(code: Int32) {
         eventLoop.preconditionInEventLoop()
         guard let promise = exitPromise else { return }
+        outputContinuation.yield("[bun:lifecycle] resolveExit(code=\(code))")
         state = .exited
         exitPromise = nil
         stdoutContinuation.finish()
@@ -372,13 +377,13 @@ public final class BunProcess: Sendable {
             let delayMs = delay.isUndefined ? 0 : max(0, Int64(delay.toInt32()))
             let timerID = self.nextTimerID
             self.nextTimerID += 1
-            self.ref()
+            self.ref("setTimeout")
 
             let scheduled = self.eventLoop.scheduleTask(in: .milliseconds(delayMs)) {
                 self.eventLoop.preconditionInEventLoop()
                 self.activeTimers.removeValue(forKey: timerID)
                 callback.call(withArguments: self.extractArgs(argsArray))
-                self.unref()
+                self.unref("setTimeout:fired")
             }
             self.activeTimers[timerID] = scheduled
             return timerID
@@ -388,7 +393,7 @@ public final class BunProcess: Sendable {
         let clearTimeoutBlock: @convention(block) (Int32) -> Void = { [self] timerID in
             if let scheduled = self.activeTimers.removeValue(forKey: timerID) {
                 scheduled.cancel()
-                self.unref()
+                self.unref("clearTimeout")
             }
         }
         ctx.setObject(clearTimeoutBlock, forKeyedSubscript: "__nativeClearTimeout" as NSString)
@@ -397,7 +402,7 @@ public final class BunProcess: Sendable {
             let delayMs = max(1, Int64(delay.toInt32()))
             let timerID = self.nextTimerID
             self.nextTimerID += 1
-            self.ref()
+            self.ref("setInterval")
             self.scheduleRepeating(timerID: timerID, callback: callback, intervalMs: delayMs, argsArray: argsArray)
             return timerID
         }
@@ -481,10 +486,10 @@ public final class BunProcess: Sendable {
         eventLoop.preconditionInEventLoop()
 
         let fetchBlock: @convention(block) (String, String, JSValue, JSValue) -> Void = { [self] urlString, optionsJSON, resolveCallback, rejectCallback in
-            self.ref()
+            self.ref("fetch")
             guard let url = URL(string: urlString) else {
                 rejectCallback.call(withArguments: ["Invalid URL: \(urlString)"])
-                self.unref()
+                self.unref("fetch:invalid-url")
                 return
             }
             var request = URLRequest(url: url)
@@ -506,7 +511,7 @@ public final class BunProcess: Sendable {
             }
             let task = URLSession.shared.dataTask(with: request) { [self] data, response, error in
                 self.eventLoop.execute {
-                    defer { self.unref() }
+                    defer { self.unref("fetch:complete") }
                     if let error {
                         rejectCallback.call(withArguments: [error.localizedDescription])
                         return
@@ -565,8 +570,8 @@ public final class BunProcess: Sendable {
         // When a 'data' or 'readable' listener is registered, stdin becomes an
         // active handle (ref). When 'end' fires or all listeners are removed, unref.
         // This matches Node.js semantics where stdin keeps the event loop alive.
-        let stdinRefBlock: @convention(block) () -> Void = { [self] in self.ref() }
-        let stdinUnrefBlock: @convention(block) () -> Void = { [self] in self.unref() }
+        let stdinRefBlock: @convention(block) () -> Void = { [self] in self.ref("stdin") }
+        let stdinUnrefBlock: @convention(block) () -> Void = { [self] in self.unref("stdin") }
         ctx.setObject(stdinRefBlock, forKeyedSubscript: "__stdinRef" as NSString)
         ctx.setObject(stdinUnrefBlock, forKeyedSubscript: "__stdinUnref" as NSString)
 
