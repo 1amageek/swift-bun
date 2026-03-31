@@ -413,20 +413,39 @@ public final class BunProcess: Sendable {
         process.stdout = {
             write: function(s) { return __nativeStdoutWrite(String(s)); },
             isTTY: false,
+            writable: true,
+            fd: 1,
             columns: 80,
             rows: 24,
             on: function() { return this; },
             once: function() { return this; },
+            off: function() { return this; },
+            removeListener: function() { return this; },
+            removeAllListeners: function() { return this; },
             emit: function() { return false; },
             end: function() {},
+            destroy: function() { this.writable = false; return this; },
+            cork: function() {},
+            uncork: function() {},
+            setDefaultEncoding: function() { return this; },
         };
         process.stderr = {
             write: function(s) { return __nativeStderrWrite(String(s)); },
             isTTY: false,
+            writable: true,
+            fd: 2,
             on: function() { return this; },
             once: function() { return this; },
+            off: function() { return this; },
+            removeListener: function() { return this; },
+            removeAllListeners: function() { return this; },
             emit: function() { return false; },
             end: function() {},
+            destroy: function() { this.writable = false; return this; },
+            pipe: function(dest) { return dest; },
+            cork: function() {},
+            uncork: function() {},
+            setDefaultEncoding: function() { return this; },
         };
         """)
     }
@@ -646,7 +665,9 @@ public final class BunProcess: Sendable {
             stdin._buffer = [];
             stdin._waiting = null;
             stdin._ended = false;
+            stdin.fd = 0;
             stdin.readable = true;
+            stdin.write = function() { return false; };
             stdin.readableEnded = false;
             stdin.readableFlowing = null;
             stdin.destroyed = false;

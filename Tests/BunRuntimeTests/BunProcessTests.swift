@@ -473,6 +473,81 @@ struct BunProcessTests {
         #expect(lines.values.contains("[error] bad"))
     }
 
+    // MARK: - process API completeness
+
+    @Test func processGetuid() async throws {
+        let url = try tempBundle("process.exit(typeof process.getuid() === 'number' ? 0 : 1);")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func processExitCode() async throws {
+        let url = try tempBundle("""
+            process.exitCode = 0;
+            process.exitCode = 42;
+            process.exit(process.exitCode === 42 ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func processReport() async throws {
+        let url = try tempBundle("process.exit(typeof process.report === 'object' ? 0 : 1);")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdinWrite() async throws {
+        let url = try tempBundle("""
+            process.exit(typeof process.stdin.write === 'function' ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdoutWritable() async throws {
+        let url = try tempBundle("process.exit(process.stdout.writable === true ? 0 : 1);")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdoutRemoveListener() async throws {
+        let url = try tempBundle("""
+            var result = process.stdout.removeListener('drain', function(){});
+            process.exit(result === process.stdout ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stderrPipe() async throws {
+        let url = try tempBundle("""
+            var dest = { write: function() {} };
+            var result = process.stderr.pipe(dest);
+            process.exit(result === dest ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stderrFd() async throws {
+        let url = try tempBundle("process.exit(process.stderr.fd === 2 ? 0 : 1);")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdoutFd() async throws {
+        let url = try tempBundle("process.exit(process.stdout.fd === 1 ? 0 : 1);")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdinFd() async throws {
+        let url = try tempBundle("process.exit(process.stdin.fd === 0 ? 0 : 1);")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
     // MARK: - argv and cwd
 
     @Test func processArgv() async throws {
