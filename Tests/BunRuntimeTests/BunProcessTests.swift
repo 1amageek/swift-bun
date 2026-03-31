@@ -317,6 +317,44 @@ struct BunProcessTests {
         #expect(try await task.value == 0)
     }
 
+    @Test func stdinRefUnref() async throws {
+        let url = try tempBundle("""
+            // ref() keeps alive, unref() allows exit
+            process.stdin.ref();
+            setTimeout(function() {
+                process.stdin.unref();
+                // No more refs → natural exit
+            }, 50);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdinListenerCount() async throws {
+        let url = try tempBundle("""
+            var fn1 = function() {};
+            var fn2 = function() {};
+            process.stdin.on('data', fn1);
+            process.stdin.on('data', fn2);
+            var c = process.stdin.listenerCount('data');
+            process.stdin.removeListener('data', fn1);
+            var c2 = process.stdin.listenerCount('data');
+            process.exit(c === 2 && c2 === 1 ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func stdinSetRawMode() async throws {
+        let url = try tempBundle("""
+            // setRawMode should not throw (no-op on iOS)
+            var result = process.stdin.setRawMode(true);
+            process.exit(result === process.stdin ? 0 : 1);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
     @Test func stdinKeepsProcessAlive() async throws {
         // Process registers stdin.on('data') but receives no data yet.
         // The process must NOT exit immediately — stdin listener is an active handle.

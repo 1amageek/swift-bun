@@ -653,6 +653,29 @@ public final class BunProcess: Sendable {
             stdin.setEncoding = function(enc) { stdin._encoding = enc; return stdin; };
             stdin.resume = function() { stdin.readableFlowing = true; return stdin; };
             stdin.pause = function() { stdin.readableFlowing = false; return stdin; };
+            stdin.ref = function() {
+                if (!stdin._refed) { stdin._refed = true; __stdinRef(); }
+                return stdin;
+            };
+            stdin.unref = function() {
+                if (stdin._refed) { stdin._refed = false; __stdinUnref(); }
+                return stdin;
+            };
+            stdin.setRawMode = function(mode) { return stdin; };
+            stdin.listenerCount = function(event) {
+                return (stdin._events[event] && stdin._events[event].length) || 0;
+            };
+            stdin.eventNames = function() {
+                return Object.keys(stdin._events).filter(function(k) {
+                    return stdin._events[k] && stdin._events[k].length > 0;
+                });
+            };
+            stdin.listeners = function(event) {
+                return (stdin._events[event] || []).map(function(e) { return e; });
+            };
+            stdin.rawListeners = stdin.listeners;
+            stdin.prependListener = stdin.on;
+            stdin.prependOnceListener = stdin.once;
             stdin.read = function() {
                 if (stdin._buffer.length > 0) return stdin._buffer.shift();
                 return null;
