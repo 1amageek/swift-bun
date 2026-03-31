@@ -20,41 +20,40 @@ struct BunBuildTests {
     }
 
     @Test func bundleLoads() async throws {
-        let runtime = BunRuntime()
+        let process = BunProcess()
         let url = try bundleURL()
-        let context = try await runtime.load(bundle: url)
-        _ = context
+        try await process.load(bundle: url)
     }
 
     @Test func pathOperations() async throws {
-        let runtime = BunRuntime()
+        let process = BunProcess()
         let url = try bundleURL()
-        let context = try await runtime.load(bundle: url)
-        let result = try await context.evaluate(js: "JSON.stringify(__testResults.path)")
+        try await process.load(bundle: url)
+        let result = try await process.evaluate(js: "JSON.stringify(__testResults.path)")
         #expect(result.stringValue == #"{"join":"/usr/local/bin","basename":"baz.txt","extname":".js"}"#)
     }
 
     @Test func cryptoUUID() async throws {
-        let runtime = BunRuntime()
+        let process = BunProcess()
         let url = try bundleURL()
-        let context = try await runtime.load(bundle: url)
-        let result = try await context.evaluate(js: "__testResults.crypto.uuidLength")
+        try await process.load(bundle: url)
+        let result = try await process.evaluate(js: "__testResults.crypto.uuidLength")
         #expect(result.int32Value == 36)
     }
 
     @Test func bunGlobalAvailable() async throws {
-        let runtime = BunRuntime()
+        let process = BunProcess()
         let url = try bundleURL()
-        let context = try await runtime.load(bundle: url)
-        let result = try await context.evaluate(js: "__testResults.bun.version")
+        try await process.load(bundle: url)
+        let result = try await process.evaluate(js: "__testResults.bun.version")
         #expect(result.stringValue != "unknown")
     }
 
     @Test func allChecksPass() async throws {
-        let runtime = BunRuntime()
+        let process = BunProcess()
         let url = try bundleURL()
-        let context = try await runtime.load(bundle: url)
-        let result = try await context.evaluate(js: "__testResults.ok")
+        try await process.load(bundle: url)
+        let result = try await process.evaluate(js: "__testResults.ok")
         #expect(result.boolValue == true)
     }
 }

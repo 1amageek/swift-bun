@@ -9,17 +9,13 @@ import Foundation
 struct ESMTransformTests {
 
     private func transform(_ source: String) async throws -> String {
-        let runtime = BunRuntime()
-        let ctx = try await runtime.createContext()
-        // Use the runtime's internal transformESM by loading and checking result
-        // We test through the public API by creating a temp bundle file
+        let process = BunProcess()
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".js")
         try source.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let context = try await runtime.load(bundle: tmp)
-        _ = context // load succeeds means transform + evaluate worked
-        return "" // We test that load doesn't throw
+        try await process.load(bundle: tmp)
+        return ""
     }
 
     // MARK: - Smoke tests (load succeeds = transform worked)

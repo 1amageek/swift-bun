@@ -20,4 +20,4 @@ globalThis.__testResults = {
   ok: p === "/usr/local/bin" && b === "baz.txt" && e === ".js" && id.length === 36,
 };
 
-globalThis.__emitEvent(JSON.stringify({ type: "ready", results: globalThis.__testResults }));
+console.log(JSON.stringify({ type: "ready", results: globalThis.__testResults }));

@@ -12,10 +12,10 @@ struct FetchRoundtripTests {
 
     @Test("GET request returns status 200 and body")
     func getRequest() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/get').then(function(res) {
                 return res.text().then(function(body) {
                     return JSON.stringify({ status: res.status, ok: res.ok, hasBody: body.length > 0 });
@@ -31,10 +31,10 @@ struct FetchRoundtripTests {
 
     @Test("GET request response headers are accessible")
     func getResponseHeaders() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/get').then(function(res) {
                 return res.headers.get('content-type');
             })
@@ -46,10 +46,10 @@ struct FetchRoundtripTests {
 
     @Test("GET request response body parses as JSON")
     func getResponseJSON() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/get?foo=bar').then(function(res) {
                 return res.json();
             }).then(function(data) {
@@ -64,10 +64,10 @@ struct FetchRoundtripTests {
 
     @Test("POST request sends body and receives echo")
     func postRequestWithBody() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/post', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -85,10 +85,10 @@ struct FetchRoundtripTests {
 
     @Test("POST request custom headers are sent")
     func postRequestCustomHeaders() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/post', {
                 method: 'POST',
                 headers: {
@@ -110,10 +110,10 @@ struct FetchRoundtripTests {
 
     @Test("PUT request works")
     func putRequest() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/put', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -130,10 +130,10 @@ struct FetchRoundtripTests {
 
     @Test("DELETE request works")
     func deleteRequest() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/delete', { method: 'DELETE' })
             .then(function(res) { return res.status; })
         """)
@@ -145,10 +145,10 @@ struct FetchRoundtripTests {
 
     @Test("404 response is not ok but does not reject")
     func notFoundResponse() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/status/404').then(function(res) {
                 return JSON.stringify({ status: res.status, ok: res.ok });
             })
@@ -161,10 +161,10 @@ struct FetchRoundtripTests {
 
     @Test("fetch rejects on network error")
     func networkError() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://this-domain-does-not-exist-12345.invalid/')
             .then(function() { return 'resolved'; })
             .catch(function(err) { return 'rejected: ' + err.message; })
@@ -177,10 +177,10 @@ struct FetchRoundtripTests {
 
     @Test("Response.text() returns string body")
     func responseText() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/html').then(function(res) {
                 return res.text();
             }).then(function(text) {
@@ -193,10 +193,10 @@ struct FetchRoundtripTests {
 
     @Test("Response.json() parses body")
     func responseJSON() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/json').then(function(res) {
                 return res.json();
             }).then(function(data) {
@@ -211,12 +211,12 @@ struct FetchRoundtripTests {
 
     @Test("Anthropic API pattern: POST JSON and receive response")
     func anthropicPattern() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+        let process = BunProcess()
+        try await process.createContext()
 
         // Simulate Anthropic API request pattern (POST JSON, receive JSON)
         // Using httpbin.org/post as a safe echo endpoint
-        let result = try await context.evaluateAsync(js: """
+        let result = try await process.evaluate(js: """
             fetch('https://httpbin.org/post', {
                 method: 'POST',
                 headers: {
@@ -249,33 +249,33 @@ struct FetchRoundtripTests {
         #expect(json["receivedVersion"] as? String == "2023-06-01")
     }
 
-    // MARK: - evaluateAsync Non-Promise Path
+    // MARK: - evaluate Non-Promise Path
 
-    @Test("evaluateAsync with synchronous value returns immediately")
-    func evaluateAsyncSync() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+    @Test("evaluate with synchronous value returns immediately")
+    func evaluateSync() async throws {
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: "1 + 2")
+        let result = try await process.evaluate(js: "1 + 2")
         #expect(result.int32Value == 3)
     }
 
-    @Test("evaluateAsync with resolved Promise returns value")
-    func evaluateAsyncResolvedPromise() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+    @Test("evaluate with resolved Promise returns value")
+    func evaluateResolvedPromise() async throws {
+        let process = BunProcess()
+        try await process.createContext()
 
-        let result = try await context.evaluateAsync(js: "Promise.resolve(42)")
+        let result = try await process.evaluate(js: "Promise.resolve(42)")
         #expect(result.int32Value == 42)
     }
 
-    @Test("evaluateAsync with rejected Promise throws")
-    func evaluateAsyncRejectedPromise() async throws {
-        let runtime = BunRuntime()
-        let context = try await runtime.createContext()
+    @Test("evaluate with rejected Promise throws")
+    func evaluateRejectedPromise() async throws {
+        let process = BunProcess()
+        try await process.createContext()
 
         await #expect(throws: BunRuntimeError.self) {
-            try await context.evaluateAsync(js: "Promise.reject(new Error('test rejection'))")
+            try await process.evaluate(js: "Promise.reject(new Error('test rejection'))")
         }
     }
 

@@ -10,18 +10,22 @@ import NIOPosix
 /// and stdin delivery — enabling both library-style function calls and
 /// long-running process execution.
 ///
-/// ## Usage
+/// ## Library mode
 ///
 /// ```swift
 /// let process = BunProcess()
-///
-/// // Library mode: load and call functions
 /// try await process.load(bundle: myLib)
 /// let result = try await process.evaluate(js: "myFunction()")
+/// ```
 ///
-/// // Process mode: run until exit
+/// ## Process mode
+///
+/// ```swift
+/// let process = BunProcess()
 /// let exitCode = try await process.run(bundle: cliJS)
 /// ```
+///
+/// `load()` and `run()` are mutually exclusive on a single instance.
 public final class BunProcess: Sendable {
 
     private let eventLoopGroup: MultiThreadedEventLoopGroup
@@ -35,8 +39,13 @@ public final class BunProcess: Sendable {
     private nonisolated(unsafe) var nextTimerID: Int32 = 1
     private nonisolated(unsafe) var activeTimers: [Int32: Scheduled<Void>] = [:]
     private nonisolated(unsafe) var stdinValue: JSValue?
-    private nonisolated(unsafe) var isRunning: Bool = false
-    private nonisolated(unsafe) var isLoaded: Bool = false
+    private nonisolated(unsafe) var state: State = .idle
+
+    private enum State {
+        case idle
+        case loaded   // library mode
+        case running  // process mode
+    }
 
     /// Stream of output lines from JS (console.log, console.error, etc.).
     /// Finishes when the process exits or is terminated.
@@ -58,19 +67,32 @@ public final class BunProcess: Sendable {
 
     // MARK: - Public API
 
-    /// Load a JavaScript bundle without running it as a process.
+    /// Load a JavaScript bundle for library-style usage.
     ///
-    /// Installs polyfills and evaluates the bundle on the EventLoop thread.
-    /// After loading, use `evaluate(js:)` to call functions.
+    /// After loading, call `evaluate(js:)` to execute code.
+    /// Cannot be combined with `run()` on the same instance.
     public func load(bundle url: URL, environment: [String: String] = [:]) async throws {
         try await eventLoop.submit {
+            precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
             try self.setupContext(bundle: url, environment: environment)
+            self.state = .loaded
+        }.get()
+    }
+
+    /// Create a bare context without loading a bundle.
+    ///
+    /// Installs Node.js/Bun polyfills. Call `evaluate(js:)` to run code.
+    public func createContext() async throws {
+        try await eventLoop.submit {
+            precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
+            try self.setupBareContext()
+            self.state = .loaded
         }.get()
     }
 
     /// Evaluate JavaScript and return the result.
     ///
-    /// Must be called after `load(bundle:)`. Runs on the EventLoop thread.
+    /// Runs on the EventLoop thread. Must be called after `load(bundle:)` or `createContext()`.
     @discardableResult
     public func evaluate(js source: String) async throws -> JSResult {
         try await eventLoop.submit {
@@ -84,15 +106,28 @@ public final class BunProcess: Sendable {
         }.get()
     }
 
+    /// Call a global JavaScript function by name and return the result.
+    @discardableResult
+    public func call(_ function: String, arguments: [Any] = []) async throws -> JSResult {
+        try await eventLoop.submit {
+            self.eventLoop.preconditionInEventLoop()
+            guard let ctx = self.jsContext else {
+                throw BunRuntimeError.contextCreationFailed
+            }
+            guard let fn = ctx.objectForKeyedSubscript(function),
+                  !fn.isUndefined else {
+                throw BunRuntimeError.functionNotFound(function)
+            }
+            let result = fn.call(withArguments: arguments)
+            try self.checkException()
+            return JSResult(from: result)
+        }.get()
+    }
+
     /// Run a JavaScript bundle as a long-lived process.
     ///
-    /// The process stays alive as long as there are pending timers or I/O operations.
     /// Returns when `process.exit(code)` is called or all pending work completes.
-    ///
-    /// - Parameters:
-    ///   - url: Path to the bundled JavaScript file.
-    ///   - environment: Environment variables for `process.env`.
-    /// - Returns: The exit code.
+    /// Cannot be combined with `load()` on the same instance.
     public func run(
         bundle url: URL,
         environment: [String: String] = [:]
@@ -101,13 +136,14 @@ public final class BunProcess: Sendable {
 
         eventLoop.execute {
             do {
+                precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
                 self.exitPromise = promise
-                self.isRunning = true
-                if !self.isLoaded {
-                    try self.setupContext(bundle: url, environment: environment)
-                }
+                self.state = .running
+                try self.setupContext(bundle: url, environment: environment)
                 self.checkExitCondition()
             } catch {
+                self.state = .idle
+                self.exitPromise = nil
                 promise.fail(error)
             }
         }
@@ -115,9 +151,7 @@ public final class BunProcess: Sendable {
         return try await promise.futureResult.get()
     }
 
-    /// Send data to the process's stdin.
-    ///
-    /// Pass `nil` to signal EOF.
+    /// Send data to the process's stdin. Pass `nil` to signal EOF.
     public func sendInput(_ data: Data?) {
         eventLoop.execute {
             self.deliverStdin(data)
@@ -133,10 +167,26 @@ public final class BunProcess: Sendable {
 
     // MARK: - Context Setup
 
-    private func setupContext(bundle url: URL, environment: [String: String]) throws {
+    private func setupBareContext() throws {
         eventLoop.preconditionInEventLoop()
 
-        guard !isLoaded else { return }
+        guard let ctx = JSContext() else {
+            throw BunRuntimeError.contextCreationFailed
+        }
+        self.jsContext = ctx
+
+        ESMResolver.installModules(in: ctx)
+        installConsoleBridge(in: ctx)
+        installTimerBridge(in: ctx)
+        installFetchBridge(in: ctx)
+        installProcessExitBridge(in: ctx)
+        installStdinBridge(in: ctx)
+        patchTimerModuleReferences(in: ctx)
+        ESMResolver.installRequire(in: ctx)
+    }
+
+    private func setupContext(bundle url: URL, environment: [String: String]) throws {
+        eventLoop.preconditionInEventLoop()
 
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw BunRuntimeError.bundleNotFound(url)
@@ -145,43 +195,22 @@ public final class BunProcess: Sendable {
         let rawSource = try String(contentsOf: url, encoding: .utf8)
         let source = try ESMTransformer.transform(rawSource, bundleURL: url)
 
-        guard let ctx = JSContext() else {
-            throw BunRuntimeError.contextCreationFailed
-        }
-        self.jsContext = ctx
+        try setupBareContext()
 
-        // Install standard polyfills
-        ESMResolver.installModules(in: ctx)
+        if let ctx = jsContext {
+            for (key, value) in environment {
+                ctx.evaluateScript("process.env['\(escapeJS(key))'] = '\(escapeJS(value))';")
+            }
 
-        // Override with EventLoop-backed bridges
-        installConsoleBridge(in: ctx)
-        installTimerBridge(in: ctx)
-        installFetchBridge(in: ctx)
-        installProcessExitBridge(in: ctx)
-        installStdinBridge(in: ctx)
-        patchTimerModuleReferences(in: ctx)
-
-        // Set environment variables
-        for (key, value) in environment {
-            let k = escapeJS(key)
-            let v = escapeJS(value)
-            ctx.evaluateScript("process.env['\(k)'] = '\(v)';")
-        }
-
-        // Install require() last
-        ESMResolver.installRequire(in: ctx)
-
-        // Evaluate the bundle
-        ctx.evaluateScript(source, withSourceURL: url)
-        if let exception = ctx.exception {
-            let message = exception.toString() ?? ""
-            ctx.exception = nil
-            if !message.contains("__PROCESS_EXIT__") {
-                throw BunRuntimeError.javaScriptException(message)
+            ctx.evaluateScript(source, withSourceURL: url)
+            if let exception = ctx.exception {
+                let message = exception.toString() ?? ""
+                ctx.exception = nil
+                if !message.contains("__PROCESS_EXIT__") {
+                    throw BunRuntimeError.javaScriptException(message)
+                }
             }
         }
-
-        isLoaded = true
     }
 
     // MARK: - Lifecycle
@@ -199,11 +228,8 @@ public final class BunProcess: Sendable {
 
     private func checkExitCondition() {
         eventLoop.preconditionInEventLoop()
-        guard isRunning, refCount <= 0, let promise = exitPromise else { return }
-        isRunning = false
-        exitPromise = nil
-        outputContinuation.finish()
-        promise.succeed(0)
+        guard state == .running, refCount <= 0 else { return }
+        resolveExit(code: 0)
     }
 
     private func doExit(code: Int32) {
@@ -213,9 +239,13 @@ public final class BunProcess: Sendable {
         }
         activeTimers.removeAll()
         refCount = 0
+        resolveExit(code: code)
+    }
 
+    private func resolveExit(code: Int32) {
+        eventLoop.preconditionInEventLoop()
         guard let promise = exitPromise else { return }
-        isRunning = false
+        state = .idle
         exitPromise = nil
         outputContinuation.finish()
         promise.succeed(code)
@@ -234,8 +264,6 @@ public final class BunProcess: Sendable {
     // MARK: - Console Bridge
 
     private func installConsoleBridge(in ctx: JSContext) {
-        eventLoop.preconditionInEventLoop()
-
         let logBlock: @convention(block) (String, String) -> Void = { [outputContinuation] level, message in
             outputContinuation.yield("[\(level)] \(message)")
         }
@@ -251,14 +279,12 @@ public final class BunProcess: Sendable {
             let delayMs = delay.isUndefined ? 0 : max(0, Int64(delay.toInt32()))
             let timerID = self.nextTimerID
             self.nextTimerID += 1
-
             self.ref()
 
             let scheduled = self.eventLoop.scheduleTask(in: .milliseconds(delayMs)) {
                 self.eventLoop.preconditionInEventLoop()
                 self.activeTimers.removeValue(forKey: timerID)
-                let args = self.extractArgs(argsArray)
-                callback.call(withArguments: args)
+                callback.call(withArguments: self.extractArgs(argsArray))
                 self.unref()
             }
             self.activeTimers[timerID] = scheduled
@@ -278,10 +304,8 @@ public final class BunProcess: Sendable {
             let delayMs = max(1, Int64(delay.toInt32()))
             let timerID = self.nextTimerID
             self.nextTimerID += 1
-
             self.ref()
             self.scheduleRepeating(timerID: timerID, callback: callback, intervalMs: delayMs, argsArray: argsArray)
-
             return timerID
         }
         ctx.setObject(setIntervalBlock, forKeyedSubscript: "__nativeSetInterval" as NSString)
@@ -313,9 +337,7 @@ public final class BunProcess: Sendable {
     private func scheduleRepeating(timerID: Int32, callback: JSValue, intervalMs: Int64, argsArray: JSValue) {
         let scheduled = eventLoop.scheduleTask(in: .milliseconds(intervalMs)) { [self] in
             self.eventLoop.preconditionInEventLoop()
-            let args = self.extractArgs(argsArray)
-            callback.call(withArguments: args)
-
+            callback.call(withArguments: self.extractArgs(argsArray))
             if self.activeTimers[timerID] != nil {
                 self.scheduleRepeating(timerID: timerID, callback: callback, intervalMs: intervalMs, argsArray: argsArray)
             }
@@ -375,21 +397,17 @@ public final class BunProcess: Sendable {
             }
 
             var request = URLRequest(url: url)
-
             if let data = optionsJSON.data(using: .utf8),
                let options = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 request.httpMethod = (options["method"] as? String)?.uppercased() ?? "GET"
-
                 if let headers = options["headers"] as? [String: Any] {
                     for (key, value) in headers {
                         request.setValue("\(value)", forHTTPHeaderField: key)
                     }
                 }
-
                 if let body = options["body"] as? String {
                     request.httpBody = body.data(using: .utf8)
                 }
-
                 if let signal = options["signal"] as? [String: Any],
                    let timeout = signal["timeout"] as? Double {
                     request.timeoutInterval = timeout / 1000.0
@@ -399,23 +417,19 @@ public final class BunProcess: Sendable {
             let task = URLSession.shared.dataTask(with: request) { [self] data, response, error in
                 self.eventLoop.execute {
                     defer { self.unref() }
-
                     if let error {
                         rejectCallback.call(withArguments: [error.localizedDescription])
                         return
                     }
-
                     guard let httpResponse = response as? HTTPURLResponse else {
                         rejectCallback.call(withArguments: ["Invalid response"])
                         return
                     }
-
                     let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                     var headerDict: [String: String] = [:]
                     for (key, value) in httpResponse.allHeaderFields {
                         headerDict["\(key)".lowercased()] = "\(value)"
                     }
-
                     let headerJSON: String
                     do {
                         let headerData = try JSONSerialization.data(withJSONObject: headerDict)
@@ -423,7 +437,6 @@ public final class BunProcess: Sendable {
                     } catch {
                         headerJSON = "{}"
                     }
-
                     resolveCallback.call(withArguments: [
                         httpResponse.statusCode,
                         httpResponse.url?.absoluteString ?? urlString,
@@ -441,8 +454,6 @@ public final class BunProcess: Sendable {
     // MARK: - process.exit Bridge
 
     private func installProcessExitBridge(in ctx: JSContext) {
-        eventLoop.preconditionInEventLoop()
-
         let exitBlock: @convention(block) (JSValue) -> Void = { [self] codeValue in
             let code: Int32 = codeValue.isUndefined ? 0 : codeValue.toInt32()
             self.doExit(code: code)
@@ -460,8 +471,6 @@ public final class BunProcess: Sendable {
     // MARK: - stdin Bridge
 
     private func installStdinBridge(in ctx: JSContext) {
-        eventLoop.preconditionInEventLoop()
-
         ctx.evaluateScript("""
         (function() {
             var stdin = process.stdin;
@@ -511,7 +520,6 @@ public final class BunProcess: Sendable {
     private func deliverStdin(_ data: Data?) {
         eventLoop.preconditionInEventLoop()
         guard let stdin = stdinValue else { return }
-
         if let data {
             let str = String(data: data, encoding: .utf8) ?? ""
             stdin.invokeMethod("emit", withArguments: ["data", str])
