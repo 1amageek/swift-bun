@@ -238,6 +238,57 @@ struct BunProcessTests {
         #expect(try await task.value == 0)
     }
 
+    @Test func stdinKeepsProcessAlive() async throws {
+        // Process registers stdin.on('data') but receives no data yet.
+        // The process must NOT exit immediately — stdin listener is an active handle.
+        let url = try tempBundle("""
+            process.stdin.on('data', function(chunk) {
+                process.exit(chunk === 'go' ? 0 : 1);
+            });
+            // No process.exit here — process should stay alive waiting for stdin
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+
+        // Wait 200ms — if process exited already, task.value would be available
+        try await Task.sleep(for: .milliseconds(200))
+
+        // Send data to unblock
+        p.sendInput("go".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinUnrefOnEnd() async throws {
+        // After 'end' is emitted, stdin is no longer an active handle.
+        // If there's no other pending work, the process should exit naturally.
+        let url = try tempBundle("""
+            process.stdin.on('data', function() {});
+            process.stdin.on('end', function() {
+                // After end, no more active handles → natural exit with code 0
+            });
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await p.run() }
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput(nil) // EOF
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinUnrefOnRemoveListener() async throws {
+        // Removing all data listeners should unref stdin.
+        let url = try tempBundle("""
+            var handler = function() {};
+            process.stdin.on('data', handler);
+            // Immediately remove — should unref and allow natural exit
+            process.stdin.removeListener('data', handler);
+            // No active handles → exit naturally
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
     // MARK: - stdout and output
 
     @Test func stdoutWrite() async throws {

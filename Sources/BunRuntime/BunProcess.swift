@@ -540,17 +540,41 @@ public final class BunProcess: Sendable {
     // MARK: - stdin Bridge
 
     private func installStdinBridge(in ctx: JSContext) {
+        // Native ref/unref for stdin active handle tracking.
+        // When a 'data' or 'readable' listener is registered, stdin becomes an
+        // active handle (ref). When 'end' fires or all listeners are removed, unref.
+        // This matches Node.js semantics where stdin keeps the event loop alive.
+        let stdinRefBlock: @convention(block) () -> Void = { [self] in self.ref() }
+        let stdinUnrefBlock: @convention(block) () -> Void = { [self] in self.unref() }
+        ctx.setObject(stdinRefBlock, forKeyedSubscript: "__stdinRef" as NSString)
+        ctx.setObject(stdinUnrefBlock, forKeyedSubscript: "__stdinUnref" as NSString)
+
         ctx.evaluateScript("""
         (function() {
             var stdin = process.stdin;
             stdin._events = {};
+            stdin._refed = false;
             stdin.readable = true;
             stdin.setEncoding = function() { return stdin; };
             stdin.resume = function() { return stdin; };
             stdin.pause = function() { return stdin; };
+
+            function checkRef() {
+                var hasListeners = (stdin._events['data'] && stdin._events['data'].length > 0) ||
+                                   (stdin._events['readable'] && stdin._events['readable'].length > 0);
+                if (hasListeners && !stdin._refed) {
+                    stdin._refed = true;
+                    __stdinRef();
+                } else if (!hasListeners && stdin._refed) {
+                    stdin._refed = false;
+                    __stdinUnref();
+                }
+            }
+
             stdin.on = function(event, fn) {
                 if (!stdin._events[event]) stdin._events[event] = [];
                 stdin._events[event].push(fn);
+                checkRef();
                 return stdin;
             };
             stdin.addListener = stdin.on;
@@ -567,6 +591,7 @@ public final class BunProcess: Sendable {
                 stdin._events[event] = stdin._events[event].filter(function(f) {
                     return f !== fn && f._original !== fn;
                 });
+                checkRef();
                 return stdin;
             };
             stdin.off = stdin.removeListener;
@@ -576,6 +601,10 @@ public final class BunProcess: Sendable {
                 var listeners = stdin._events[event].slice();
                 for (var i = 0; i < listeners.length; i++) {
                     listeners[i].apply(stdin, args);
+                }
+                if (event === 'end' && stdin._refed) {
+                    stdin._refed = false;
+                    __stdinUnref();
                 }
                 return true;
             };
