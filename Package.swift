@@ -12,12 +12,18 @@ let package = Package(
         .library(name: "BunRuntime", targets: ["BunRuntime"]),
     ],
     targets: [
-        .target(name: "BunRuntime"),
+        .target(
+            name: "BunRuntime",
+            resources: [
+                .copy("Resources/esm-transformer.bundle.js"),
+            ]
+        ),
         .testTarget(
             name: "BunRuntimeTests",
             dependencies: ["BunRuntime"],
             resources: [
                 .copy("claude.bundle.js"),
+                .copy("esm-transformer.bundle.js"),
             ]
         ),
     ],

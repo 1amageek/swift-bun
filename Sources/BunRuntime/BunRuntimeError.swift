@@ -7,4 +7,6 @@ public enum BunRuntimeError: Error, Sendable {
     case contextCreationFailed
     case javaScriptException(String)
     case functionNotFound(String)
+    case transformerNotFound
+    case transformFailed
 }
