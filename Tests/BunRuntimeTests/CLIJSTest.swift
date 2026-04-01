@@ -803,7 +803,7 @@ struct CLIJSTest {
         })()
         """)
 
-        // es-module-lexer's require won't work here since we don't have ESMResolver
+        // es-module-lexer's require won't work here since we don't have ModuleBootstrap
         // Instead, use the already-loaded __transformESM context to verify
         // Just check: result should not contain "import " followed by "{" or identifier + "from"
         // using the same es-module-lexer that already ran

@@ -62,7 +62,7 @@ struct NodeCompatStreamTests {
         let stdinBefore = context.evaluateScript("process.stdin")
         let stdoutBefore = context.evaluateScript("process.stdout")
 
-        try ESMResolver().installModules(into: context)
+        try ModuleBootstrap().installModules(into: context)
 
         let stdinAfter = context.evaluateScript("process.stdin")
         let stdoutAfter = context.evaluateScript("process.stdout")
@@ -74,7 +74,7 @@ struct NodeCompatStreamTests {
     @Test("node:stream reuses Layer 0 stream constructors")
     func nodeStreamReusesLayer0Constructors() throws {
         let context = try makeLayer0Context()
-        let resolver = ESMResolver()
+        let resolver = ModuleBootstrap()
         try resolver.installModules(into: context)
         try resolver.installRequire(into: context)
 

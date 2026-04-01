@@ -144,7 +144,7 @@ public final class BunProcess: Sendable {
 JSCore's `evaluateScript()` provides only ECMAScript language features. All platform APIs are polyfilled in three layers:
 
 - **Layer 0**: `polyfills.bundle.js` — Web APIs (npm packages, esbuild bundled)
-- **Layer 1**: ESMResolver — Node.js globals + modules (Swift strings)
+- **Layer 1**: ModuleBootstrap — Node.js globals + modules (Swift strings)
 - **Layer 2**: NIO bridges — EventLoop-backed overrides (Swift closures)
 
 ### Web APIs (Layer 0)
@@ -232,7 +232,7 @@ Both ESM and CJS bundles are supported. ESM bundles are automatically transforme
 │   │  ┌────────────────────────────────┐  │   │
 │   │  │  JavaScriptCore.framework      │  │   │
 │   │  │  ┌──────────────────────────┐  │  │   │
-│   │  │  │  ESMResolver polyfills   │  │  │   │
+│   │  │  │  ModuleBootstrap         │  │  │   │
 │   │  │  │  • Node.js modules       │  │  │   │
 │   │  │  │  • Bun API shims         │  │  │   │
 │   │  │  └──────────────────────────┘  │  │   │

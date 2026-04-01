@@ -80,7 +80,7 @@ BunProcess (final class, Sendable)
 ├── EventLoop thread (NIO MultiThreadedEventLoopGroup, 1 thread)
 │   ├── JSContext (all access pinned to this thread)
 │   ├── Web API polyfills (polyfills.bundle.js)
-│   ├── ESMResolver polyfills (require, Node.js modules, Bun APIs)
+│   ├── ModuleBootstrap polyfills (require, Node.js modules, Bun APIs)
 │   └── NIO-backed bridges:
 │       ├── setTimeout/setInterval → eventLoop.scheduleTask
 │       ├── fetch (__nativeFetch) → URLSession + eventLoop.execute
@@ -98,7 +98,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features (Promise,
 
 ```
 Layer 0: polyfills.bundle.js    ← Web APIs (npm packages, esbuild bundled)
-Layer 1: ESMResolver            ← Node.js globals + modules (Swift strings)
+Layer 1: ModuleBootstrap        ← Node.js globals + modules (Swift strings)
 Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 ```
 
@@ -107,14 +107,16 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 ### Context setup order
 
 1. **Web API polyfills** (`polyfills.bundle.js`) — ReadableStream, Event, Blob, crypto, etc.
-2. **Node.js globals** (ESMResolver.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
-3. **Node.js modules** (ESMResolver.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
+2. **Node.js globals** (ModuleBootstrap.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
+3. **Node.js modules** (ModuleBootstrap.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
 4. **Bun APIs** — Bun.file, Bun.env, Bun.write, etc.
 5. **NIO bridges** — Timer override, Fetch override, process.exit, stdin, stdout/stderr, console → output stream
 6. **Timer module patch** — Update `__nodeModules.timers` references to NIO-backed versions
-7. **require()** — Installed last, reads from `__nodeModules`
+7. **require()** — Installed last, resolves built-ins first and then plain `node_modules` CommonJS packages
 8. **Configuration** — process.argv, process.cwd, process.env
-9. **Bundle evaluation** — evaluateScript(source)
+9. **Bundle evaluation**
+   - `load()` / library mode: evaluate the bundle directly into the global context
+   - `run()` / process mode: execute the entry script as the CommonJS main module
 
 ## Polyfill coverage status
 
@@ -142,7 +144,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | navigator | ✅ Stub | userAgent, platform |
 | Symbol.dispose / asyncDispose | ✅ Full | Symbol.for polyfill |
 
-### Node.js globals (ESMResolver)
+### Node.js globals (ModuleBootstrap)
 
 | Global | Status |
 |--------|--------|
@@ -159,7 +161,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | setTimeout / setInterval / setImmediate | ✅ NIO EventLoop-backed |
 | fetch / Headers / Request / Response | ✅ URLSession-backed |
 | Buffer | ✅ Uint8Array-based |
-| require() | ✅ __nodeModules dispatcher |
+| require() | ✅ Built-ins + plain `node_modules` CommonJS loader |
 
 ### Node.js modules (require)
 
@@ -177,7 +179,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:events | ✅ Implemented | EventEmitter (constructor, supports extends) |
 | node:timers | ✅ Implemented | NIO EventLoop-backed |
 | node:timers/promises | ✅ Implemented | Promise-wrapped timers |
-| node:module | ✅ Basic | createRequire + builtinModules |
+| node:module | ✅ Basic | createRequire + builtinModules + _resolveFilename for CommonJS packages |
 | node:process | ✅ Implemented | Full process object |
 | node:async_hooks | ⚠️ Partial | AsyncLocalStorage with run/getStore only |
 | node:readline | ✅ Basic | createInterface, question, line events, async iterator |

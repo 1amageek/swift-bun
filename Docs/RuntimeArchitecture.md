@@ -21,14 +21,22 @@ Layer 0 prefers community JS polyfills when they are compatible with JavaScriptC
 - local thin adapters: `Blob`, `File`, `FormData`, `XMLHttpRequest`, stdio stream objects
 
 ### Layer 1: Node/Bun Module Surface
-- Source of truth: `ESMResolver` and `NodeCompat/*`
+- Source of truth: `ModuleBootstrap` and `NodeCompat/*`
 - Owns `require('node:*')` / `require('bun:*')` export shapes
+- Owns plain `node_modules` CommonJS package resolution
 - Composes Layer 0 APIs into Node/Bun modules
 - Must not redefine Web APIs already owned by Layer 0
+
+`ModuleBootstrap` is an orchestrator, not the source of truth for every step itself. Its internal phases are split into:
+- `ModuleGlobalBootstrap`
+- `BuiltinModuleBootstrap`
+- `RequireBootstrap`
 
 Examples:
 - `node:http` composes `fetch` and stream constructors from Layer 0
 - `node:stream` re-exports Layer 0 stream constructors and adds `stream/promises` / `stream/consumers`
+- `require()` resolves built-ins first, then installed CommonJS packages from plain `node_modules`
+- process-mode entry scripts are executed as the CommonJS main module
 
 ### Layer 2: Runtime Host Layer
 - Source of truth: Swift runtime components
@@ -46,7 +54,7 @@ Layer 2 must not own JS API semantics such as `fetch`, `Headers`, `Request`, `Re
 - Layer 0 owns JS object creation for stdio streams.
 - Layer 1 owns module wiring only.
 - Layer 2 exposes only narrow `__native*` hooks into JS.
-- `ESMResolver.installGlobals` must not recreate `process.stdin/stdout/stderr`, `queueMicrotask`, or `fetch`.
+- `ModuleBootstrap.installGlobals` must not recreate `process.stdin/stdout/stderr`, `queueMicrotask`, or `fetch`.
 - `NodeHTTP` must not redefine `fetch`, `Headers`, `Request`, or `Response`.
 - `NodeStream` must not provide an independent fallback stream implementation.
 
@@ -105,6 +113,13 @@ Lifecycle is separate from Node/Bun API compatibility.
 - A successful `load()` must be paired with `shutdown()`.
 - `run()` enters process mode and always performs shutdown before it returns.
 - Tests and helper utilities must treat `shutdown()` as mandatory cleanup, not optional best effort.
+
+### Entry script semantics
+
+- `load()` keeps the existing library-style behavior: if a bundle URL is provided, the transformed source is evaluated directly into the global context.
+- `run()` uses process mode semantics: the entry script is executed through the CommonJS loader as `require.main`.
+- As a result, `run()` entry scripts can rely on `module`, `exports`, `require.main`, `__filename`, and `__dirname`.
+- `load()` is intentionally different so that existing library-mode tests and REPL-style evaluation can continue to see bundle-defined globals.
 
 ### States
 - `idle`

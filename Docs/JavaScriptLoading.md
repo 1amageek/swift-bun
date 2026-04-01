@@ -13,7 +13,7 @@ This document defines how JavaScript source files are loaded into `JSContext` an
 
 - replacing every inline `evaluateScript(...)` call
 - moving dynamically generated one-line configuration writes into resource files
-- introducing a general-purpose module loader inside JavaScriptCore
+- introducing a general-purpose ESM loader or package manager inside JavaScriptCore
 
 ## Source categories
 
@@ -135,6 +135,13 @@ context.evaluateScript(source, withSourceURL: url)
 
 The `.js` file should own behavior. Swift should only provide inputs.
 
+For application bundles, the final execution path depends on runtime mode:
+
+- `load()` evaluates the transformed bundle directly with `evaluateScript(..., withSourceURL:)`
+- `run()` routes the transformed entry script through `__swiftBunModuleLoader.executeMainSource(...)`
+
+That split is intentional. Library mode preserves global bundle definitions for follow-up `evaluate(js:)` calls, while process mode gives the entry script CommonJS main-module semantics.
+
 ## Dynamic values and configuration
 
 Resource files should stay static. Do not build them by interpolating runtime values into Swift multi-line strings.
@@ -211,7 +218,7 @@ Do not rewrite unrelated inline bootstrapping code just to satisfy the pattern m
 ## Current coverage
 
 Resource-backed today:
-- Bootstrap globals and `require()` helpers under `Bootstrap/`
+- Bootstrap globals and the CommonJS `require()` loader under `Bootstrap/`
 - `Bun.file`, `BunShims`, `BunSpawn` under `BunAPI/`
 - `node:fs`, `node:http`, `node:stream`, `node:path`, `node:buffer`, `node:url`, `node:util`, `node:timers`, `node:crypto`, `node:os`
 - split `NodeStubs` modules under `NodeCompat/`
@@ -222,3 +229,14 @@ These remain inline unless they grow:
 - `BunEnv` aliasing of `process.env`
 - `process.argv` assignment
 - small config writes to `globalThis.__swiftBunConfig`
+
+## CommonJS boundary
+
+The CommonJS loader owns:
+- built-in module resolution
+- plain `node_modules` package resolution
+- `require.resolve()`
+- `module.createRequire()`
+- process-mode entry script execution as the main module
+
+Swift-owned library mode intentionally does not run its bundle through the CommonJS main-module path.

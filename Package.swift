@@ -48,6 +48,7 @@ let package = Package(
                 .copy("test-fetch-await.js"),
                 .copy("test-nexttick-await.js"),
                 .copy("test-all-modules.js"),
+                .copy("Fixtures"),
             ]
         ),
     ],

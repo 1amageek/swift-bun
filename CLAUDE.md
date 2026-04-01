@@ -115,7 +115,7 @@ BunProcess (final class, Sendable)
 ├── EventLoop thread (NIO MultiThreadedEventLoopGroup, 1 thread)
 │   ├── JSContext (all access pinned to this thread)
 │   ├── Web API polyfills (polyfills.bundle.js)
-│   ├── ESMResolver polyfills (require, Node.js modules, Bun APIs)
+│   ├── ModuleBootstrap polyfills (require, Node.js modules, Bun APIs)
 │   └── NIO-backed bridges:
 │       ├── setTimeout/setInterval → eventLoop.scheduleTask
 │       ├── fetch (__nativeFetch) → URLSession + eventLoop.execute
@@ -133,7 +133,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features (Promise,
 
 ```
 Layer 0: polyfills.bundle.js    ← Web APIs (npm packages, esbuild bundled)
-Layer 1: ESMResolver            ← Node.js globals + modules (Swift strings)
+Layer 1: ModuleBootstrap        ← Node.js globals + modules (Swift strings)
 Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 ```
 
@@ -143,8 +143,8 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 
 1. **Crypto random bridge** (`__cryptoRandomBytes`) — SecRandomCopyBytes-backed, installed before polyfills so Web Crypto can use it
 2. **Web API polyfills** (`polyfills.bundle.js`) — ReadableStream, Event, Blob, crypto, etc.
-3. **Node.js globals** (ESMResolver.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
-4. **Node.js modules** (ESMResolver.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
+3. **Node.js globals** (ModuleBootstrap.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
+4. **Node.js modules** (ModuleBootstrap.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
 5. **Bun APIs** — Bun.file, Bun.env, Bun.write, etc.
 6. **NIO bridges** — Timer override, Fetch override, process.exit, stdin, stdout/stderr, console → output stream
 7. **Timer module patch** — Update `__nodeModules.timers` references to NIO-backed versions
@@ -178,7 +178,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | navigator | ✅ Stub | userAgent, platform |
 | Symbol.dispose / asyncDispose | ✅ Full | Symbol.for polyfill |
 
-### Node.js globals (ESMResolver)
+### Node.js globals (ModuleBootstrap)
 
 | Global | Status |
 |--------|--------|

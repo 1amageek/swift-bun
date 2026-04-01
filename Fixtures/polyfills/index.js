@@ -2,7 +2,7 @@
 if (typeof globalThis.global === "undefined") globalThis.global = globalThis;
 if (typeof globalThis.self === "undefined") globalThis.self = globalThis;
 
-// Minimal process object needed by readable-stream before ESMResolver runs
+// Minimal process object needed by readable-stream before ModuleBootstrap runs
 if (typeof globalThis.process === "undefined") globalThis.process = {};
 if (typeof process.nextTick === "undefined") {
   process.nextTick = function (fn) {
@@ -19,7 +19,7 @@ if (typeof process.env === "undefined") process.env = {};
 // 2. Node.js stream infrastructure (readable-stream)
 // 3. process.stdin/stdout/stderr as proper Stream instances
 //
-// Bundled with esbuild and loaded by BunProcess before ESMResolver.
+// Bundled with esbuild and loaded by BunProcess before ModuleBootstrap.
 
 // =============================================================================
 // Web Streams API (WHATWG spec)
@@ -419,7 +419,7 @@ if (!globalThis.__swiftBunPackages) {
     }
   };
 
-  // Attach to process (will be created by ESMResolver if not exists)
+  // Attach to process (will be created by ModuleBootstrap if not exists)
   if (!globalThis.process) globalThis.process = {};
   globalThis.process.stdin = stdin;
 })();

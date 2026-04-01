@@ -455,7 +455,7 @@ public final class BunProcess: Sendable {
         try installWebAPIPolyfills(in: ctx)
         try throwPendingJavaScriptException(source: "setup:webAPIPolyfills")
 
-        let resolver = ESMResolver(
+        let resolver = ModuleBootstrap(
             fileSystemAsyncBridge: fileSystemAsyncBridge,
             environment: runtimeEnvironment,
             cwd: cwd
@@ -520,7 +520,21 @@ public final class BunProcess: Sendable {
 
         let rawSource = try String(contentsOf: bundle, encoding: .utf8)
         let source = try ESMTransformer.transform(rawSource, bundleURL: bundle)
-        let result = ctx.evaluateScript(source, withSourceURL: bundle)
+        let result: JSValue?
+        if lifecycle.currentMode == .process {
+            guard
+                let loader = ctx.objectForKeyedSubscript("__swiftBunModuleLoader"),
+                !loader.isUndefined,
+                let executeMain = loader.objectForKeyedSubscript("executeMainSource"),
+                !executeMain.isUndefined
+            else {
+                throw BunRuntimeError.javaScriptException("CommonJS loader is not installed")
+            }
+
+            result = executeMain.call(withArguments: [bundle.path, source])
+        } else {
+            result = ctx.evaluateScript(source, withSourceURL: bundle)
+        }
         scheduler.ensureDrainScheduled(reason: "bundle")
         if let exception = ctx.exception {
             let message = exception.toString() ?? ""

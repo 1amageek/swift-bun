@@ -1,0 +1,5 @@
+{
+  "name": "main-package",
+  "version": "1.0.0",
+  "main": "lib/entry"
+}

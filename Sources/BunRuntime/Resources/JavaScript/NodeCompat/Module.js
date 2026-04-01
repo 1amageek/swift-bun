@@ -23,23 +23,23 @@
         return result;
     }
 
+    function moduleLoader() {
+        if (!globalThis.__swiftBunModuleLoader) {
+            throw new Error('CommonJS loader is not installed');
+        }
+        return globalThis.__swiftBunModuleLoader;
+    }
+
     var moduleValue = {
         createRequire: function(fromPath) {
-            var required = function(id) {
-                return globalThis.require(id);
-            };
-            required.resolve = function(id) {
-                return __nodeModules.module._resolveFilename(id, fromPath);
-            };
-            required.cache = {};
-            required.main = null;
-            required.extensions = {};
-            return required;
+            return moduleLoader().createRequire(fromPath, null);
         },
         builtinModules: dedupeStrings(builtinModuleNames.concat(builtinModuleNames.map(function(name) {
             return name.startsWith('node:') ? name : 'node:' + name;
         }))).sort(),
-        _resolveFilename: function(id) { return id; },
+        _resolveFilename: function(id, fromPath) {
+            return moduleLoader().resolveFrom(id, fromPath);
+        },
     };
     moduleValue.default = moduleValue;
     __nodeModules.module = moduleValue;
