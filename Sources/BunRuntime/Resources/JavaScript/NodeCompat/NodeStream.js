@@ -193,8 +193,47 @@
             __nodeModules.stream_promises = streamPromises;
             __nodeModules.stream_consumers = streamConsumers;
 
+            // --- Standalone utility functions (Node.js events module) ---
+
+            // setMaxListeners(n, ...eventTargets) — Node.js 15.4+
+            // With no targets: sets EventEmitter.defaultMaxListeners.
+            // With targets: calls setMaxListeners(n) on each EventEmitter/EventTarget.
+            EventEmitter.setMaxListeners = function(n) {
+                if (arguments.length <= 1) {
+                    EventEmitter.defaultMaxListeners = n;
+                    return;
+                }
+                for (var i = 1; i < arguments.length; i++) {
+                    var target = arguments[i];
+                    if (target && typeof target.setMaxListeners === 'function') {
+                        target.setMaxListeners(n);
+                    }
+                    // EventTarget/AbortSignal without setMaxListeners — silently ignore
+                }
+            };
+
+            // getMaxListeners(emitterOrTarget) — Node.js 19.9+
+            // Returns the current max listeners for an EventEmitter or EventTarget.
+            function getMaxListeners(emitterOrTarget) {
+                if (emitterOrTarget && typeof emitterOrTarget.getMaxListeners === 'function') {
+                    return emitterOrTarget.getMaxListeners();
+                }
+                return EventEmitter.defaultMaxListeners;
+            }
+
+            // getEventListeners(emitterOrTarget, eventName) — Node.js 15.2+
+            // Returns a copy of the listeners array for the given event.
+            function getEventListeners(emitterOrTarget, eventName) {
+                if (emitterOrTarget && typeof emitterOrTarget.listeners === 'function') {
+                    return emitterOrTarget.listeners(eventName);
+                }
+                return [];
+            }
+
             EventEmitter.EventEmitter = EventEmitter;
             EventEmitter.default = EventEmitter;
+            EventEmitter.getMaxListeners = getMaxListeners;
+            EventEmitter.getEventListeners = getEventListeners;
             __nodeModules.events = EventEmitter;
 
             __nodeModules.string_decoder = {
