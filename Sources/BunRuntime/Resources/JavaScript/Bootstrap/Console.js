@@ -9,7 +9,29 @@
         }).join(' ');
     }
 
+    function repeatIndent(level) {
+        return new Array(level + 1).join('  ');
+    }
+
+    function formatTable(value) {
+        if (!Array.isArray(value)) {
+            return formatArgs([value]);
+        }
+        return value.map(function(entry, index) {
+            if (entry && typeof entry === 'object') {
+                try {
+                    return index + '\t' + JSON.stringify(entry);
+                } catch (error) {
+                    return index + '\t' + String(entry);
+                }
+            }
+            return index + '\t' + String(entry);
+        }).join('\n');
+    }
+
     globalThis.console = {
+        _groupDepth: 0,
+        _counts: {},
         log: function() { __nativeLog('log', formatArgs(arguments)); },
         warn: function() { __nativeLog('warn', formatArgs(arguments)); },
         error: function() { __nativeLog('error', formatArgs(arguments)); },
@@ -49,6 +71,28 @@
             var msg = label + ': ' + elapsed.toFixed(3) + 'ms';
             if (extra.length > 0) msg += ' ' + formatArgs(extra);
             __nativeLog('log', msg);
+        },
+        group: function() {
+            var message = formatArgs(arguments);
+            if (message) {
+                __nativeLog('log', repeatIndent(this._groupDepth) + message);
+            }
+            this._groupDepth += 1;
+        },
+        groupEnd: function() {
+            this._groupDepth = Math.max(0, this._groupDepth - 1);
+        },
+        count: function(label) {
+            label = label || 'default';
+            this._counts[label] = (this._counts[label] || 0) + 1;
+            __nativeLog('log', repeatIndent(this._groupDepth) + label + ': ' + this._counts[label]);
+        },
+        countReset: function(label) {
+            label = label || 'default';
+            this._counts[label] = 0;
+        },
+        table: function(value) {
+            __nativeLog('log', repeatIndent(this._groupDepth) + formatTable(value));
         },
     };
 })();

@@ -58,4 +58,20 @@ process.env = process.env || {};
     };
     process.hrtime.bigint = function() { return BigInt(Math.floor(performance.now() * 1e6)); };
     process.emitWarning = function(msg) { console.warn('Warning:', msg); };
+    process._rawDebug = function() {
+        if (typeof __nativeStderrWrite === 'function') {
+            __nativeStderrWrite(Array.prototype.slice.call(arguments).join(' ') + '\n');
+            return;
+        }
+        console.error.apply(console, arguments);
+    };
+    process._getActiveHandles = function() {
+        if (typeof __swiftBunActiveHandles === 'function') {
+            return __swiftBunActiveHandles();
+        }
+        return [];
+    };
+    process.send = function() {
+        return false;
+    };
 })();

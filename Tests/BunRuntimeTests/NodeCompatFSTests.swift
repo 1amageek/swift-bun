@@ -249,6 +249,67 @@ struct NodeCompatFSTests {
         #expect(result.boolValue == true)
     }
 
+    @Test("fs.rm callback removes file asynchronously")
+    func fsRmCallback() async throws {
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-rm-callback-\(UUID().uuidString).txt"
+        try "delete me".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await evaluateAsync("""
+            (async function() {
+                var fs = require('node:fs');
+                await new Promise(function(resolve, reject) {
+                    fs.rm('\(tmpPath)', function(error) {
+                        if (error) reject(error);
+                        else resolve();
+                    });
+                });
+                return fs.existsSync('\(tmpPath)');
+            })()
+        """)
+
+        #expect(result.boolValue == false)
+    }
+
+    @Test("fs.watchFile observes changes and unwatchFile stops polling")
+    func fsWatchFileAndUnwatchFile() async throws {
+        let tmpPath = NSTemporaryDirectory() + "swift-bun-watch-file-\(UUID().uuidString).txt"
+        try "before".write(toFile: tmpPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        let result = try await withLoadedProcess { process in
+            let evaluation = Task {
+                try await process.evaluateAsync(js: """
+                    (async function() {
+                        var fs = require('node:fs');
+                        return await new Promise(function(resolve, reject) {
+                            var events = [];
+                            function listener(current, previous) {
+                                events.push({
+                                    currentSize: current.size,
+                                    previousSize: previous.size
+                                });
+                                fs.unwatchFile('\(tmpPath)', listener);
+                                setTimeout(function() {
+                                    resolve(JSON.stringify(events));
+                                }, 30);
+                            }
+                            fs.watchFile('\(tmpPath)', { interval: 20 }, listener);
+                            setTimeout(function() {
+                                fs.writeFileSync('\(tmpPath)', 'after change');
+                            }, 40);
+                        });
+                    })()
+                """)
+            }
+
+            return try await evaluation.value
+        }
+
+        #expect(result.stringValue.contains(#""previousSize":6"#))
+        #expect(result.stringValue.contains(#""currentSize":12"#))
+    }
+
     @Test("fs.promises.symlink, lstat, and rmdir are exposed")
     func fsPromisesSymlinkLstatAndRmdir() async throws {
         let tmpDir = NSTemporaryDirectory() + "swift-bun-symlink-\(UUID().uuidString)"
@@ -478,7 +539,7 @@ struct NodeCompatFSTests {
 }
 
 // Shared helper
-private final class NodeCompatLogCollector: Sendable {
+final class NodeCompatLogCollector: Sendable {
     private let storage = Mutex<[String]>([])
     func append(_ line: String) { storage.withLock { $0.append(line) } }
     var values: [String] { storage.withLock { $0 } }

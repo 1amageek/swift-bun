@@ -207,8 +207,9 @@
                     var target = arguments[i];
                     if (target && typeof target.setMaxListeners === 'function') {
                         target.setMaxListeners(n);
+                    } else if (target && typeof target.addEventListener === 'function') {
+                        target._maxListeners = n;
                     }
-                    // EventTarget/AbortSignal without setMaxListeners — silently ignore
                 }
             };
 
@@ -218,6 +219,9 @@
                 if (emitterOrTarget && typeof emitterOrTarget.getMaxListeners === 'function') {
                     return emitterOrTarget.getMaxListeners();
                 }
+                if (emitterOrTarget && typeof emitterOrTarget.addEventListener === 'function' && typeof emitterOrTarget._maxListeners === 'number') {
+                    return emitterOrTarget._maxListeners;
+                }
                 return EventEmitter.defaultMaxListeners;
             }
 
@@ -226,6 +230,9 @@
             function getEventListeners(emitterOrTarget, eventName) {
                 if (emitterOrTarget && typeof emitterOrTarget.listeners === 'function') {
                     return emitterOrTarget.listeners(eventName);
+                }
+                if (emitterOrTarget && emitterOrTarget._listeners && emitterOrTarget._listeners[eventName]) {
+                    return emitterOrTarget._listeners[eventName].map(function(entry) { return entry.fn; });
                 }
                 return [];
             }

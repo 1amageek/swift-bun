@@ -201,6 +201,31 @@ struct FetchRoundtripTests {
         }
     }
 
+    @Test("fetch exposes streaming response body")
+    func responseBodyStreaming() async throws {
+        try await withServer { baseURL in
+            let value = try await runAsyncExpression("""
+                (async function() {
+                    var response = await fetch('\(baseURL)/stream');
+                    var reader = response.body.getReader();
+                    var chunks = [];
+                    var combined = '';
+                    while (true) {
+                        var step = await reader.read();
+                        if (step.done) break;
+                        var text = new TextDecoder().decode(step.value);
+                        chunks.push(text);
+                        combined += text;
+                    }
+                    return JSON.stringify({ chunkCount: chunks.length, body: combined });
+                })()
+            """)
+            let json = try parseJSONValue(value)
+            #expect(json["body"] as? String == "hello world")
+            #expect((json["chunkCount"] as? Int ?? 0) > 1)
+        }
+    }
+
     // MARK: - Integration: Anthropic SDK Pattern
 
     @Test("Anthropic API pattern: POST JSON and receive response")

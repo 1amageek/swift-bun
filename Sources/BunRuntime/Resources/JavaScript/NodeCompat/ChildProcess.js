@@ -1,6 +1,45 @@
 (function() {
     if (!globalThis.__nodeModules) globalThis.__nodeModules = {};
+    function getEventEmitter() {
+        if (__nodeModules.events) return __nodeModules.events.EventEmitter || __nodeModules.events;
+        if (typeof require === 'function') return require('events').EventEmitter;
+        throw new Error('events module is not available');
+    }
+    function getStream() {
+        if (__nodeModules.stream) return __nodeModules.stream;
+        if (typeof require === 'function') return require('stream');
+        throw new Error('stream module is not available');
+    }
+
+    function ChildProcess() {
+        var EE = getEventEmitter();
+        var Stream = getStream();
+        EE.call(this);
+        this.killed = false;
+        this.exitCode = null;
+        this.signalCode = null;
+        this.stdout = new Stream.PassThrough();
+        this.stderr = new Stream.PassThrough();
+    }
+    ChildProcess.prototype = Object.create(getEventEmitter().prototype);
+    ChildProcess.prototype.constructor = ChildProcess;
+    ChildProcess.prototype.kill = function() {
+        this.killed = true;
+        return true;
+    };
+    ChildProcess.prototype.destroy = function(error) {
+        this.killed = true;
+        this.stdin.destroy(error);
+        this.stdout.destroy(error);
+        this.stderr.destroy(error);
+    };
+
+    function runCommandSync(file, args, opts) {
+        return __cpRunSync(file, JSON.stringify(args || []), JSON.stringify(opts || {}));
+    }
+
     __nodeModules.child_process = {
+        ChildProcess: ChildProcess,
         spawn: function(file, args, opts) {
             if (!Array.isArray(args) && args && typeof args === 'object') {
                 opts = args;
@@ -9,17 +48,11 @@
             args = Array.isArray(args) ? args : [];
             opts = opts || {};
 
-            var EE = require('events');
-            var Stream = require('stream');
-            var child = new EE();
+            var child = new ChildProcess();
+            var Stream = getStream();
             var stdinChunks = [];
             var started = false;
 
-            child.stdout = new Stream.PassThrough();
-            child.stderr = new Stream.PassThrough();
-            child.killed = false;
-            child.exitCode = null;
-            child.signalCode = null;
             child.stdin = new Stream.Writable({
                 write: function(chunk, encoding, callback) {
                     if (typeof chunk === 'string') stdinChunks.push(chunk);
@@ -67,19 +100,8 @@
                     runOptions.input = stdinChunks.join('');
                 }
 
-                finishChild(__cpRunSync(file, JSON.stringify(args), JSON.stringify(runOptions)));
+                finishChild(runCommandSync(file, args, runOptions));
             }
-
-            child.kill = function(signal) {
-                child.killed = true;
-                return true;
-            };
-            child.destroy = function(error) {
-                child.killed = true;
-                child.stdin.destroy(error);
-                child.stdout.destroy(error);
-                child.stderr.destroy(error);
-            };
 
             queueMicrotask(start);
             return child;
@@ -89,10 +111,27 @@
             return __nodeModules.child_process.execFile('/bin/sh', ['-lc', cmd], opts, cb);
         },
         execSync: function(cmd, opts) {
-            var result = __cpRunSync('/bin/sh', JSON.stringify(['-lc', cmd]), JSON.stringify(opts || {}));
+            var result = runCommandSync('/bin/sh', ['-lc', cmd], opts || {});
             if (result.error) throw new Error(result.error);
             if ((result.status || 0) !== 0) throw new Error(result.stderr || ('Command exited with code ' + result.status));
-            return result.stdout || '';
+            return Buffer.from(result.stdout || '', 'utf8');
+        },
+        execFileSync: function(file, args, opts) {
+            if (!Array.isArray(args) && args && typeof args === 'object') {
+                opts = args;
+                args = [];
+            }
+            var result = runCommandSync(file, Array.isArray(args) ? args : [], opts || {});
+            if (result.error) throw new Error(result.error);
+            if ((result.status || 0) !== 0) {
+                var error = new Error(result.stderr || ('Command exited with code ' + result.status));
+                error.status = result.status;
+                error.signal = result.signal || null;
+                error.stdout = Buffer.from(result.stdout || '', 'utf8');
+                error.stderr = Buffer.from(result.stderr || '', 'utf8');
+                throw error;
+            }
+            return Buffer.from(result.stdout || '', 'utf8');
         },
         execFile: function(file, args, opts, cb) {
             if (typeof opts === 'function') cb = opts;

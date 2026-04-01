@@ -48,6 +48,9 @@
         allocUnsafe: function(size) {
             return extendBuffer(new Uint8Array(size));
         },
+        allocUnsafeSlow: function(size) {
+            return extendBuffer(new Uint8Array(size));
+        },
         concat: function(list, totalLength) {
             if (!totalLength) {
                 totalLength = 0;
@@ -140,6 +143,34 @@
         buf.toJSON = function() {
             return { type: 'Buffer', data: Array.from(this) };
         };
+        buf.readUInt8 = function(offset) { return this[offset >>> 0]; };
+        buf.readUInt16LE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint16(offset >>> 0, true); };
+        buf.readUInt16BE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint16(offset >>> 0, false); };
+        buf.readUInt32LE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint32(offset >>> 0, true); };
+        buf.readUInt32BE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint32(offset >>> 0, false); };
+        buf.readInt8 = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt8(offset >>> 0); };
+        buf.readInt16LE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt16(offset >>> 0, true); };
+        buf.readInt16BE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt16(offset >>> 0, false); };
+        buf.readInt32LE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt32(offset >>> 0, true); };
+        buf.readInt32BE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt32(offset >>> 0, false); };
+        buf.readFloatLE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(offset >>> 0, true); };
+        buf.readFloatBE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(offset >>> 0, false); };
+        buf.readDoubleLE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat64(offset >>> 0, true); };
+        buf.readDoubleBE = function(offset) { return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat64(offset >>> 0, false); };
+        buf.writeUInt8 = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setUint8(offset >>> 0, value); return (offset >>> 0) + 1; };
+        buf.writeUInt16LE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setUint16(offset >>> 0, value, true); return (offset >>> 0) + 2; };
+        buf.writeUInt16BE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setUint16(offset >>> 0, value, false); return (offset >>> 0) + 2; };
+        buf.writeUInt32LE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setUint32(offset >>> 0, value, true); return (offset >>> 0) + 4; };
+        buf.writeUInt32BE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setUint32(offset >>> 0, value, false); return (offset >>> 0) + 4; };
+        buf.writeInt8 = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setInt8(offset >>> 0, value); return (offset >>> 0) + 1; };
+        buf.writeInt16LE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setInt16(offset >>> 0, value, true); return (offset >>> 0) + 2; };
+        buf.writeInt16BE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setInt16(offset >>> 0, value, false); return (offset >>> 0) + 2; };
+        buf.writeInt32LE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setInt32(offset >>> 0, value, true); return (offset >>> 0) + 4; };
+        buf.writeInt32BE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setInt32(offset >>> 0, value, false); return (offset >>> 0) + 4; };
+        buf.writeFloatLE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat32(offset >>> 0, value, true); return (offset >>> 0) + 4; };
+        buf.writeFloatBE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat32(offset >>> 0, value, false); return (offset >>> 0) + 4; };
+        buf.writeDoubleLE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat64(offset >>> 0, value, true); return (offset >>> 0) + 8; };
+        buf.writeDoubleBE = function(value, offset) { new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat64(offset >>> 0, value, false); return (offset >>> 0) + 8; };
         return buf;
     }
 

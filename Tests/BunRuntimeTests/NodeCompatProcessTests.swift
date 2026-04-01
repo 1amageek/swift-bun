@@ -114,6 +114,35 @@ struct NodeCompatProcessTests {
         #expect(result.boolValue == true)
     }
 
+    @Test("console group count and table emit formatted output")
+    func consoleExtras() async throws {
+        let collector = NodeCompatLogCollector()
+        let lines = try await withLoadedProcess { process in
+            let outputTask = Task { [collector] in
+                for await line in process.output {
+                    collector.append(line)
+                }
+            }
+            defer { outputTask.cancel() }
+
+            _ = try await process.evaluate(js: """
+                console.group('outer');
+                console.count('hits');
+                console.table([{ value: 1 }]);
+                console.groupEnd();
+                console.countReset('hits');
+                true;
+            """)
+
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return collector.values
+        }
+
+        #expect(lines.contains(where: { $0.contains("[log] outer") }))
+        #expect(lines.contains(where: { $0.contains("[log]   hits: 1") }))
+        #expect(lines.contains(where: { $0.contains("0\t{\"value\":1}") }))
+    }
+
     @Test("console.timeEnd with unknown label does not throw")
     func consoleTimeEndUnknown() async throws {
         let result = try await evaluate("""
@@ -156,6 +185,12 @@ struct NodeCompatProcessTests {
         #expect(result.boolValue == true)
     }
 
+    @Test("os.version returns non-empty string")
+    func osVersion() async throws {
+        let result = try await evaluate("require('node:os').version()")
+        #expect(result.stringValue.isEmpty == false)
+    }
+
     @Test("performance.mark and measure work")
     func performanceMarkMeasure() async throws {
         let result = try await evaluate("""
@@ -166,5 +201,55 @@ struct NodeCompatProcessTests {
             entries.length === 1 && entries[0].name === 'duration' && typeof entries[0].duration === 'number';
         """)
         #expect(result.boolValue == true)
+    }
+
+    @Test("performance.markResourceTiming records resource entry")
+    func performanceMarkResourceTiming() async throws {
+        let result = try await evaluate("""
+            (function() {
+                performance.markResourceTiming(
+                    { startTime: 1, duration: 2 },
+                    'https://example.com/data',
+                    'fetch',
+                    globalThis,
+                    '',
+                    {},
+                    200,
+                    ''
+                );
+                var entries = performance.getEntriesByType('resource');
+                return JSON.stringify(entries[0]);
+            })()
+        """)
+        #expect(result.stringValue.contains(#""entryType":"resource""#))
+        #expect(result.stringValue.contains(#""name":"https://example.com/data""#))
+    }
+
+    @Test("process._rawDebug and _getActiveHandles are exposed")
+    func processDiagnostics() async throws {
+        let collector = NodeCompatLogCollector()
+        let payload = try await withLoadedProcess { process in
+            let outputTask = Task { [collector] in
+                for await line in process.output {
+                    collector.append(line)
+                }
+            }
+            defer { outputTask.cancel() }
+
+            let result = try await process.evaluate(js: """
+                (function() {
+                    process._rawDebug('diagnostic line');
+                    return JSON.stringify({
+                        handles: process._getActiveHandles().length,
+                        send: process.send('message')
+                    });
+                })()
+            """)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return result.stringValue
+        }
+
+        #expect(payload.contains(#""send":false"#))
+        #expect(collector.values.contains(where: { $0.contains("[stderr] diagnostic line") }))
     }
 }

@@ -67,4 +67,43 @@ struct BufferEdgeCaseTests {
         """)
         #expect(result.stringValue == "-1|1|0")
     }
+
+    @Test("Buffer.allocUnsafeSlow returns Buffer-backed view")
+    func allocUnsafeSlow() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var buffer = Buffer.allocUnsafeSlow(4);
+            Buffer.isBuffer(buffer) && buffer.length === 4;
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Buffer integer read/write helpers roundtrip")
+    func integerReadWrite() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var buffer = Buffer.alloc(8);
+            buffer.writeUInt32LE(0x78563412, 0);
+            buffer.writeInt16BE(-2, 4);
+            buffer.writeUInt8(255, 6);
+            JSON.stringify({
+                u32: buffer.readUInt32LE(0),
+                i16: buffer.readInt16BE(4),
+                u8: buffer.readUInt8(6)
+            });
+        """)
+        #expect(result.stringValue == #"{"u32":2018915346,"i16":-2,"u8":255}"#)
+    }
+
+    @Test("Buffer float and double helpers roundtrip")
+    func floatingPointReadWrite() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var buffer = Buffer.alloc(12);
+            buffer.writeFloatLE(3.5, 0);
+            buffer.writeDoubleBE(Math.PI, 4);
+            JSON.stringify({
+                float: buffer.readFloatLE(0).toFixed(1),
+                double: buffer.readDoubleBE(4).toFixed(6)
+            });
+        """)
+        #expect(result.stringValue == #"{"float":"3.5","double":"3.141593"}"#)
+    }
 }

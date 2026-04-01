@@ -63,6 +63,54 @@ struct WebAPIPolyfillTests {
         #expect(result.boolValue == true)
     }
 
+    @Test("TextDecoderStream decodes streamed UTF-8 chunks")
+    func textDecoderStream() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var stream = new ReadableStream({
+                    start: function(controller) {
+                        controller.enqueue(new Uint8Array([0xE3, 0x81]));
+                        controller.enqueue(new Uint8Array([0x82, 0xE3, 0x81, 0x84]));
+                        controller.close();
+                    }
+                });
+                var reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+                var text = '';
+                while (true) {
+                    var step = await reader.read();
+                    if (step.done) break;
+                    text += step.value;
+                }
+                return text;
+            })()
+        """)
+        #expect(result.stringValue == "あい")
+    }
+
+    @Test("TextEncoder.encodeInto writes into destination")
+    func textEncoderEncodeInto() async throws {
+        let result = try await evaluate("""
+            var encoder = new TextEncoder();
+            var target = new Uint8Array(8);
+            var outcome = encoder.encodeInto('hello', target);
+            JSON.stringify({ read: outcome.read, written: outcome.written, bytes: Array.from(target.slice(0, 5)) });
+        """)
+        #expect(result.stringValue == #"{"read":5,"written":5,"bytes":[104,101,108,108,111]}"#)
+    }
+
+    @Test("AbortSignal.any adopts earliest abort reason")
+    func abortSignalAny() async throws {
+        let result = try await evaluate("""
+            var first = new AbortController();
+            var second = new AbortController();
+            var combined = AbortSignal.any([first.signal, second.signal]);
+            second.abort('later');
+            first.abort('first');
+            JSON.stringify({ aborted: combined.aborted, reason: combined.reason });
+        """)
+        #expect(result.stringValue == #"{"aborted":true,"reason":"later"}"#)
+    }
+
     @Test("Event and EventTarget work")
     func eventTarget() async throws {
         let result = try await evaluate("""
@@ -305,14 +353,43 @@ struct WebAPIPolyfillTests {
         #expect(result.boolValue == true)
     }
 
-    @Test("crypto.subtle.digest rejects with not supported")
-    func cryptoSubtleRejects() async throws {
+    @Test("crypto.subtle.digest computes SHA-256")
+    func cryptoSubtleDigest() async throws {
         let result = try await evaluateAsync("""
             crypto.subtle.digest('SHA-256', new Uint8Array([1,2,3]))
-                .then(function() { return 'resolved'; })
-                .catch(function(e) { return e.message; });
+                .then(function(buffer) {
+                    return Array.from(new Uint8Array(buffer)).map(function(byte) {
+                        return ('0' + byte.toString(16)).slice(-2);
+                    }).join('');
+                });
         """)
-        #expect(result.stringValue.contains("not supported"))
+        #expect(result.stringValue == "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81")
+    }
+
+    @Test("crypto.subtle imports HMAC key and signs/verifies")
+    func cryptoSubtleHMAC() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var key = await crypto.subtle.importKey(
+                    'raw',
+                    new TextEncoder().encode('secret-key'),
+                    { name: 'HMAC', hash: { name: 'SHA-256' } },
+                    false,
+                    ['sign', 'verify']
+                );
+                var data = new TextEncoder().encode('hello subtle');
+                var signature = await crypto.subtle.sign({ name: 'HMAC' }, key, data);
+                var verified = await crypto.subtle.verify({ name: 'HMAC' }, key, signature, data);
+                return JSON.stringify({
+                    type: key.type,
+                    algorithm: key.algorithm.name,
+                    usages: key.usages.join(','),
+                    verified: verified,
+                    signatureLength: new Uint8Array(signature).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"type":"secret","algorithm":"HMAC","usages":"sign,verify","verified":true,"signatureLength":32}"#)
     }
 }
 

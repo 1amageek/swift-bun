@@ -9362,10 +9362,53 @@ if (typeof globalThis.queueMicrotask === "undefined") {
     }
     return String(body);
   }
+  function isReadableStreamBody(body) {
+    return !!body && typeof body.getReader === "function";
+  }
   function encodeBodyChunk(bodyText) {
     var BufferCtor = getBufferCtor();
     if (BufferCtor) return BufferCtor.from(bodyText, "utf8");
     return new TextEncoder().encode(bodyText);
+  }
+  function concatByteChunks(chunks, totalLength) {
+    var BufferCtor = getBufferCtor();
+    if (BufferCtor) {
+      var buffers = [];
+      for (var i = 0; i < chunks.length; i++) {
+        buffers.push(BufferCtor.from(chunks[i]));
+      }
+      return BufferCtor.concat(buffers, totalLength);
+    }
+    var result = new Uint8Array(totalLength);
+    var offset = 0;
+    for (var j = 0; j < chunks.length; j++) {
+      result.set(chunks[j], offset);
+      offset += chunks[j].length;
+    }
+    return result;
+  }
+  function consumeBodyStream(body) {
+    if (!body) {
+      return Promise.resolve(new Uint8Array(0));
+    }
+    if (!isReadableStreamBody(body)) {
+      return Promise.resolve(encodeBodyChunk(bodyToText(body)));
+    }
+    var reader = body.getReader();
+    var chunks = [];
+    var totalLength = 0;
+    function pump() {
+      return reader.read().then(function(step) {
+        if (step.done) {
+          return concatByteChunks(chunks, totalLength);
+        }
+        var value = step.value instanceof Uint8Array ? step.value : new Uint8Array(step.value);
+        chunks.push(value);
+        totalLength += value.length;
+        return pump();
+      });
+    }
+    return pump();
   }
   function makeReadableBodyStream(bodyText) {
     if (typeof ReadableStream !== "function") return null;
@@ -9427,7 +9470,7 @@ if (typeof globalThis.queueMicrotask === "undefined") {
   Headers.prototype[Symbol.iterator] = Headers.prototype.entries;
   function Response(body, init) {
     init = init || {};
-    this._bodyText = bodyToText(body);
+    this._bodyText = isReadableStreamBody(body) ? null : bodyToText(body);
     this.status = init.status || 200;
     this.ok = this.status >= 200 && this.status < 300;
     this.statusText = init.statusText || "";
@@ -9436,14 +9479,27 @@ if (typeof globalThis.queueMicrotask === "undefined") {
     this.type = "default";
     this.redirected = false;
     this.bodyUsed = false;
-    this.body = body === void 0 || body === null ? null : makeReadableBodyStream(this._bodyText);
+    if (body === void 0 || body === null) {
+      this.body = null;
+    } else if (isReadableStreamBody(body)) {
+      this.body = body;
+    } else {
+      this.body = makeReadableBodyStream(this._bodyText);
+    }
   }
   Response.prototype._consumeBody = function(mapper) {
     if (this.bodyUsed) {
       return Promise.reject(new TypeError("Body is unusable"));
     }
     this.bodyUsed = true;
-    return Promise.resolve(mapper(this._bodyText));
+    if (this._bodyText !== null) {
+      return Promise.resolve(mapper(this._bodyText, encodeBodyChunk(this._bodyText)));
+    }
+    var body = this.body;
+    this.body = null;
+    return consumeBodyStream(body).then(function(bytes) {
+      return mapper(new TextDecoder().decode(bytes), bytes);
+    });
   };
   Response.prototype.text = function() {
     return this._consumeBody(function(text) {
@@ -9456,17 +9512,29 @@ if (typeof globalThis.queueMicrotask === "undefined") {
     });
   };
   Response.prototype.arrayBuffer = function() {
-    return this._consumeBody(function(text) {
-      var chunk = encodeBodyChunk(text);
-      return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+    return this._consumeBody(function(_text, bytes) {
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     });
   };
   Response.prototype.blob = function() {
-    return this._consumeBody(function(text) {
-      return typeof Blob === "function" ? new Blob([text]) : text;
+    return this._consumeBody(function(_text, bytes) {
+      return typeof Blob === "function" ? new Blob([bytes]) : bytes;
     });
   };
   Response.prototype.clone = function() {
+    if (this.bodyUsed) {
+      throw new TypeError("Body is unusable");
+    }
+    if (this._bodyText === null && this.body && typeof this.body.tee === "function") {
+      var branches = this.body.tee();
+      this.body = branches[0];
+      return new Response(branches[1], {
+        status: this.status,
+        statusText: this.statusText,
+        headers: new Headers(this.headers),
+        url: this.url
+      });
+    }
     return new Response(this._bodyText, {
       status: this.status,
       statusText: this.statusText,
@@ -9511,7 +9579,7 @@ if (typeof globalThis.queueMicrotask === "undefined") {
         fetchOptions.body = bodyToText(request.body);
       }
       return new Promise(function(resolve, reject) {
-        if (typeof globalThis.__nativeFetch !== "function") {
+        if (typeof globalThis.__nativeFetchStream !== "function" && typeof globalThis.__nativeFetch !== "function") {
           reject(new TypeError("fetch failed: missing native transport"));
           return;
         }
@@ -9542,6 +9610,73 @@ if (typeof globalThis.queueMicrotask === "undefined") {
             finishWithFailure(createAbortError());
           };
           request.signal.addEventListener("abort", abortHandler);
+        }
+        if (typeof globalThis.__nativeFetchStream === "function") {
+          var streamController = null;
+          var streamCancelled = false;
+          var operationID = 0;
+          var responseStream = typeof ReadableStream === "function" ? new ReadableStream({
+            start: function(controller) {
+              streamController = controller;
+            },
+            cancel: function() {
+              streamCancelled = true;
+              if (typeof globalThis.__cancelFetch === "function" && operationID) {
+                globalThis.__cancelFetch(operationID);
+              }
+            }
+          }) : null;
+          operationID = globalThis.__nativeFetchStream(
+            request.url,
+            JSON.stringify(fetchOptions),
+            function(statusCode, responseURL, headersJSON) {
+              var parsedHeaders = {};
+              try {
+                parsedHeaders = JSON.parse(headersJSON);
+              } catch (error) {
+              }
+              finishWithSuccess(
+                new Response(responseStream, {
+                  status: statusCode,
+                  headers: parsedHeaders,
+                  url: responseURL
+                })
+              );
+            },
+            function(bytes) {
+              if (streamCancelled || !streamController) return;
+              streamController.enqueue(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+            },
+            function() {
+              if (streamCancelled || !streamController) return;
+              streamController.close();
+            },
+            function(error) {
+              var wrappedError = new TypeError("fetch failed: " + error);
+              if (!settled) {
+                finishWithFailure(wrappedError);
+                return;
+              }
+              if (streamController) {
+                streamController.error(wrappedError);
+              }
+            }
+          );
+          if (request.signal && abortHandler) {
+            var priorAbortHandler = abortHandler;
+            abortHandler = function() {
+              if (typeof globalThis.__cancelFetch === "function" && operationID) {
+                globalThis.__cancelFetch(operationID);
+              }
+              priorAbortHandler();
+              if (streamController && settled) {
+                streamController.error(createAbortError());
+              }
+            };
+            request.signal.removeEventListener("abort", priorAbortHandler);
+            request.signal.addEventListener("abort", abortHandler);
+          }
+          return;
         }
         globalThis.__nativeFetch(
           request.url,
@@ -10077,17 +10212,79 @@ if (typeof globalThis.crypto === "undefined") {
       return h.slice(0, 4).join("") + "-" + h.slice(4, 6).join("") + "-" + h.slice(6, 8).join("") + "-" + h.slice(8, 10).join("") + "-" + h.slice(10).join("");
     },
     subtle: {
-      digest: function() {
-        return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+      digest: function(algorithm, data) {
+        if (typeof globalThis.__subtleDigest !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var name = typeof algorithm === "string" ? algorithm : algorithm && algorithm.name;
+        var bytes = globalThis.__subtleDigest(name, Array.from(data instanceof Uint8Array ? data : new Uint8Array(data)));
+        if (!bytes || bytes.length === 0) {
+          return Promise.reject(new DOMException("Algorithm is not supported", "NotSupportedError"));
+        }
+        var result = new Uint8Array(bytes);
+        return Promise.resolve(result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength));
       },
-      importKey: function() {
-        return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+      importKey: function(format, keyData, algorithm, extractable, keyUsages) {
+        if (typeof globalThis.__subtleImportKey !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var payload;
+        if (format === "jwk") {
+          payload = new TextEncoder().encode(JSON.stringify(keyData));
+        } else if (keyData instanceof Uint8Array) {
+          payload = keyData;
+        } else if (ArrayBuffer.isView(keyData)) {
+          payload = new Uint8Array(keyData.buffer, keyData.byteOffset, keyData.byteLength);
+        } else if (keyData instanceof ArrayBuffer) {
+          payload = new Uint8Array(keyData);
+        } else {
+          payload = new TextEncoder().encode(String(keyData));
+        }
+        var imported = globalThis.__subtleImportKey(
+          format,
+          Array.from(payload),
+          JSON.stringify(algorithm),
+          !!extractable,
+          JSON.stringify(keyUsages || [])
+        );
+        if (imported && imported.error) {
+          return Promise.reject(new DOMException(imported.error, "NotSupportedError"));
+        }
+        imported.usages = imported.usages || [];
+        imported.algorithm = imported.algorithm || algorithm;
+        imported.extractable = !!imported.extractable;
+        imported[Symbol.toStringTag] = "CryptoKey";
+        return Promise.resolve(imported);
       },
-      sign: function() {
-        return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+      sign: function(algorithm, key, data) {
+        if (typeof globalThis.__subtleSign !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var result = globalThis.__subtleSign(
+          JSON.stringify(algorithm),
+          key.token,
+          Array.from(data instanceof Uint8Array ? data : new Uint8Array(data))
+        );
+        if (result && result.error) {
+          return Promise.reject(new DOMException(result.error, "OperationError"));
+        }
+        var signature = new Uint8Array(result.bytes || []);
+        return Promise.resolve(signature.buffer.slice(signature.byteOffset, signature.byteOffset + signature.byteLength));
       },
-      verify: function() {
-        return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+      verify: function(algorithm, key, signature, data) {
+        if (typeof globalThis.__subtleVerify !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var result = globalThis.__subtleVerify(
+          JSON.stringify(algorithm),
+          key.token,
+          Array.from(signature instanceof Uint8Array ? signature : new Uint8Array(signature)),
+          Array.from(data instanceof Uint8Array ? data : new Uint8Array(data))
+        );
+        if (result && result.error) {
+          return Promise.reject(new DOMException(result.error, "OperationError"));
+        }
+        return Promise.resolve(!!result.verified);
       },
       encrypt: function() {
         return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));

@@ -15,8 +15,10 @@ final class RuntimeHandleRegistry: Sendable {
     }
 
     struct FetchHandle {
-        let resolve: JSValue
-        let reject: JSValue
+        let headersCallback: JSValue
+        let chunkCallback: JSValue
+        let completeCallback: JSValue
+        let errorCallback: JSValue
         var isRefed: Bool
         var visibleHandleToken: LifecycleController.VisibleHandleToken?
     }
@@ -73,16 +75,20 @@ final class RuntimeHandleRegistry: Sendable {
     }
 
     func insertFetch(
-        resolve: JSValue,
-        reject: JSValue,
+        headersCallback: JSValue,
+        chunkCallback: JSValue,
+        completeCallback: JSValue,
+        errorCallback: JSValue,
         isRefed: Bool = true,
         visibleHandleToken: LifecycleController.VisibleHandleToken? = nil,
         id: Int32? = nil
     ) -> Int32 {
         let identifier = id ?? makeIdentifier()
         fetches[identifier] = FetchHandle(
-            resolve: resolve,
-            reject: reject,
+            headersCallback: headersCallback,
+            chunkCallback: chunkCallback,
+            completeCallback: completeCallback,
+            errorCallback: errorCallback,
             isRefed: isRefed,
             visibleHandleToken: visibleHandleToken
         )
@@ -91,6 +97,10 @@ final class RuntimeHandleRegistry: Sendable {
 
     func removeFetch(id: Int32) -> FetchHandle? {
         fetches.removeValue(forKey: id)
+    }
+
+    func fetch(id: Int32) -> FetchHandle? {
+        fetches[id]
     }
 
     func updateFetchVisibleHandleToken(id: Int32, token: LifecycleController.VisibleHandleToken?) {
@@ -143,5 +153,14 @@ final class RuntimeHandleRegistry: Sendable {
 
     var currentStdinVisibleHandleToken: LifecycleController.VisibleHandleToken? {
         stdinVisibleHandleToken
+    }
+
+    func activeHandleLabels() -> [String] {
+        var labels: [String] = Array(repeating: "Timeout", count: timers.count)
+        labels.append(contentsOf: Array(repeating: "Fetch", count: fetches.count))
+        if stdinRefed {
+            labels.append("ReadStream")
+        }
+        return labels
     }
 }

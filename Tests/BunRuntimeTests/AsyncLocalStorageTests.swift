@@ -36,6 +36,34 @@ struct AsyncLocalStorageTests {
         """)
         #expect(result.stringValue == "outer,inner,outer")
     }
+
+    @Test("AsyncResource.runInAsyncScope binds this and arguments")
+    func asyncResourceRunInAsyncScope() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var AsyncResource = require('node:async_hooks').AsyncResource;
+            var resource = new AsyncResource('scope-test');
+            var receiver = { prefix: 'value:' };
+            resource.runInAsyncScope(function(a, b) {
+                return this.prefix + (a + b);
+            }, receiver, 2, 3);
+        """)
+        #expect(result.stringValue == "value:5")
+    }
+
+    @Test("AsyncResource.bind returns callable wrapper and emitDestroy marks resource")
+    func asyncResourceBindAndDestroy() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var AsyncResource = require('node:async_hooks').AsyncResource;
+            var resource = new AsyncResource('bind-test');
+            var bound = resource.bind(function(name) {
+                return this.prefix + name;
+            }, { prefix: 'hello ' });
+            var value = bound('world');
+            resource.emitDestroy();
+            JSON.stringify({ value: value, destroyed: resource.destroyed });
+        """)
+        #expect(result.stringValue == #"{"value":"hello world","destroyed":true}"#)
+    }
 }
 
 // MARK: - Web API Polyfills

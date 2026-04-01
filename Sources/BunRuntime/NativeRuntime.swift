@@ -19,25 +19,33 @@ final class NativeRuntime: Sendable {
         }
     }
 
-    private final class UnsafeFetchCompletionCallback: Sendable {
-        nonisolated(unsafe) let callback: (FetchCompletion) -> Void
+    private final class UnsafeFetchEventCallback: Sendable {
+        nonisolated(unsafe) let callback: (FetchEvent) -> Void
 
-        init(_ callback: @escaping (FetchCompletion) -> Void) {
+        init(_ callback: @escaping (FetchEvent) -> Void) {
             self.callback = callback
         }
     }
 
-    struct FetchSuccess {
+    struct FetchHeaders {
         let operationID: Int32
         let statusCode: Int
         let responseURL: String
         let headerJSON: String
-        let body: String
     }
 
-    enum FetchCompletion {
-        case success(FetchSuccess)
+    enum FetchEvent {
+        case headers(FetchHeaders)
+        case chunk(operationID: Int32, bytes: [UInt8])
+        case complete(operationID: Int32)
         case failure(operationID: Int32, message: String)
+    }
+
+    private struct FetchTaskState {
+        let operationID: Int32
+        let urlString: String
+        let callback: UnsafeFetchEventCallback
+        var didReceiveResponse = false
     }
 
     private let assertOnJSThread: @Sendable () -> Void
@@ -47,7 +55,8 @@ final class NativeRuntime: Sendable {
     private let log: @Sendable (String) -> Void
     private let isActive = Mutex<Bool>(true)
     private let shutdownState = Mutex<ShutdownState>(.active)
-    private let fetchTasks = Mutex<[Int32: URLSessionDataTask]>([:])
+    private let fetchTaskStates = Mutex<[Int32: FetchTaskState]>([:])
+    private let fetchTasks = Mutex<[Int32: Task<Void, Never>]>([:])
 
     init(
         assertOnJSThread: @escaping @Sendable () -> Void,
@@ -106,69 +115,92 @@ final class NativeRuntime: Sendable {
         operationID: Int32,
         request: URLRequest,
         urlString: String,
-        completion: @escaping (FetchCompletion) -> Void
-    ) {
+        callback: @escaping (FetchEvent) -> Void
+    ) -> Int32 {
         assertOnJSThread()
-        guard acceptsNewWork() else { return }
-        let completionBox = UnsafeFetchCompletionCallback(completion)
-
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            guard self.acceptsNewWork() else { return }
-            _ = self.fetchTasks.withLock { $0.removeValue(forKey: operationID) }
-
-            if let error {
-                self.scheduler.enqueueHostCallback(source: "fetch:\(operationID)") {
-                    completionBox.callback(.failure(operationID: operationID, message: error.localizedDescription))
-                }
-                return
-            }
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                self.scheduler.enqueueHostCallback(source: "fetch:\(operationID)") {
-                    completionBox.callback(.failure(operationID: operationID, message: "Invalid response"))
-                }
-                return
-            }
-
-            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            var headerDict: [String: String] = [:]
-            for (key, value) in httpResponse.allHeaderFields {
-                headerDict["\(key)".lowercased()] = "\(value)"
-            }
-
-            let headerJSON: String
-            do {
-                let headerData = try JSONSerialization.data(withJSONObject: headerDict)
-                headerJSON = String(data: headerData, encoding: .utf8) ?? "{}"
-            } catch {
-                headerJSON = "{}"
-            }
-
-            let success = FetchSuccess(
+        guard acceptsNewWork() else { return operationID }
+        let callbackBox = UnsafeFetchEventCallback(callback)
+        fetchTaskStates.withLock {
+            $0[operationID] = FetchTaskState(
                 operationID: operationID,
-                statusCode: httpResponse.statusCode,
-                responseURL: httpResponse.url?.absoluteString ?? urlString,
-                headerJSON: headerJSON,
-                body: body
+                urlString: urlString,
+                callback: callbackBox
             )
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                guard self.acceptsNewWork() else { return }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self.emitFetchFailure(for: operationID, message: "Invalid response")
+                    return
+                }
 
-            self.scheduler.enqueueHostCallback(source: "fetch:\(operationID)") {
-                completionBox.callback(.success(success))
+                var headerDict: [String: String] = [:]
+                for (key, value) in httpResponse.allHeaderFields {
+                    headerDict["\(key)".lowercased()] = "\(value)"
+                }
+
+                let headerJSON: String
+                do {
+                    let headerData = try JSONSerialization.data(withJSONObject: headerDict)
+                    headerJSON = String(data: headerData, encoding: .utf8) ?? "{}"
+                } catch {
+                    headerJSON = "{}"
+                }
+
+                let headers = FetchHeaders(
+                    operationID: operationID,
+                    statusCode: httpResponse.statusCode,
+                    responseURL: httpResponse.url?.absoluteString ?? urlString,
+                    headerJSON: headerJSON
+                )
+
+                self.fetchTaskStates.withLock { states in
+                    guard var state = states[operationID] else { return }
+                    state.didReceiveResponse = true
+                    states[operationID] = state
+                }
+                self.scheduler.enqueueHostCallback(source: "fetch:\(operationID):headers") {
+                    callbackBox.callback(.headers(headers))
+                }
+
+                for try await byte in bytes {
+                    guard self.acceptsNewWork() else { return }
+                    if Task.isCancelled {
+                        return
+                    }
+                    let payload = [byte]
+                    self.scheduler.enqueueHostCallback(source: "fetch:\(operationID):chunk") {
+                        callbackBox.callback(.chunk(operationID: operationID, bytes: payload))
+                    }
+                }
+
+                _ = self.fetchTaskStates.withLock { $0.removeValue(forKey: operationID) }
+                _ = self.fetchTasks.withLock { $0.removeValue(forKey: operationID) }
+                self.scheduler.enqueueHostCallback(source: "fetch:\(operationID):complete") {
+                    callbackBox.callback(.complete(operationID: operationID))
+                }
+            } catch {
+                guard self.acceptsNewWork() else { return }
+                self.emitFetchFailure(for: operationID, message: error.localizedDescription)
             }
         }
-
         fetchTasks.withLock { $0[operationID] = task }
         log("[bun:fetch] task.resume \(urlString.prefix(120))")
-        task.resume()
+        return operationID
     }
 
     func cancelFetch(operationID: Int32) {
         assertOnJSThread()
+        _ = fetchTaskStates.withLock { $0.removeValue(forKey: operationID) }
         fetchTasks.withLock { $0.removeValue(forKey: operationID) }?.cancel()
     }
 
     func cancelAllFetches() {
-        let tasks = fetchTasks.withLock { state -> [URLSessionDataTask] in
+        fetchTaskStates.withLock { $0.removeAll() }
+        let tasks = fetchTasks.withLock { state -> [Task<Void, Never>] in
             let values = Array(state.values)
             state.removeAll()
             return values
@@ -180,5 +212,14 @@ final class NativeRuntime: Sendable {
 
     private func acceptsNewWork() -> Bool {
         isActive.withLock { $0 }
+    }
+
+    private func emitFetchFailure(for operationID: Int32, message: String) {
+        let state = fetchTaskStates.withLock { $0.removeValue(forKey: operationID) }
+        _ = fetchTasks.withLock { $0.removeValue(forKey: operationID) }
+        guard let state else { return }
+        scheduler.enqueueHostCallback(source: "fetch:\(state.operationID):error") {
+            state.callback.callback(.failure(operationID: state.operationID, message: message))
+        }
     }
 }

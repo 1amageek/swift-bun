@@ -16,6 +16,21 @@
                 var end = endMark && marks[endMark] !== undefined ? marks[endMark] : performance.now();
                 entries.push({ entryType: 'measure', name: name, startTime: start, duration: end - start });
             },
+            markResourceTiming: function(timingInfo, requestedUrl, initiatorType, global, cacheMode, bodyInfo, responseStatus, deliveryType) {
+                var startTime = timingInfo && typeof timingInfo.startTime === 'number' ? timingInfo.startTime : performance.now();
+                var duration = timingInfo && typeof timingInfo.duration === 'number' ? timingInfo.duration : 0;
+                entries.push({
+                    entryType: 'resource',
+                    name: requestedUrl || '',
+                    initiatorType: initiatorType || '',
+                    startTime: startTime,
+                    duration: duration,
+                    responseStatus: typeof responseStatus === 'number' ? responseStatus : 0,
+                    deliveryType: deliveryType || '',
+                    cacheMode: cacheMode || '',
+                    bodyInfo: bodyInfo || null,
+                });
+            },
             getEntries: function() { return entries.slice(); },
             getEntriesByName: function(name) {
                 return entries.filter(function(entry) { return entry.name === name; });

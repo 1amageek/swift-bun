@@ -51,6 +51,7 @@ struct NodeOS: JavaScriptModuleInstalling, Sendable {
 
         try JavaScriptConfigurationInstaller().install([
             "release": releaseString,
+            "version": releaseString,
             "username": username,
             "uid": Int(uid),
             "gid": Int(gid),

@@ -66,4 +66,24 @@ struct TextCodecEdgeCaseTests {
         """)
         #expect(result.stringValue.hasPrefix("C"))
     }
+
+    @Test("TextDecoder supports utf-16le and utf-16be")
+    func utf16Decoding() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            (function() {
+                var little = new TextDecoder('utf-16le').decode(new Uint8Array([0x41, 0x00, 0x42, 0x00]));
+                var big = new TextDecoder('utf-16be').decode(new Uint8Array([0x00, 0x41, 0x00, 0x42]));
+                return little + '|' + big;
+            })()
+        """)
+        #expect(result.stringValue == "AB|AB")
+    }
+
+    @Test("TextDecoder supports windows-1252 single-byte decoding")
+    func windows1252Decoding() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            new TextDecoder('windows-1252').decode(new Uint8Array([0x48, 0x80]))
+        """)
+        #expect(result.stringValue == "H€")
+    }
 }

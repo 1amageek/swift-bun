@@ -64,6 +64,24 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == "hello")
     }
 
+    @Test("events helpers support EventTarget and AbortSignal")
+    func eventTargetHelpers() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var events = require('node:events');
+                var target = new EventTarget();
+                function onPing() {}
+                target.addEventListener('ping', onPing);
+                events.setMaxListeners(7, target);
+                return JSON.stringify({
+                    listeners: events.getEventListeners(target, 'ping').length,
+                    max: events.getMaxListeners(target)
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"listeners":1,"max":7}"#)
+    }
+
     @Test("assert module supports equality throws and rejects")
     func assertModule() async throws {
         let result = try await evaluateAsync("""
@@ -242,11 +260,150 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == #"{"subscribed":true,"seen":"swift-bun-test:42","unsubscribed":true}"#)
     }
 
+    @Test("dns.lookup resolves localhost")
+    func dnsLookup() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var dns = require('node:dns');
+                var callbackResult = await new Promise(function(resolve, reject) {
+                    dns.lookup('localhost', function(error, address, family) {
+                        if (error) reject(error);
+                        else resolve(JSON.stringify({ address: address, family: family }));
+                    });
+                });
+                var promiseResult = await dns.promises.lookup('localhost');
+                return JSON.stringify({
+                    callback: JSON.parse(callbackResult),
+                    promise: promiseResult
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""family":4"#) || result.stringValue.contains(#""family":6"#))
+    }
+
+    @Test("v8.getHeapSpaceStatistics returns array shape")
+    func v8HeapSpaceStatistics() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var v8 = require('node:v8');
+                var entries = v8.getHeapSpaceStatistics();
+                return Array.isArray(entries) && entries.length > 0 && typeof entries[0].space_name === 'string';
+            })()
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("zlib.deflateSync compresses string input")
+    func zlibDeflateSync() async throws {
+        let result = try await evaluate("""
+            require('node:zlib').deflateSync('hello').toString('hex')
+        """)
+        #expect(result.stringValue == "789ccb48cdc9c90700062c0215")
+    }
+
+    @Test("net.createServer and connect roundtrip")
+    func netCreateServerAndConnect() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var net = require('node:net');
+                return await new Promise(function(resolve, reject) {
+                    var log = [];
+                    var server = net.createServer(function(socket) {
+                        log.push('server:connection');
+                        socket.on('data', function(chunk) {
+                            log.push('server:data:' + chunk.toString());
+                            socket.end(chunk);
+                        });
+                    });
+                    server.on('error', reject);
+                    server.on('close', function() { log.push('server:close'); });
+                    server.listen(0, '127.0.0.1', function() {
+                        log.push('server:listening');
+                        var address = server.address();
+                        var client = net.connect({ host: '127.0.0.1', port: address.port }, function() {
+                            log.push('client:connect');
+                            client.write('ping');
+                        });
+                        var seen = '';
+                        client.on('data', function(chunk) {
+                            log.push('client:data:' + chunk.toString());
+                            seen += chunk.toString();
+                        });
+                        client.on('end', function() {
+                            log.push('client:end');
+                            server.close(function() {
+                                resolve(JSON.stringify({ seen: seen, log: log }));
+                            });
+                        });
+                        client.on('error', reject);
+                    });
+                    setTimeout(function() {
+                        resolve(JSON.stringify({ seen: 'timeout', log: log }));
+                    }, 200);
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""seen":"ping""#))
+    }
+
+    @Test("http.createServer handles request and response")
+    func httpCreateServer() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var http = require('node:http');
+                return await new Promise(function(resolve, reject) {
+                    var server = http.createServer(function(req, res) {
+                        var body = '';
+                        req.on('data', function(chunk) {
+                            body += chunk.toString();
+                        });
+                        req.on('end', function() {
+                            res.setHeader('content-type', 'application/json');
+                            res.writeHead(201);
+                            res.end(JSON.stringify({ method: req.method, url: req.url, body: body }));
+                        });
+                    });
+                    server.on('error', reject);
+                    server.listen(0, '127.0.0.1', function() {
+                        var address = server.address();
+                        var req = http.request({
+                            hostname: '127.0.0.1',
+                            port: address.port,
+                            path: '/echo?x=1',
+                            method: 'POST',
+                            headers: { 'content-type': 'text/plain' }
+                        }, function(resp) {
+                            var payload = '';
+                            resp.on('data', function(chunk) { payload += chunk.toString(); });
+                            resp.on('end', function() {
+                                server.close(function() {
+                                    resolve(JSON.stringify({ status: resp.statusCode, payload: payload }));
+                                });
+                            });
+                        });
+                        req.on('error', reject);
+                        req.end('hello');
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""status":201"#))
+        #expect(result.stringValue.contains(#"\"body\":\"hello\""#))
+    }
+
     #if os(macOS)
     @Test("child_process.execSync runs command on macOS")
     func childProcessExecSync() async throws {
         let result = try await evaluate("""
             require('node:child_process').execSync('printf hello').toString()
+        """)
+        #expect(result.stringValue == "hello")
+    }
+
+    @Test("child_process.execFileSync returns stdout on macOS")
+    func childProcessExecFileSync() async throws {
+        let result = try await evaluate("""
+            require('node:child_process').execFileSync('/bin/echo', ['hello']).toString().trim()
         """)
         #expect(result.stringValue == "hello")
     }
@@ -294,6 +451,18 @@ struct NodeCompatModuleTests {
         """)
         #expect(result.stringValue.contains(#""code":0"#))
         #expect(result.stringValue.contains(#""stdout":"hello""#))
+    }
+
+    @Test("child_process.spawn returns ChildProcess instance on macOS")
+    func childProcessInstance() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var cp = require('node:child_process');
+                var child = cp.spawn('/bin/echo', ['hello']);
+                return child instanceof cp.ChildProcess;
+            })()
+        """)
+        #expect(result.boolValue == true)
     }
     #else
     @Test("child_process.execFile is unsupported on iOS")

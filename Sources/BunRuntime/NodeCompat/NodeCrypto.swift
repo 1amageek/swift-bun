@@ -53,6 +53,8 @@ struct NodeCrypto: JavaScriptModuleInstalling, Sendable {
         }
         context.setObject(hmacBlock, forKeyedSubscript: "__cryptoHMAC" as NSString)
 
+        WebCryptoBridge().install(into: context)
+
         try JavaScriptModuleInstaller(script: .nodeCompat(.crypto)).install(into: context)
     }
 }

@@ -18,6 +18,7 @@
         platform: function() { return process.platform; },
         arch: function() { return process.arch; },
         release: function() { return osConfig.release || ''; },
+        version: function() { return osConfig.version || osConfig.release || ''; },
         uptime: function() { return Math.floor(performance.now() / 1000); },
         loadavg: function() { return [0, 0, 0]; },
         networkInterfaces: function() { return {}; },

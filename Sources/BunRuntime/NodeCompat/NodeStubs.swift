@@ -1,4 +1,6 @@
 @preconcurrency import JavaScriptCore
+import Compression
+import Darwin
 import Foundation
 
 /// Stub modules for Node.js modules that are not applicable on iOS.
@@ -84,6 +86,29 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
             #endif
         }
         context.setObject(childProcessRunSyncBlock, forKeyedSubscript: "__cpRunSync" as NSString)
+
+        let zlibDeflateSyncBlock: @convention(block) ([UInt8]) -> [String: Any] = { bytes in
+            do {
+                return ["bytes": try Self.deflateZlib(Data(bytes)).map(Int.init)]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        context.setObject(zlibDeflateSyncBlock, forKeyedSubscript: "__zlibDeflateSync" as NSString)
+
+        let dnsLookupBlock: @convention(block) (String) -> [String: Any] = { host in
+            do {
+                let result = try Self.lookupAddress(for: host)
+                return [
+                    "address": result.address,
+                    "family": result.family,
+                ]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        context.setObject(dnsLookupBlock, forKeyedSubscript: "__dnsLookup" as NSString)
+
         try JavaScriptModuleInstaller.installAll(
             .nodeCompat(.net),
             .nodeCompat(.tls),
@@ -149,5 +174,105 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
         let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o644
         let executablePermissions = permissions | 0o111
         try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: executablePermissions)], ofItemAtPath: path)
+    }
+
+    private static func deflateZlib(_ data: Data) throws -> [UInt8] {
+        if data.isEmpty {
+            return [0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]
+        }
+
+        let destinationCapacity = max(64, data.count * 2)
+        let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: destinationCapacity)
+        defer { destination.deallocate() }
+
+        let compressedSize = data.withUnsafeBytes { sourceBytes in
+            guard let baseAddress = sourceBytes.bindMemory(to: UInt8.self).baseAddress else {
+                return 0
+            }
+            return compression_encode_buffer(
+                destination,
+                destinationCapacity,
+                baseAddress,
+                data.count,
+                nil,
+                COMPRESSION_ZLIB
+            )
+        }
+
+        guard compressedSize > 0 else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSCompressionFailedError)
+        }
+
+        let deflated = Array(UnsafeBufferPointer(start: destination, count: compressedSize))
+        let checksum = adler32(data)
+        return [0x78, 0x9c]
+            + deflated
+            + [
+                UInt8((checksum >> 24) & 0xff),
+                UInt8((checksum >> 16) & 0xff),
+                UInt8((checksum >> 8) & 0xff),
+                UInt8(checksum & 0xff),
+            ]
+    }
+
+    private static func lookupAddress(for host: String) throws -> (address: String, family: Int) {
+        var hints = addrinfo(
+            ai_flags: AI_ADDRCONFIG,
+            ai_family: AF_UNSPEC,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: IPPROTO_TCP,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var resultPointer: UnsafeMutablePointer<addrinfo>?
+        let errorCode = getaddrinfo(host, nil, &hints, &resultPointer)
+        guard errorCode == 0, let resultPointer else {
+            let message = String(cString: gai_strerror(errorCode))
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errorCode), userInfo: [
+                NSLocalizedDescriptionKey: message,
+            ])
+        }
+        defer { freeaddrinfo(resultPointer) }
+
+        var current: UnsafeMutablePointer<addrinfo>? = resultPointer
+        while let info = current {
+            let family = info.pointee.ai_family
+            if family == AF_INET || family == AF_INET6 {
+                var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let nameInfoError = getnameinfo(
+                    info.pointee.ai_addr,
+                    socklen_t(info.pointee.ai_addrlen),
+                    &hostBuffer,
+                    socklen_t(hostBuffer.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+                if nameInfoError == 0 {
+                    let address = hostBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                    return (
+                        address: String(decoding: address, as: UTF8.self),
+                        family: family == AF_INET ? 4 : 6
+                    )
+                }
+            }
+            current = info.pointee.ai_next
+        }
+
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EAI_NONAME), userInfo: [
+            NSLocalizedDescriptionKey: "No usable address found for \(host)",
+        ])
+    }
+
+    private static func adler32(_ data: Data) -> UInt32 {
+        var s1: UInt32 = 1
+        var s2: UInt32 = 0
+        for byte in data {
+            s1 = (s1 + UInt32(byte)) % 65521
+            s2 = (s2 + s1) % 65521
+        }
+        return (s2 << 16) | s1
     }
 }

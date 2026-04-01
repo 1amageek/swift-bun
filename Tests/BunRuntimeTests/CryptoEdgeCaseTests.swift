@@ -6,6 +6,36 @@ import TestHeartbeat
 
 @Suite("Crypto Edge Cases", .serialized, .heartbeat)
 struct CryptoEdgeCaseTests {
+    private static let rsaPrivateKeyPEM = """
+        -----BEGIN PRIVATE KEY-----
+        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDBYqJJLQue1DS+
+        wmk0GZZ7L891cMBXUBkppu2QS6kKatuGShJgkiPGh/+j0WMLXR777huH/SoIJ8zz
+        SLlyHFanHhKfNFweXcPl+VChR1V4ugn5Ffenuc9D9yqN0m5/Y0X1q9L4hXpSLju3
+        j04fdoTFGayiyrU41zFZalnPsDQlBssPpILd+wU0e7g1JeI3T/KFB8hyoQ3Mwakc
+        kKpElKyJ+CfpoKiON4nNqtEkb9A6/bJvSyTM+X1pKuf+FkignhgcuM3neMCa+UCT
+        WSubvvpdZGjPaSIbhS6nPDOuma+sZaZKYnKhLh8porNmu88Pw5HiEpSb3t/IAzF0
+        osOKgrUhAgMBAAECggEBAIT1jsSnDt1F43ngarqieR77MTT6r5OYg6Rqm91g17lM
+        3OAIn3f8IlLGgJIeTW2rubjW7eDiw/pVewkt0CrPpxhBieYh9s/+AcllT/WC+RYH
+        OwIiA2MzUnjVQFHAA67cD2aom2W5R++mz/IVuk3Ri9mEHHjUzCJneguTHmq4KDHn
+        tmPMNBlvesW/IslO1oyrc22m5y2DtLdPIs3Pl/LjumViLADascj4egpzdkVlvC/I
+        RAFt/J4TMQzupEtdXh99JZqld+ElZTxChbf3dhlNYpGIvNlr1Z+tIRMl6fMyZFsP
+        Tbgc9iHG5F8172ur6F7HKt3MsBiRRSkJTcXrokOymz0CgYEA6p2TikbuwjmqPr6z
+        R60I9dPsnQW5+tigENWuGU1MmuRqYYgXbzFGKwR85ZCeg7YONfevLcKlue934WlP
+        RQ/0By4bTIyYHSOJxcogcxGp1WOFcilz/5rCifkoBGXcA0q+j2nIishrkORQHW89
+        ux+h77NbW9aSYfD25HfZLp27sWsCgYEA0wMCAESIdmDixvAeKrtxyOkcpGANR8kG
+        6JE65xUcZOKEoxClOWkQyGpkn2mvGVf23hrAd83cWDzNPRPWy1Bglmm7TSxT8PJA
+        pcwkC7SlK2+yU/E6IULymgrynkJTGnw1rX7h2qCjejhsimyf96nMO22bKWak2F3J
+        VDltxjiLuqMCgYBhBp/AnMsa2bw1TKpZ5w6Ak48T9Q1P1wyDSctBPX2DxRjVkvGW
+        E3ugSK/aRG+5qq2/1dnFg+0DsywRtXqJ5ioWWhQCGVbDHjJY8NlwnQpubEUAzHHj
+        cD4pzzekcfeGCQA70RSViIMrnbAgLCQMYe2XcsZCeb9576w7GfFgXO0FVwKBgCia
+        pJDunx/AZwMHA5cPeMbDbLqIrSWKHmU0RRRgcJVNLV6/fju85vjZ2EEAsiv7TErS
+        9QRYvbTRBmFhZuy6q8tlzx/7jq+Hvj7pOGp0OXBRTwxuF9R8sHhJ8QPZGWq4Sg/3
+        oXhTfwGux9wfKO0cZGtvHPNrh/8GlQ46+s+w49pnAoGACAPTMWIJzdaH1f8BmKAh
+        MJj0JD+Gva/zJtFKZBlrscEv0PfgTgJjafZM277zNJ5UDqXXBB+AJ0Yw8DsgP9ZT
+        6mIqt2FogLpTx9yiMglWz2hOpftwOOHYopqCkgLhMVv8QRY7vex6ARHdSPnGYYfF
+        wB9rqnxsk1qqq2kVIk2jR4Y=
+        -----END PRIVATE KEY-----
+        """
 
     @Test("SHA-256 of empty string")
     func sha256Empty() async throws {
@@ -143,5 +173,25 @@ struct CryptoEdgeCaseTests {
             h.digest('hex');
         """)
         #expect(result.stringValue == "55dfc00c01f3ea84a2f1472b04669ad3ed588c04bad216e855f24fbe6a84822c")
+    }
+
+    @Test("createPrivateKey accepts PEM private keys")
+    func createPrivateKeyPEM() async throws {
+        let escapedPEM = Self.rsaPrivateKeyPEM
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let result = try await TestProcessSupport.evaluate("""
+            (function() {
+                var crypto = require('node:crypto');
+                var key = crypto.createPrivateKey({ key: '\(escapedPEM)', format: 'pem' });
+                return JSON.stringify({
+                    type: key.type,
+                    asymmetricKeyType: key.asymmetricKeyType,
+                    instance: key instanceof crypto.KeyObject
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"type":"private","asymmetricKeyType":"rsa","instance":true}"#)
     }
 }

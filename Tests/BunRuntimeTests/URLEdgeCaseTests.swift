@@ -51,4 +51,25 @@ struct URLEdgeCaseTests {
         """)
         #expect(result.stringValue == "1|2|hello world")
     }
+
+    @Test("URL setters keep href and searchParams in sync")
+    func urlSettersSynchronize() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            (function() {
+                var url = new URL('https://example.com/start?foo=1#old');
+                url.pathname = '/next';
+                url.search = '?bar=2';
+                url.hash = '#new';
+                url.username = 'user';
+                url.password = 'pass';
+                url.searchParams.set('baz', '3');
+                return JSON.stringify({
+                    href: url.href,
+                    search: url.search,
+                    baz: url.searchParams.get('baz')
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"href":"https://user:pass@example.com/next?bar=2&baz=3#new","search":"?bar=2&baz=3","baz":"3"}"#)
+    }
 }

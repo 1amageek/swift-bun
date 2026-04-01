@@ -83,11 +83,13 @@ BunProcess (final class, Sendable)
 │   ├── ModuleBootstrap polyfills (require, Node.js modules, Bun APIs)
 │   └── NIO-backed bridges:
 │       ├── setTimeout/setInterval → eventLoop.scheduleTask
-│       ├── fetch (__nativeFetch) → URLSession + eventLoop.execute
+│       ├── fetch (__nativeFetchStream) → URLSession streaming bridge + eventLoop.execute
 │       ├── process.stdout.write → stdout AsyncStream
 │       ├── process.stdin → sendInput() from Swift
 │       ├── process.exit → resolveExit()
-│       └── console.log → output AsyncStream
+│       ├── console.log → output AsyncStream
+│       ├── node:net / node:http server → NIO bridges
+│       └── Web Crypto / dns / zlib → native bridges
 ├── Lifecycle (state machine + boot barriers + explicit shutdown)
 └── ESM transformer (es-module-lexer WASM, temporary JSContext)
 ```
@@ -137,9 +139,11 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | Worker | ⚠️ Stub | Throws on instantiation |
 | MessageChannel / MessagePort | ✅ Basic | Functional postMessage |
 | XMLHttpRequest | ✅ Basic | Async-only adapter over fetch |
+| fetch / Headers / Request / Response | ✅ Streaming | URLSession-backed stream bridge |
+| TextDecoderStream / TextEncoderStream | ✅ Full | UTF-8 streaming codecs |
 | crypto.getRandomValues | ✅ Basic | Math.random (not cryptographically secure) |
 | crypto.randomUUID | ✅ Full | UUID v4 |
-| crypto.subtle | ⚠️ Stub | Returns empty buffers |
+| crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `sign`, `verify` |
 | structuredClone | ✅ Basic | @ungap/structured-clone with Blob/File wrapper |
 | navigator | ✅ Stub | userAgent, platform |
 | Symbol.dispose / asyncDispose | ✅ Full | Symbol.for polyfill |
@@ -150,16 +154,16 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 |--------|--------|
 | global / self | ✅ Alias for globalThis |
 | performance | ✅ now(), timeOrigin |
-| URL / URLSearchParams | ✅ Full parser |
-| TextEncoder / TextDecoder | ✅ UTF-8 |
+| URL / URLSearchParams | ✅ Full parser + setters |
+| TextEncoder / TextDecoder | ✅ UTF-8 + utf-16le/be + windows-1252 |
 | atob / btoa | ✅ Base64 |
-| AbortController / AbortSignal | ✅ Full |
+| AbortController / AbortSignal | ✅ Full + `AbortSignal.any()` |
 | DOMException | ✅ Basic |
 | console | ✅ Full (→ output stream) |
 | process | ✅ Extended (argv, env, cwd, exit, stdin, stdout, stderr, on/emit, execArgv, hrtime, etc.) |
 | queueMicrotask | ✅ Promise-based |
 | setTimeout / setInterval / setImmediate | ✅ NIO EventLoop-backed |
-| fetch / Headers / Request / Response | ✅ URLSession-backed |
+| fetch / Headers / Request / Response | ✅ URLSession-backed streaming |
 | Buffer | ✅ Uint8Array-based |
 | require() | ✅ Built-ins + plain `node_modules` CommonJS loader |
 
@@ -170,28 +174,28 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:path | ✅ Implemented | Full POSIX path API |
 | node:buffer | ✅ Implemented | Uint8Array-based Buffer |
 | node:url | ✅ Implemented | URL/URLSearchParams |
-| node:util | ✅ Implemented | format, promisify, debuglog, types |
-| node:os | ✅ Implemented | ProcessInfo-backed (homedir, platform, tmpdir) |
+| node:util | ✅ Implemented | format, promisify, debuglog, types, `isDeepStrictEqual` |
+| node:os | ✅ Implemented | ProcessInfo-backed (homedir, platform, tmpdir, version) |
 | node:fs | ✅ Implemented | FileManager-backed (sync: readFile, writeFile, exists, stat, lstat, mkdir, readdir, unlink, rename, realpath, access, chmod, copyFile; promises: readFile, writeFile, stat, lstat, access, mkdir, readdir, unlink, rename, realpath, chmod, rm, copyFile, open) |
-| node:crypto | ✅ Implemented | CryptoKit (SHA-256/512, HMAC, randomBytes, randomUUID) |
-| node:http / node:https | ✅ Implemented | URLSession-backed fetch + http.request |
+| node:crypto | ✅ Implemented | Hash/HMAC/random APIs plus `createPrivateKey` |
+| node:http / node:https | ✅ Implemented | URLSession-backed client APIs plus minimal `createServer` |
 | node:stream | ✅ Implemented | Readable, Writable, Transform, Duplex, EventEmitter |
 | node:events | ✅ Implemented | EventEmitter (constructor, supports extends) |
 | node:timers | ✅ Implemented | NIO EventLoop-backed |
 | node:timers/promises | ✅ Implemented | Promise-wrapped timers |
 | node:module | ✅ Basic | createRequire + builtinModules + _resolveFilename for CommonJS packages |
 | node:process | ✅ Implemented | Full process object |
-| node:async_hooks | ⚠️ Partial | AsyncLocalStorage with run/getStore only |
+| node:async_hooks | ⚠️ Partial | AsyncLocalStorage plus minimal `AsyncResource` |
 | node:readline | ✅ Basic | createInterface, question, line events, async iterator |
 | node:tty | ✅ Basic | non-TTY ReadStream/WriteStream shape |
 | node:assert | ✅ Basic | ok/equality/deepEqual/throws/rejects/ifError |
-| node:child_process | ⚠️ Stub | **Throws — not available on iOS** |
-| node:net | ⚠️ Stub | **Throws — TCP not implemented** |
+| node:child_process | ⚠️ Partial | macOS execution APIs, iOS unsupported |
+| node:net | ✅ Basic | plain TCP `createServer`, `connect`, `createConnection` |
 | node:tls | ⚠️ Stub | Throws |
-| node:zlib | ⚠️ Stub | Throws |
-| node:dns | ⚠️ Stub | Throws |
+| node:zlib | ⚠️ Partial | `deflateSync` |
+| node:dns | ⚠️ Basic | `lookup` |
 | node:http2 | ⚠️ Stub | Throws |
-| node:v8 | ⚠️ Stub | No-op |
+| node:v8 | ⚠️ Basic | `getHeapSpaceStatistics` shape |
 | node:inspector | ⚠️ Stub | No-op |
 | node:worker_threads | ⚠️ Stub | Throws |
 | node:diagnostics_channel | ✅ Basic | channel subscribe/publish/unsubscribe |
@@ -204,12 +208,15 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 ### Known limitations
 
 - `process.exit()` throws a frozen sentinel object to unwind the JS stack. If JS code catches this, the exit may be suppressed.
-- `node:child_process` is stubbed (throws) — subprocess execution is not available on iOS.
-- `node:net` / `node:tls` are stubbed — raw TCP/TLS connections not implemented.
+- `node:child_process` is intentionally unavailable on iOS. macOS supports the commonly used execution APIs only.
+- `node:net` is implemented for plain TCP. `node:tls` remains unsupported.
 - `crypto.getRandomValues` uses `Math.random()`, not cryptographically secure. CryptoKit-backed `node:crypto` provides secure alternatives via `require('crypto')`.
 - `Bun.serve()` is not supported.
 - `WebSocket` is a stub — class exists for type checks but cannot establish connections.
-- `crypto.subtle` methods return empty buffers — Web Crypto API is not functionally implemented.
+- `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
+- `node:zlib` currently exposes `deflateSync` only.
+- `node:dns` currently exposes `lookup` only.
+- `http.createServer` is intentionally minimal and targeted at local callback/server workflows.
 
 ### Streams: stdout vs output
 
@@ -230,7 +237,7 @@ Each pending timer/fetch/stdin listener holds a ref. When refCount drops to 0, t
 
 ### Fetch bridge (thread-safe)
 
-`__nativeFetch` uses `URLSession.shared.dataTask`. The completion handler marshals back to the EventLoop thread via `eventLoop.execute {}` before touching any JSValue.
+`__nativeFetchStream` uses a streaming `URLSession` bridge. Header, chunk, completion, and error events marshal back to the EventLoop thread via `eventLoop.execute {}` before touching any JSValue.
 
 ### Native bridges pattern
 
@@ -238,5 +245,5 @@ Modules needing system APIs use `@convention(block)` closures registered on JSCo
 
 - **NodeFS**: `__fsReadFileSync` etc. → `FileManager`
 - **NodeCrypto**: `__cryptoSHA256` etc. → `CryptoKit`
-- **NodeHTTP**: `__nativeFetch` → `URLSession` (EventLoop-safe)
+- **NodeHTTP**: `__nativeFetchStream` + `__http*` bridges → `URLSession` / NIO (EventLoop-safe)
 - **NodeOS**: `__osHostname` etc. → `ProcessInfo`

@@ -29,6 +29,8 @@ public final class BunProcess: Sendable {
     private let scheduler: HostScheduler
     private let nativeRuntime: NativeRuntime
     private let fileSystemAsyncBridge: FileSystemAsyncBridge
+    private let socketRuntime: SocketRuntime
+    private let httpServerRuntime: HTTPServerRuntime
 
     // MARK: - Process State
 
@@ -123,6 +125,8 @@ public final class BunProcess: Sendable {
             },
             log: logger
         )
+        let socketRuntime = SocketRuntime()
+        let httpServerRuntime = HTTPServerRuntime()
 
         self.executor = executor
         self.lifecycle = lifecycle
@@ -130,6 +134,8 @@ public final class BunProcess: Sendable {
         self.scheduler = scheduler
         self.nativeRuntime = nativeRuntime
         self.fileSystemAsyncBridge = fileSystemAsyncBridge
+        self.socketRuntime = socketRuntime
+        self.httpServerRuntime = httpServerRuntime
 
         executor.execute {
             self.scheduler.setTurnCompletedHandler {
@@ -435,6 +441,8 @@ public final class BunProcess: Sendable {
             }
         }
         try await nativeRuntime.shutdown()
+        try await socketRuntime.shutdown()
+        try await httpServerRuntime.shutdown()
         try await executor.shutdown()
         shutdownState.withLock { $0 = .shutDown }
     }
@@ -466,12 +474,18 @@ public final class BunProcess: Sendable {
         try throwPendingJavaScriptException(source: "setup:consoleBridge")
         installStdioBridges(in: ctx)
         try throwPendingJavaScriptException(source: "setup:stdioBridges")
+        installProcessDiagnosticsBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:processDiagnosticsBridge")
         try installAsyncBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:asyncBridge")
         try installTimerBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:timerBridge")
         installFetchBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:fetchBridge")
+        installSocketBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:socketBridge")
+        installHTTPServerBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:httpServerBridge")
         try installProcessExitBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:processExitBridge")
         installStdinBridge(in: ctx)
@@ -834,6 +848,13 @@ public final class BunProcess: Sendable {
         ctx.setObject(stderrWrite, forKeyedSubscript: "__nativeStderrWrite" as NSString)
     }
 
+    private func installProcessDiagnosticsBridge(in ctx: JSContext) {
+        let activeHandlesBlock: @convention(block) () -> [String] = { [handleRegistry] in
+            handleRegistry.activeHandleLabels()
+        }
+        ctx.setObject(activeHandlesBlock, forKeyedSubscript: "__swiftBunActiveHandles" as NSString)
+    }
+
     // MARK: - Async Bridge
 
     private func installAsyncBridge(in ctx: JSContext) throws {
@@ -1008,10 +1029,10 @@ public final class BunProcess: Sendable {
     private func installFetchBridge(in ctx: JSContext) {
         executor.preconditionInExecutor()
 
-        let fetchBlock: @convention(block) (String, String, JSValue, JSValue) -> Void = { [self] urlString, optionsJSON, resolveCallback, rejectCallback in
+        let fetchBlock: @convention(block) (String, String, JSValue, JSValue, JSValue, JSValue) -> Int32 = { [self] urlString, optionsJSON, headersCallback, chunkCallback, completeCallback, errorCallback in
             guard let url = URL(string: urlString) else {
-                rejectCallback.call(withArguments: ["Invalid URL: \(urlString)"])
-                return
+                errorCallback.call(withArguments: ["Invalid URL: \(urlString)"])
+                return 0
             }
 
             var request = URLRequest(url: url)
@@ -1038,50 +1059,174 @@ public final class BunProcess: Sendable {
 
             let operationID = self.handleRegistry.makeIdentifier()
             _ = self.handleRegistry.insertFetch(
-                resolve: resolveCallback,
-                reject: rejectCallback,
+                headersCallback: headersCallback,
+                chunkCallback: chunkCallback,
+                completeCallback: completeCallback,
+                errorCallback: errorCallback,
                 isRefed: true,
                 visibleHandleToken: self.lifecycle.acquireVisibleHandle(kind: "fetch"),
                 id: operationID
             )
 
-            self.nativeRuntime.startFetch(
+            _ = self.nativeRuntime.startFetch(
                 operationID: operationID,
                 request: request,
                 urlString: urlString
-            ) { completion in
-                self.applyFetchCompletion(completion)
+            ) { event in
+                self.applyFetchEvent(event)
             }
+            return operationID
         }
-        ctx.setObject(fetchBlock, forKeyedSubscript: "__nativeFetch" as NSString)
+        ctx.setObject(fetchBlock, forKeyedSubscript: "__nativeFetchStream" as NSString)
+
+        let cancelFetchBlock: @convention(block) (Int32) -> Void = { [self] operationID in
+            self.nativeRuntime.cancelFetch(operationID: operationID)
+        }
+        ctx.setObject(cancelFetchBlock, forKeyedSubscript: "__cancelFetch" as NSString)
     }
 
-    private func applyFetchCompletion(_ completion: NativeRuntime.FetchCompletion) {
+    private func installSocketBridge(in ctx: JSContext) {
+        let dispatchEvent: @Sendable ([String: Any]) -> Void = { [self] payload in
+            self.scheduler.enqueueHostCallback(source: "net:event") {
+                guard let ctx = self.executor.context,
+                      let dispatcher = ctx.objectForKeyedSubscript("__swiftBunNetDispatch"),
+                      !dispatcher.isUndefined else {
+                    return
+                }
+                _ = dispatcher.call(withArguments: [payload])
+                self.reportPendingJavaScriptException(source: "netDispatch")
+            }
+        }
+
+        let listenBlock: @convention(block) (Int32, String, Int32, Int32) -> Void = { [socketRuntime] serverID, host, port, backlog in
+            socketRuntime.listen(
+                serverID: serverID,
+                host: host,
+                port: Int(port),
+                backlog: Int(backlog),
+                callback: dispatchEvent
+            )
+        }
+        ctx.setObject(listenBlock, forKeyedSubscript: "__netListen" as NSString)
+
+        let closeServerBlock: @convention(block) (Int32) -> Void = { [socketRuntime] serverID in
+            socketRuntime.closeServer(id: serverID)
+        }
+        ctx.setObject(closeServerBlock, forKeyedSubscript: "__netCloseServer" as NSString)
+
+        let connectBlock: @convention(block) (Int32, String, Int32) -> Void = { [socketRuntime] socketID, host, port in
+            socketRuntime.connect(socketID: socketID, host: host, port: Int(port), callback: dispatchEvent)
+        }
+        ctx.setObject(connectBlock, forKeyedSubscript: "__netConnect" as NSString)
+
+        let writeBlock: @convention(block) (Int32, [UInt8]) -> Void = { [socketRuntime] socketID, bytes in
+            socketRuntime.write(socketID: socketID, bytes: bytes)
+        }
+        ctx.setObject(writeBlock, forKeyedSubscript: "__netWrite" as NSString)
+
+        let endBlock: @convention(block) (Int32, JSValue?) -> Void = { [socketRuntime] socketID, maybeBytes in
+            let bytes = maybeBytes?.toArray()?.compactMap { value -> UInt8? in
+                if let number = value as? NSNumber {
+                    return UInt8(truncating: number)
+                }
+                if let intValue = value as? Int {
+                    return UInt8(truncatingIfNeeded: intValue)
+                }
+                return nil
+            }
+            socketRuntime.end(socketID: socketID, bytes: bytes)
+        }
+        ctx.setObject(endBlock, forKeyedSubscript: "__netEnd" as NSString)
+
+        let destroyBlock: @convention(block) (Int32) -> Void = { [socketRuntime] socketID in
+            socketRuntime.destroy(socketID: socketID)
+        }
+        ctx.setObject(destroyBlock, forKeyedSubscript: "__netDestroy" as NSString)
+    }
+
+    private func installHTTPServerBridge(in ctx: JSContext) {
+        let dispatchEvent: @Sendable ([String: Any]) -> Void = { [self] payload in
+            self.scheduler.enqueueHostCallback(source: "http:event") {
+                guard let ctx = self.executor.context,
+                      let dispatcher = ctx.objectForKeyedSubscript("__swiftBunHTTPDispatch"),
+                      !dispatcher.isUndefined else {
+                    return
+                }
+                _ = dispatcher.call(withArguments: [payload])
+                self.reportPendingJavaScriptException(source: "httpDispatch")
+            }
+        }
+
+        let listenBlock: @convention(block) (Int32, String, Int32, Int32) -> Void = { [httpServerRuntime] serverID, host, port, backlog in
+            httpServerRuntime.listen(
+                serverID: serverID,
+                host: host,
+                port: Int(port),
+                backlog: Int(backlog),
+                callback: dispatchEvent
+            )
+        }
+        ctx.setObject(listenBlock, forKeyedSubscript: "__httpListen" as NSString)
+
+        let closeServerBlock: @convention(block) (Int32) -> Void = { [httpServerRuntime] serverID in
+            httpServerRuntime.closeServer(id: serverID)
+        }
+        ctx.setObject(closeServerBlock, forKeyedSubscript: "__httpCloseServer" as NSString)
+
+        let respondBlock: @convention(block) (Int32, Int32, String, [UInt8]) -> Void = { [httpServerRuntime] requestID, statusCode, headerJSON, body in
+            let headers: [String: String]
+            if let data = headerJSON.data(using: .utf8) {
+                do {
+                    headers = try JSONSerialization.jsonObject(with: data) as? [String: String] ?? [:]
+                } catch {
+                    headers = [:]
+                }
+            } else {
+                headers = [:]
+            }
+            httpServerRuntime.respond(requestID: requestID, statusCode: Int(statusCode), headers: headers, body: body)
+        }
+        ctx.setObject(respondBlock, forKeyedSubscript: "__httpRespond" as NSString)
+    }
+
+    private func applyFetchEvent(_ event: NativeRuntime.FetchEvent) {
         executor.preconditionInExecutor()
 
-        switch completion {
+        switch event {
         case .failure(let operationID, let message):
             guard let fetch = handleRegistry.removeFetch(id: operationID) else { return }
-            fetch.reject.call(withArguments: [message])
+            fetch.errorCallback.call(withArguments: [message])
             if let visibleHandle = fetch.visibleHandleToken {
                 lifecycle.releaseVisibleHandle(visibleHandle)
             }
 
-        case .success(let success):
-            guard let fetch = handleRegistry.removeFetch(id: success.operationID) else { return }
-            fetch.resolve.call(withArguments: [
-                success.statusCode,
-                success.responseURL,
-                success.headerJSON,
-                success.body,
+        case .headers(let headers):
+            guard let fetch = handleRegistry.fetch(id: headers.operationID) else { return }
+            fetch.headersCallback.call(withArguments: [
+                headers.statusCode,
+                headers.responseURL,
+                headers.headerJSON,
             ])
+
+        case .chunk(let operationID, let bytes):
+            guard let fetch = handleRegistry.fetch(id: operationID) else { return }
+            fetch.chunkCallback.call(withArguments: [bytes])
+
+        case .complete(let operationID):
+            guard let fetch = handleRegistry.removeFetch(id: operationID) else { return }
+            fetch.completeCallback.call(withArguments: [])
             if let visibleHandle = fetch.visibleHandleToken {
                 lifecycle.releaseVisibleHandle(visibleHandle)
             }
         }
 
-        reportPendingJavaScriptException(source: "fetchCompletion")
-        evaluateExitCondition()
+        reportPendingJavaScriptException(source: "fetchEvent")
+        switch event {
+        case .failure, .complete:
+            evaluateExitCondition()
+        case .headers, .chunk:
+            break
+        }
     }
 
     // MARK: - process.exit Bridge

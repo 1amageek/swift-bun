@@ -182,12 +182,15 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | Blob / File | ✅ Basic | text, arrayBuffer, stream |
 | FormData | ✅ Full | |
 | MessageChannel / MessagePort | ✅ Basic | |
-| crypto.getRandomValues / randomUUID | ✅ Basic | |
+| fetch / Headers / Request / Response | ✅ Streaming | `Response.body` is a `ReadableStream` |
+| TextDecoderStream / TextEncoderStream | ✅ Full | UTF-8 streaming codecs |
+| AbortController / AbortSignal | ✅ Full | Includes `AbortSignal.any()` |
+| crypto.getRandomValues / randomUUID | ✅ Basic | `getRandomValues` is not cryptographically secure |
 | structuredClone | ✅ Basic | JSON roundtrip |
 | Symbol.dispose / asyncDispose | ✅ Full | |
 | WebSocket | ⚠️ Stub | Class exists, no connection |
 | Worker | ⚠️ Stub | Throws |
-| crypto.subtle | ⚠️ Stub | Returns empty buffers |
+| crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `sign`, `verify` for common algorithms |
 
 ### Node.js Modules (Layer 1)
 
@@ -196,18 +199,21 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | `node:path` | ✅ | Full POSIX path API |
 | `node:buffer` | ✅ | Uint8Array-based Buffer |
 | `node:url` | ✅ | URL/URLSearchParams |
-| `node:util` | ✅ | format, promisify, debuglog, types |
-| `node:os` | ✅ | ProcessInfo-backed |
+| `node:util` | ✅ | format, promisify, debuglog, types, `isDeepStrictEqual` |
+| `node:os` | ✅ | ProcessInfo-backed, includes `version()` |
 | `node:fs` | ✅ | FileManager-backed (sync + promises, realpath, access, chmod) |
-| `node:crypto` | ✅ | CryptoKit (SHA-256/512, HMAC, randomBytes) |
-| `node:http/https` | ✅ | URLSession-backed fetch + http.request |
+| `node:crypto` | ✅ | Hash/HMAC/random APIs plus `createPrivateKey` |
+| `node:http/https` | ✅ | URLSession-backed client APIs plus minimal `createServer` |
 | `node:stream` | ✅ | Readable, Writable, Transform, EventEmitter |
 | `node:events` | ✅ | EventEmitter (supports extends) |
 | `node:timers` | ✅ | NIO EventLoop-backed |
-| `node:async_hooks` | ⚠️ Partial | AsyncLocalStorage only |
-| `node:child_process` | ⚠️ Stub | **Not available on iOS** |
-| `node:net` / `node:tls` | ⚠️ Stub | TCP/TLS not implemented |
-| `node:zlib` | ⚠️ Stub | Compression not implemented |
+| `node:async_hooks` | ⚠️ Partial | AsyncLocalStorage plus minimal `AsyncResource` APIs |
+| `node:child_process` | ⚠️ Partial | macOS execution APIs, iOS unsupported |
+| `node:net` | ✅ Basic | Plain TCP `createServer`, `connect`, `createConnection` |
+| `node:tls` | ⚠️ Stub | TLS not implemented |
+| `node:zlib` | ⚠️ Partial | `deflateSync` |
+| `node:dns` | ⚠️ Basic | `lookup` |
+| `node:v8` | ⚠️ Basic | `getHeapSpaceStatistics` shape |
 
 ### Bun APIs
 
@@ -225,7 +231,17 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 
 ### Global APIs
 
-`fetch`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `AbortController`, `AbortSignal`, `Buffer`, `console`, `process`, `setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`, `atob`, `btoa`, `ReadableStream`, `WritableStream`, `TransformStream`, `Event`, `EventTarget`, `Blob`, `File`, `FormData`, `crypto`, `navigator`, `structuredClone`
+`fetch`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `TextEncoderStream`, `TextDecoderStream`, `AbortController`, `AbortSignal`, `Buffer`, `console`, `process`, `setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`, `atob`, `btoa`, `ReadableStream`, `WritableStream`, `TransformStream`, `Event`, `EventTarget`, `Blob`, `File`, `FormData`, `crypto`, `navigator`, `structuredClone`
+
+## Current Limitations
+
+- `crypto.getRandomValues` still uses a non-cryptographic fallback. Use `require('node:crypto')` or `crypto.subtle` for security-sensitive work.
+- `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
+- `node:tls`, `node:http2`, `WebSocket`, `Worker`, and native addons remain unsupported.
+- `node:child_process` is intentionally unsupported on iOS. On macOS, only the commonly used process APIs are implemented.
+- `node:zlib` currently exposes `deflateSync` only.
+- `node:dns` currently exposes `lookup` only.
+- `http.createServer` and `node:net` are intentionally minimal and focused on local server/client use cases.
 
 ## Building a JS bundle
 

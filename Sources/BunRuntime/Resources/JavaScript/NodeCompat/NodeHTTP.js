@@ -335,6 +335,136 @@
                     req.end();
                     return req;
                 },
+                createServer: function(options, requestListener) {
+                    if (typeof options === 'function') {
+                        requestListener = options;
+                        options = {};
+                    }
+                    var EventEmitter = __nodeModules.events && (__nodeModules.events.EventEmitter || __nodeModules.events);
+                    var Stream = getStreamModule();
+                    var server = new EventEmitter();
+                    server._id = (http.__nextServerID = (http.__nextServerID || 0) + 1);
+                    server._host = '127.0.0.1';
+                    server._port = 0;
+                    server.listening = false;
+                    http.__servers = http.__servers || Object.create(null);
+                    http.__servers[server._id] = server;
+
+                    if (typeof requestListener === 'function') {
+                        server.on('request', requestListener);
+                    }
+
+                    server.listen = function(port, host, callback) {
+                        if (typeof host === 'function') {
+                            callback = host;
+                            host = undefined;
+                        }
+                        if (callback) server.once('listening', callback);
+                        server._host = host || '127.0.0.1';
+                        __httpListen(server._id, server._host, port | 0, 256);
+                        return server;
+                    };
+                    server.close = function(callback) {
+                        if (callback) server.once('close', callback);
+                        __httpCloseServer(server._id);
+                        return server;
+                    };
+                    server.address = function() {
+                        return { address: server._host, family: server._host.indexOf(':') !== -1 ? 'IPv6' : 'IPv4', port: server._port };
+                    };
+
+                    if (!globalThis.__swiftBunHTTPDispatch) {
+                        globalThis.__swiftBunHTTPDispatch = function(event) {
+                            if (!event || !event.type) return;
+                            var currentServer = http.__servers && http.__servers[event.serverID];
+                            if (!currentServer) return;
+                            if (event.type === 'listening') {
+                                currentServer.listening = true;
+                                currentServer._host = event.host || currentServer._host;
+                                currentServer._port = event.port;
+                                currentServer.emit('listening');
+                                return;
+                            }
+                            if (event.type === 'close') {
+                                currentServer.listening = false;
+                                currentServer.emit('close');
+                                delete http.__servers[event.serverID];
+                                return;
+                            }
+                            if (event.type === 'error') {
+                                currentServer.emit('error', new Error(event.message || 'http server error'));
+                                return;
+                            }
+                            if (event.type === 'request') {
+                                var request = new Stream.PassThrough();
+                                request.method = event.method;
+                                request.url = event.url;
+                                request.headers = event.headers || {};
+                                request.httpVersion = '1.1';
+                                request.socket = {
+                                    remoteAddress: currentServer._host,
+                                    remotePort: currentServer._port,
+                                    destroy: function() {}
+                                };
+                                var responseChunks = [];
+                                var headers = {};
+                                var statusCode = 200;
+                                var response = new EventEmitter();
+                                response.statusCode = 200;
+                                response.headersSent = false;
+                                response.setHeader = function(name, value) {
+                                    headers[String(name)] = String(value);
+                                };
+                                response.getHeader = function(name) {
+                                    return headers[String(name)];
+                                };
+                                response.removeHeader = function(name) {
+                                    delete headers[String(name)];
+                                };
+                                response.writeHead = function(code, head) {
+                                    statusCode = code;
+                                    response.statusCode = code;
+                                    if (head) {
+                                        for (var key in head) headers[key] = String(head[key]);
+                                    }
+                                    return response;
+                                };
+                                response.write = function(chunk, encoding, callback) {
+                                    if (typeof encoding === 'function') {
+                                        callback = encoding;
+                                        encoding = undefined;
+                                    }
+                                    responseChunks.push(chunkToBuffer(chunk, encoding));
+                                    if (callback) callback();
+                                    return true;
+                                };
+                                response.end = function(chunk, encoding, callback) {
+                                    if (typeof chunk === 'function') {
+                                        callback = chunk;
+                                        chunk = undefined;
+                                        encoding = undefined;
+                                    } else if (typeof encoding === 'function') {
+                                        callback = encoding;
+                                        encoding = undefined;
+                                    }
+                                    if (chunk != null) responseChunks.push(chunkToBuffer(chunk, encoding));
+                                    var body = Buffer.concat(responseChunks.filter(Boolean));
+                                    __httpRespond(event.requestID, statusCode, JSON.stringify(headers), Array.from(body));
+                                    response.headersSent = true;
+                                    response.emit('finish');
+                                    if (callback) callback();
+                                    return response;
+                                };
+
+                                currentServer.emit('request', request, response);
+                                var bodyBuffer = Buffer.from(event.body || []);
+                                if (bodyBuffer.length > 0) request.write(bodyBuffer);
+                                request.end();
+                            }
+                        };
+                    }
+                    return server;
+                },
                 Agent: function() {},
                 globalAgent: {},
                 METHODS: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'],

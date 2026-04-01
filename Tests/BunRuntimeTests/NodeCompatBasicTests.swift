@@ -103,4 +103,15 @@ struct NodeCompatBasicTests {
         """)
         #expect(result.stringValue == "hello world, you are 42")
     }
+
+    @Test("require('node:util').isDeepStrictEqual")
+    func utilIsDeepStrictEqual() async throws {
+        let result = try await evaluate("""
+            var util = require('node:util');
+            var left = { typed: new Uint8Array([1, 2]), nested: { value: 1 } };
+            var right = { typed: new Uint8Array([1, 2]), nested: { value: 1 } };
+            util.isDeepStrictEqual(left, right);
+        """)
+        #expect(result.boolValue == true)
+    }
 }

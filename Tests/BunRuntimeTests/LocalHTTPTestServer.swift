@@ -80,6 +80,32 @@ private final class LocalHTTPTestServerHandler: ChannelInboundHandler {
 
         case .end:
             guard let requestHead else { return }
+            let components = URLComponents(string: "http://localhost\(requestHead.uri)")
+            let path = components?.path ?? requestHead.uri
+
+            if path == "/stream" {
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+                let head = HTTPResponseHead(version: requestHead.version, status: .ok, headers: headers)
+
+                context.write(wrapOutboundOut(.head(head)), promise: nil)
+
+                var first = context.channel.allocator.buffer(capacity: 6)
+                first.writeString("hello ")
+                context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(first))), promise: nil)
+
+                context.eventLoop.scheduleTask(in: .milliseconds(75)) {
+                    var second = context.channel.allocator.buffer(capacity: 5)
+                    second.writeString("world")
+                    context.write(self.wrapOutboundOut(.body(.byteBuffer(second))), promise: nil)
+                    context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                }
+
+                self.requestHead = nil
+                self.requestBody = context.channel.allocator.buffer(capacity: 0)
+                return
+            }
+
             let body = requestBody.readString(length: requestBody.readableBytes) ?? ""
             let response = Self.makeResponse(for: requestHead, body: body)
 

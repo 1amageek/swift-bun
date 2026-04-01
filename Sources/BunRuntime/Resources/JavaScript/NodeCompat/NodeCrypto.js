@@ -69,9 +69,34 @@
         return hexToBytes(hex);
     };
 
+    function KeyObject(record) {
+        this.type = record.type;
+        this.asymmetricKeyType = record.asymmetricKeyType || null;
+        this._token = record.token;
+        this._format = record.format || null;
+    }
+    KeyObject.prototype.export = function() {
+        throw new Error('KeyObject.export() is not supported in swift-bun');
+    };
+
     var crypto = {
         createHash: function(algorithm) { return new Hash(algorithm); },
         createHmac: function(algorithm, key) { return new Hmac(algorithm, key); },
+        createPrivateKey: function(input) {
+            var options = (typeof input === 'object' && !(input instanceof Uint8Array) && !(input instanceof ArrayBuffer) && !(ArrayBuffer.isView(input)) && !Buffer.isBuffer(input))
+                ? input
+                : { key: input, format: typeof input === 'string' ? 'pem' : 'der' };
+            var keyValue = options.key;
+            var format = (options.format || (typeof keyValue === 'string' ? 'pem' : 'der')).toLowerCase();
+            var type = options.type || '';
+            var bytes;
+            if (typeof keyValue === 'string') bytes = Array.from(new TextEncoder().encode(keyValue));
+            else bytes = Array.from(toBytes(keyValue));
+            var result = __cryptoCreatePrivateKey(format, bytes, type);
+            if (result && result.error) throw new Error(result.error);
+            return new KeyObject(result);
+        },
+        KeyObject: KeyObject,
         randomBytes: function(size) {
             var bytes = __cryptoRandomBytes(size);
             return Buffer.from(bytes);

@@ -156,6 +156,34 @@
                 return asyncResult(fallbackOperation);
             }
 
+            function emptyStat() {
+                return {
+                    isFile: function() { return false; },
+                    isDirectory: function() { return false; },
+                    isSymbolicLink: function() { return false; },
+                    isBlockDevice: function() { return false; },
+                    isCharacterDevice: function() { return false; },
+                    isFIFO: function() { return false; },
+                    isSocket: function() { return false; },
+                    size: 0,
+                    mode: 0,
+                    mtimeMs: 0,
+                    ctimeMs: 0,
+                    atimeMs: 0,
+                    birthtimeMs: 0,
+                    mtime: new Date(0),
+                    ctime: new Date(0),
+                    atime: new Date(0),
+                    birthtime: new Date(0),
+                };
+            }
+
+            var watchFileEntries = Object.create(null);
+
+            function watchKey(path, listener) {
+                return path + '::' + String(listener);
+            }
+
             function createFileHandle(path, flags, prepared) {
                 var normalizedFlags = flags || 'r';
                 var appendMode = normalizedFlags.indexOf('a') !== -1;
@@ -478,6 +506,66 @@
                     }, function(error) {
                         if (callback) callback(error);
                     });
+                },
+                rm: function(path, options, callback) {
+                    var cb = typeof options === 'function' ? options : callback;
+                    try {
+                        fs.rmSync(path, typeof options === 'function' ? undefined : options);
+                        if (cb) cb(null);
+                    } catch (error) {
+                        if (cb) cb(error);
+                        else throw error;
+                    }
+                },
+                watchFile: function(path, options, listener) {
+                    path = normalizePath(path);
+                    var interval = 5007;
+                    var callback = listener;
+                    if (typeof options === 'function') {
+                        callback = options;
+                    } else if (options && typeof options === 'object' && typeof options.interval === 'number') {
+                        interval = options.interval;
+                    }
+                    if (typeof callback !== 'function') {
+                        throw new TypeError('watchFile requires a listener');
+                    }
+                    var previous = fs.existsSync(path) ? fs.statSync(path) : emptyStat();
+                    var key = watchKey(path, callback);
+                    if (watchFileEntries[key]) {
+                        return fs;
+                    }
+                    watchFileEntries[key] = setInterval(function() {
+                        var current = fs.existsSync(path) ? fs.statSync(path) : emptyStat();
+                        if (
+                            current.mtimeMs !== previous.mtimeMs ||
+                            current.size !== previous.size ||
+                            current.isFile() !== previous.isFile() ||
+                            current.isDirectory() !== previous.isDirectory()
+                        ) {
+                            var prior = previous;
+                            previous = current;
+                            callback(current, prior);
+                        }
+                    }, interval);
+                    return fs;
+                },
+                unwatchFile: function(path, listener) {
+                    path = normalizePath(path);
+                    if (typeof listener === 'function') {
+                        var listenerKey = watchKey(path, listener);
+                        if (watchFileEntries[listenerKey]) {
+                            clearInterval(watchFileEntries[listenerKey]);
+                            delete watchFileEntries[listenerKey];
+                        }
+                        return fs;
+                    }
+                    Object.keys(watchFileEntries).forEach(function(key) {
+                        if (key.indexOf(path + '::') === 0) {
+                            clearInterval(watchFileEntries[key]);
+                            delete watchFileEntries[key];
+                        }
+                    });
+                    return fs;
                 },
                 lstat: function(path, callback) {
                     path = normalizePath(path);

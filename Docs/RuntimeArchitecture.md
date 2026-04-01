@@ -11,10 +11,11 @@
 - Owns:
   - `ReadableStream`, `WritableStream`, `TransformStream`
   - `fetch`, `Headers`, `Request`, `Response`
+  - `TextDecoderStream`, `TextEncoderStream`
   - `queueMicrotask`
   - `process.stdin`, `process.stdout`, `process.stderr`
 
-Layer 0 defines JS semantics. It may call narrow native bridges such as `__nativeFetch`, `__nativeStdoutWrite`, `__stdinRef`, and `__stdinUnref`, but it does not own transport.
+Layer 0 defines JS semantics. It may call narrow native bridges such as `__nativeFetchStream`, `__nativeStdoutWrite`, `__stdinRef`, and `__stdinUnref`, but it does not own transport.
 
 Layer 0 prefers community JS polyfills when they are compatible with JavaScriptCore and the pre-`require()` bootstrap phase. Incompatible packages are replaced with local thin adapters. Current examples:
 - package-backed: `web-streams-polyfill`, `@ungap/structured-clone`, `js-yaml`, `picomatch`, `semver`
@@ -45,6 +46,7 @@ The architecture does not currently promise support for:
 
 Examples:
 - `node:http` composes `fetch` and stream constructors from Layer 0
+- `node:http.createServer` and `node:net` expose JS server/socket objects while delegating transport to Layer 2
 - `node:stream` re-exports Layer 0 stream constructors and adds `stream/promises` / `stream/consumers`
 - `require()` resolves built-ins first, then installed CommonJS packages from plain `node_modules`
 - process-mode entry scripts are executed as the CommonJS main module
@@ -56,6 +58,7 @@ Examples:
   - host callback scheduling
   - lifecycle and shutdown
   - timer, filesystem, network, stdin/stdout transport
+  - streaming fetch delivery, Web Crypto, DNS lookup, compression, TCP/HTTP server bridges
 
 Layer 2 must not own JS API semantics such as `fetch`, `Headers`, `Request`, `Response`, or stream method behavior.
 
