@@ -6,8 +6,17 @@ import Darwin
 
 /// `node:os` implementation bridging to `ProcessInfo`.
 enum NodeOS {
-    static func install(in context: JSContext) {
+    static func install(in context: JSContext, environment: [String: String] = [:]) throws {
         let info = ProcessInfo.processInfo
+        let mergedEnvironment = mergedHostEnvironment(overrides: environment)
+        let homeDirectory = configuredHomeDirectory(from: mergedEnvironment)
+        let temporaryDirectory = configuredTemporaryDirectory(from: mergedEnvironment)
+        let username = mergedEnvironment["USER"] ?? mergedEnvironment["LOGNAME"] ?? "mobile"
+        let shell = mergedEnvironment["SHELL"] ?? "/bin/zsh"
+        let osVersion = info.operatingSystemVersion
+        let releaseString = "\(osVersion.majorVersion).\(osVersion.minorVersion).\(osVersion.patchVersion)"
+        let uid = getuid()
+        let gid = getgid()
 
         let hostnameBlock: @convention(block) () -> String = {
             info.hostName
@@ -15,12 +24,12 @@ enum NodeOS {
         context.setObject(hostnameBlock, forKeyedSubscript: "__osHostname" as NSString)
 
         let homeDirBlock: @convention(block) () -> String = {
-            NSHomeDirectory()
+            homeDirectory
         }
         context.setObject(homeDirBlock, forKeyedSubscript: "__osHomedir" as NSString)
 
         let tmpDirBlock: @convention(block) () -> String = {
-            NSTemporaryDirectory()
+            temporaryDirectory
         }
         context.setObject(tmpDirBlock, forKeyedSubscript: "__osTmpdir" as NSString)
 
@@ -34,49 +43,47 @@ enum NodeOS {
         }
         context.setObject(cpuCountBlock, forKeyedSubscript: "__osCpuCount" as NSString)
 
+        let configJSON = try makeConfigJSON([
+            "release": releaseString,
+            "username": username,
+            "uid": Int(uid),
+            "gid": Int(gid),
+            "shell": shell,
+        ])
         context.evaluateScript("""
-        (function() {
-            var os = {
-                hostname: function() { return __osHostname(); },
-                homedir: function() { return __osHomedir(); },
-                tmpdir: function() { return __osTmpdir(); },
-                totalmem: function() { return __osTotalmem(); },
-                freemem: function() { return __osTotalmem() * 0.5; },
-                cpus: function() {
-                    var count = __osCpuCount();
-                    var result = [];
-                    for (var i = 0; i < count; i++) {
-                        result.push({ model: 'Apple Silicon', speed: 0, times: {} });
-                    }
-                    return result;
-                },
-                type: function() { return 'Darwin'; },
-                platform: function() { return 'darwin'; },
-                arch: function() { return 'arm64'; },
-                release: function() { return '24.0.0'; },
-                uptime: function() { return Math.floor(performance.now() / 1000); },
-                loadavg: function() { return [0, 0, 0]; },
-                networkInterfaces: function() { return {}; },
-                userInfo: function() {
-                    return {
-                        username: 'mobile',
-                        uid: 501,
-                        gid: 20,
-                        shell: '/bin/zsh',
-                        homedir: __osHomedir(),
-                    };
-                },
-                endianness: function() { return 'LE'; },
-                EOL: '\\n',
-                constants: {
-                    signals: {},
-                    errno: {},
-                },
-            };
-
-            if (!globalThis.__nodeModules) globalThis.__nodeModules = {};
-            __nodeModules.os = os;
-        })();
+        globalThis.__swiftBunConfig = globalThis.__swiftBunConfig || {};
+        globalThis.__swiftBunConfig.os = \(configJSON);
         """)
+        try JavaScriptResource.evaluate(.nodeCompat(.os), in: context)
+    }
+
+    private static func mergedHostEnvironment(overrides: [String: String]) -> [String: String] {
+        var merged = ProcessInfo.processInfo.environment
+        for (key, value) in overrides {
+            merged[key] = value
+        }
+        return merged
+    }
+
+    private static func configuredHomeDirectory(from environment: [String: String]) -> String {
+        if let configuredHome = environment["HOME"], !configuredHome.isEmpty {
+            return configuredHome
+        }
+        return NSHomeDirectory()
+    }
+
+    private static func configuredTemporaryDirectory(from environment: [String: String]) -> String {
+        if let configuredTmp = environment["TMPDIR"], !configuredTmp.isEmpty {
+            return configuredTmp
+        }
+        return NSTemporaryDirectory()
+    }
+
+    private static func makeConfigJSON(_ value: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw BunRuntimeError.javaScriptException("Failed to encode NodeOS config as UTF-8")
+        }
+        return json
     }
 }

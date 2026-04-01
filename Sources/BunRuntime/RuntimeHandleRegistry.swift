@@ -1,0 +1,147 @@
+@preconcurrency import JavaScriptCore
+import Foundation
+import NIOCore
+
+/// Central registry for host-visible handles and async wait tokens.
+final class RuntimeHandleRegistry: Sendable {
+    struct TimerHandle {
+        var scheduled: Scheduled<Void>
+        let callback: JSValue
+        let args: [Any]
+        let repeating: Bool
+        let intervalMs: Int64
+        var isRefed: Bool
+        var visibleHandleToken: LifecycleController.VisibleHandleToken?
+    }
+
+    struct FetchHandle {
+        let resolve: JSValue
+        let reject: JSValue
+        var isRefed: Bool
+        var visibleHandleToken: LifecycleController.VisibleHandleToken?
+    }
+
+    private nonisolated(unsafe) var nextIdentifier: Int32 = 1
+    private nonisolated(unsafe) var timers: [Int32: TimerHandle] = [:]
+    private nonisolated(unsafe) var fetches: [Int32: FetchHandle] = [:]
+    private nonisolated(unsafe) var asyncWaits: [Int32: AsyncResultBox<JSResult>] = [:]
+    private nonisolated(unsafe) var stdinRefed = false
+    private nonisolated(unsafe) var stdinVisibleHandleToken: LifecycleController.VisibleHandleToken?
+
+    func makeIdentifier() -> Int32 {
+        let id = nextIdentifier
+        nextIdentifier += 1
+        return id
+    }
+
+    func insertTimer(_ handle: TimerHandle, id: Int32? = nil) -> Int32 {
+        let identifier = id ?? makeIdentifier()
+        timers[identifier] = handle
+        return identifier
+    }
+
+    func updateTimerScheduled(id: Int32, scheduled: Scheduled<Void>) {
+        guard var timer = timers[id] else { return }
+        timer.scheduled = scheduled
+        timers[id] = timer
+    }
+
+    func updateTimerRef(id: Int32, isRefed: Bool) {
+        guard var timer = timers[id] else { return }
+        timer.isRefed = isRefed
+        timers[id] = timer
+    }
+
+    func updateTimerVisibleHandleToken(id: Int32, token: LifecycleController.VisibleHandleToken?) {
+        guard var timer = timers[id] else { return }
+        timer.visibleHandleToken = token
+        timers[id] = timer
+    }
+
+    func timer(id: Int32) -> TimerHandle? {
+        timers[id]
+    }
+
+    func removeTimer(id: Int32) -> TimerHandle? {
+        timers.removeValue(forKey: id)
+    }
+
+    func drainTimers() -> [TimerHandle] {
+        let values = Array(timers.values)
+        timers.removeAll()
+        return values
+    }
+
+    func insertFetch(
+        resolve: JSValue,
+        reject: JSValue,
+        isRefed: Bool = true,
+        visibleHandleToken: LifecycleController.VisibleHandleToken? = nil,
+        id: Int32? = nil
+    ) -> Int32 {
+        let identifier = id ?? makeIdentifier()
+        fetches[identifier] = FetchHandle(
+            resolve: resolve,
+            reject: reject,
+            isRefed: isRefed,
+            visibleHandleToken: visibleHandleToken
+        )
+        return identifier
+    }
+
+    func removeFetch(id: Int32) -> FetchHandle? {
+        fetches.removeValue(forKey: id)
+    }
+
+    func updateFetchVisibleHandleToken(id: Int32, token: LifecycleController.VisibleHandleToken?) {
+        guard var fetch = fetches[id] else { return }
+        fetch.visibleHandleToken = token
+        fetches[id] = fetch
+    }
+
+    func drainFetches() -> [FetchHandle] {
+        let values = Array(fetches.values)
+        fetches.removeAll()
+        return values
+    }
+
+    func createAsyncWait(_ box: AsyncResultBox<JSResult>) -> Int32 {
+        let identifier = makeIdentifier()
+        asyncWaits[identifier] = box
+        return identifier
+    }
+
+    func resolveAsyncWait(token: Int32, result: JSResult) {
+        asyncWaits.removeValue(forKey: token)?.succeed(result)
+    }
+
+    func failAsyncWait(token: Int32, error: any Error) {
+        asyncWaits.removeValue(forKey: token)?.fail(error)
+    }
+
+    func failAllAsyncWaits(_ error: any Error) {
+        let waits = Array(asyncWaits.values)
+        asyncWaits.removeAll()
+        for wait in waits {
+            wait.fail(error)
+        }
+    }
+
+    func setStdinRefed(_ isRefed: Bool) -> Bool {
+        guard stdinRefed != isRefed else { return false }
+        stdinRefed = isRefed
+        return true
+    }
+
+    func setStdinVisibleHandleToken(_ token: LifecycleController.VisibleHandleToken?) {
+        stdinVisibleHandleToken = token
+    }
+
+    var isStdinRefed: Bool {
+        stdinRefed
+    }
+
+    var currentStdinVisibleHandleToken: LifecycleController.VisibleHandleToken? {
+        stdinVisibleHandleToken
+    }
+}

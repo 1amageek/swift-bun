@@ -53,6 +53,11 @@ cp polyfills.bundle.js ../../Tests/BunRuntimeTests/
 
 ## Architecture
 
+Primary architecture spec: `Docs/RuntimeArchitecture.md`
+
+JavaScript placement rules are also defined in `Docs/RuntimeArchitecture.md` under `JavaScript source placement`.
+JavaScript loading and resource layout are defined in `Docs/JavaScriptLoading.md`.
+
 swift-bun provides a Bun-compatible JavaScript runtime for iOS/macOS by wrapping JavaScriptCore with Node.js/Bun polyfills. It uses SwiftNIO for the event loop (NIOCore + NIOPosix).
 
 ### Execution model: BunProcess
@@ -62,8 +67,9 @@ swift-bun provides a Bun-compatible JavaScript runtime for iOS/macOS by wrapping
 ```swift
 BunProcess(bundle: URL?, arguments: [String], cwd: String?, environment: [String: String])
 
-.load()  // Library mode — then evaluate(js:) / call()
-.run()   // Process mode — blocks until exit
+.load()  // Library mode — then evaluate(js:) / call(), and must be paired with shutdown()
+.run()   // Process mode — blocks until exit and shuts down before returning
+.shutdown() // Explicit cleanup for library mode
 ```
 
 All JSContext access is serialized on a dedicated NIO EventLoop thread, guaranteeing thread safety.
@@ -82,7 +88,7 @@ BunProcess (final class, Sendable)
 │       ├── process.stdin → sendInput() from Swift
 │       ├── process.exit → resolveExit()
 │       └── console.log → output AsyncStream
-├── Lifecycle (ref/unref counting, like Node.js)
+├── Lifecycle (state machine + boot barriers + explicit shutdown)
 └── ESM transformer (es-module-lexer WASM, temporary JSContext)
 ```
 
@@ -122,17 +128,17 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | Event | ✅ Full | Custom (in bundle) |
 | EventTarget | ✅ Full | Custom (in bundle) |
 | CustomEvent | ✅ Full | Custom (in bundle) |
-| Blob | ✅ Basic | Custom (text/arrayBuffer/stream) |
-| File | ✅ Basic | Extends Blob |
+| Blob | ✅ Basic | Custom (text/arrayBuffer/stream/slice) |
+| File | ✅ Basic | Extends Blob with name/lastModified |
 | FormData | ✅ Full | Custom |
 | WebSocket | ⚠️ Stub | Class exists for instanceof/extends, no actual connection |
 | Worker | ⚠️ Stub | Throws on instantiation |
 | MessageChannel / MessagePort | ✅ Basic | Functional postMessage |
-| XMLHttpRequest | ⚠️ Stub | Class exists, no network |
+| XMLHttpRequest | ✅ Basic | Async-only adapter over fetch |
 | crypto.getRandomValues | ✅ Basic | Math.random (not cryptographically secure) |
 | crypto.randomUUID | ✅ Full | UUID v4 |
 | crypto.subtle | ⚠️ Stub | Returns empty buffers |
-| structuredClone | ✅ Basic | JSON roundtrip (no cycles, no special types) |
+| structuredClone | ✅ Basic | @ungap/structured-clone with Blob/File wrapper |
 | navigator | ✅ Stub | userAgent, platform |
 | Symbol.dispose / asyncDispose | ✅ Full | Symbol.for polyfill |
 
@@ -171,12 +177,12 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:events | ✅ Implemented | EventEmitter (constructor, supports extends) |
 | node:timers | ✅ Implemented | NIO EventLoop-backed |
 | node:timers/promises | ✅ Implemented | Promise-wrapped timers |
-| node:module | ✅ Stub | createRequire returns globalThis.require |
+| node:module | ✅ Basic | createRequire + builtinModules |
 | node:process | ✅ Implemented | Full process object |
 | node:async_hooks | ⚠️ Partial | AsyncLocalStorage with run/getStore only |
-| node:readline | ⚠️ Stub | Basic interface, no TTY |
-| node:tty | ⚠️ Stub | isatty returns false |
-| node:assert | ⚠️ Stub | Basic assert/ok/strictEqual/deepStrictEqual |
+| node:readline | ✅ Basic | createInterface, question, line events, async iterator |
+| node:tty | ✅ Basic | non-TTY ReadStream/WriteStream shape |
+| node:assert | ✅ Basic | ok/equality/deepEqual/throws/rejects/ifError |
 | node:child_process | ⚠️ Stub | **Throws — not available on iOS** |
 | node:net | ⚠️ Stub | **Throws — TCP not implemented** |
 | node:tls | ⚠️ Stub | Throws |
@@ -186,12 +192,12 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:v8 | ⚠️ Stub | No-op |
 | node:inspector | ⚠️ Stub | No-op |
 | node:worker_threads | ⚠️ Stub | Throws |
-| node:diagnostics_channel | ⚠️ Stub | No-op channel |
-| node:perf_hooks | ⚠️ Stub | performance.now only |
-| node:stream/consumers | ❌ Missing | Not implemented |
-| node:stream/promises | ❌ Missing | Not implemented |
-| path/posix | ❌ Missing | Not implemented (path uses POSIX by default) |
-| path/win32 | ❌ Missing | Not applicable on iOS/macOS |
+| node:diagnostics_channel | ✅ Basic | channel subscribe/publish/unsubscribe |
+| node:perf_hooks | ✅ Basic | performance export + PerformanceObserver shape |
+| node:stream/consumers | ✅ Implemented | buffer/text/json/arrayBuffer |
+| node:stream/promises | ✅ Implemented | pipeline, finished |
+| path/posix | ✅ Implemented | Alias of path POSIX implementation |
+| path/win32 | ⚠️ Stub | Not applicable on iOS/macOS |
 
 ### Known limitations
 

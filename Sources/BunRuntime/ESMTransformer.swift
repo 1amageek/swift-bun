@@ -26,17 +26,9 @@ enum ESMTransformer {
             throw BunRuntimeError.contextCreationFailed
         }
 
-        ctx.evaluateScript(atobPolyfill)
-
-        guard let transformerURL = Bundle.module.url(
-            forResource: "esm-transformer.bundle",
-            withExtension: "js"
-        ) else {
-            throw BunRuntimeError.transformerNotFound
-        }
-
-        let transformerSource = try String(contentsOf: transformerURL, encoding: .utf8)
-        ctx.evaluateScript(transformerSource)
+        try JavaScriptResource.evaluate(.bootstrap(.base64), in: ctx)
+        let (transformerURL, transformerSource) = try JavaScriptResource.source(for: .bundle(.esmTransformer))
+        ctx.evaluateScript(transformerSource, withSourceURL: transformerURL)
         if let exception = ctx.exception {
             ctx.exception = nil
             throw BunRuntimeError.javaScriptException(exception.toString())
@@ -55,28 +47,4 @@ enum ESMTransformer {
 
         return result.toString()
     }
-
-    /// Minimal atob polyfill required by es-module-lexer for WASM base64 decoding.
-    static let atobPolyfill = """
-    (function() {
-        if (typeof globalThis.atob !== 'undefined') return;
-        var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-        globalThis.atob = function(input) {
-            var str = String(input).replace(/[=]+$/, '');
-            var output = '';
-            for (var i = 0; i < str.length;) {
-                var a = chars.indexOf(str.charAt(i++));
-                var b = i < str.length ? chars.indexOf(str.charAt(i++)) : -1;
-                var c = i < str.length ? chars.indexOf(str.charAt(i++)) : -1;
-                var d = i < str.length ? chars.indexOf(str.charAt(i++)) : -1;
-                if (b === -1) break;
-                var bitmap = (a << 18) | (b << 12) | (c !== -1 ? c << 6 : 0) | (d !== -1 ? d : 0);
-                output += String.fromCharCode((bitmap >> 16) & 0xFF);
-                if (c !== -1) output += String.fromCharCode((bitmap >> 8) & 0xFF);
-                if (d !== -1) output += String.fromCharCode(bitmap & 0xFF);
-            }
-            return output;
-        };
-    })();
-    """
 }

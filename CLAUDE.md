@@ -20,6 +20,47 @@ swift test --filter "setTimeout"
 
 Network roundtrip tests (`FetchRoundtripTests`) hit `httpbin.org` and require internet access.
 
+### Test design
+
+**Framework**: Swift Testing (`import Testing`). All tests use `@Test` / `@Suite` macros with `async throws`.
+
+**Lifecycle**: Every test creates a fresh `BunProcess` via `TestProcessSupport.withLoadedProcess`. This guarantees `load()` → operation → `shutdown()` (shutdown runs even on error). No state is shared between tests.
+
+```swift
+@Test("description")
+func testXxx() async throws {
+    try await TestProcessSupport.withLoadedProcess { process in
+        let result = try await process.evaluate(js: "1 + 1")
+        #expect(result.int32Value == 2)
+    }
+}
+```
+
+**Suite traits**: All suites use `.serialized` (no parallel BunProcess) and `.heartbeat` (hang detection via swift-testing-heartbeat).
+
+**Test categories**:
+
+| Category | Pattern | Example |
+|----------|---------|---------|
+| Edge case | Single API, one assertion per test | `CryptoEdgeCaseTests`, `BufferEdgeCaseTests` |
+| Compat | Broad coverage of a module | `NodeCompatTests`, `WebAPIPolyfillTests` |
+| Integration | Real bundles, HTTP server | `ClaudeBundleIntegrationTests`, `FetchRoundtripTests` |
+| Async | Process mode with stdout capture | `AsyncPrimitiveTests` |
+| Lifecycle | State machine unit tests | `LifecycleControllerTests` |
+
+**Evaluation methods**:
+- `process.evaluate(js:)` — synchronous JS, throws if result is a Promise
+- `process.evaluateAsync(js:)` — awaits Promise resolution
+- `process.run()` — process mode execution with stdout/output streams
+
+**Assertions**: `#expect(result.stringValue == "expected")`, `#expect(result.int32Value == 42)`, `await #expect(throws: BunRuntimeError.self) { ... }`
+
+**Helpers**: `TestProcessSupport` (core lifecycle), `LocalHTTPTestServer` (NIO-based test HTTP server), `LinesCollector` (thread-safe `Mutex<[String]>` output collector).
+
+### Known test issues
+
+- `BunProcessStdioTests/stdinWrite` — tests `process.stdin.write` existence, but stdin is Readable (write is a Writable method)
+
 ### Test bundle regeneration
 
 The test bundle `Tests/BunRuntimeTests/claude.bundle.js` is a resource copied into the test target via `Package.swift`. To regenerate it from `Fixtures/claude-test/`:
@@ -100,15 +141,16 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 
 ### Context setup order
 
-1. **Web API polyfills** (`polyfills.bundle.js`) — ReadableStream, Event, Blob, crypto, etc.
-2. **Node.js globals** (ESMResolver.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
-3. **Node.js modules** (ESMResolver.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
-4. **Bun APIs** — Bun.file, Bun.env, Bun.write, etc.
-5. **NIO bridges** — Timer override, Fetch override, process.exit, stdin, stdout/stderr, console → output stream
-6. **Timer module patch** — Update `__nodeModules.timers` references to NIO-backed versions
-7. **require()** — Installed last, reads from `__nodeModules`
-8. **Configuration** — process.argv, process.cwd, process.env
-9. **Bundle evaluation** — evaluateScript(source)
+1. **Crypto random bridge** (`__cryptoRandomBytes`) — SecRandomCopyBytes-backed, installed before polyfills so Web Crypto can use it
+2. **Web API polyfills** (`polyfills.bundle.js`) — ReadableStream, Event, Blob, crypto, etc.
+3. **Node.js globals** (ESMResolver.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
+4. **Node.js modules** (ESMResolver.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
+5. **Bun APIs** — Bun.file, Bun.env, Bun.write, etc.
+6. **NIO bridges** — Timer override, Fetch override, process.exit, stdin, stdout/stderr, console → output stream
+7. **Timer module patch** — Update `__nodeModules.timers` references to NIO-backed versions
+8. **require()** — Installed last, reads from `__nodeModules`
+9. **Configuration** — process.argv, process.cwd, process.env
+10. **Bundle evaluation** — evaluateScript(source)
 
 ## Polyfill coverage status
 
@@ -128,11 +170,11 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | WebSocket | ⚠️ Stub | Class exists for instanceof/extends, no actual connection |
 | Worker | ⚠️ Stub | Throws on instantiation |
 | MessageChannel / MessagePort | ✅ Basic | Functional postMessage |
-| XMLHttpRequest | ⚠️ Stub | Class exists, no network |
-| crypto.getRandomValues | ✅ Basic | Math.random (not cryptographically secure) |
-| crypto.randomUUID | ✅ Full | UUID v4 |
-| crypto.subtle | ⚠️ Stub | Returns empty buffers |
-| structuredClone | ✅ Basic | JSON roundtrip (no cycles, no special types) |
+| XMLHttpRequest | ✅ Async | fetch-backed, all responseTypes, abort support (sync mode throws) |
+| crypto.getRandomValues | ✅ Full | SecRandomCopyBytes via `__cryptoRandomBytes` bridge (supports all TypedArray types) |
+| crypto.randomUUID | ✅ Full | UUID v4 (backed by secure getRandomValues) |
+| crypto.subtle | ⚠️ Stub | All methods throw "not supported" (no silent fallback) |
+| structuredClone | ✅ Basic | @ungap/structured-clone (npm), Blob-aware |
 | navigator | ✅ Stub | userAgent, platform |
 | Symbol.dispose / asyncDispose | ✅ Full | Symbol.for polyfill |
 
@@ -141,13 +183,13 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | Global | Status |
 |--------|--------|
 | global / self | ✅ Alias for globalThis |
-| performance | ✅ now(), timeOrigin |
+| performance | ✅ now(), timeOrigin, mark(), measure(), getEntries/ByName/ByType(), clearMarks/Measures() |
 | URL / URLSearchParams | ✅ Full parser |
 | TextEncoder / TextDecoder | ✅ UTF-8 |
 | atob / btoa | ✅ Base64 |
 | AbortController / AbortSignal | ✅ Full |
 | DOMException | ✅ Basic |
-| console | ✅ Full (→ output stream) |
+| console | ✅ Full (→ output stream, time/timeEnd/timeLog with performance.now) |
 | process | ✅ Extended (argv, env, cwd, exit, stdin, stdout, stderr, on/emit, execArgv, hrtime, etc.) |
 | queueMicrotask | ✅ Promise-based |
 | setTimeout / setInterval / setImmediate | ✅ NIO EventLoop-backed |
@@ -163,9 +205,9 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:buffer | ✅ Implemented | Uint8Array-based Buffer |
 | node:url | ✅ Implemented | URL/URLSearchParams |
 | node:util | ✅ Implemented | format, promisify, debuglog, types |
-| node:os | ✅ Implemented | ProcessInfo-backed (homedir, platform, tmpdir) |
-| node:fs | ✅ Implemented | FileManager-backed (sync: readFile, writeFile, exists, stat, lstat, mkdir, readdir, unlink, rename, realpath, access, chmod, copyFile; promises: readFile, writeFile, stat, lstat, access, mkdir, readdir, unlink, rename, realpath, chmod, rm, copyFile, open) |
-| node:crypto | ✅ Implemented | CryptoKit (SHA-256/512, HMAC, randomBytes, randomUUID) |
+| node:os | ✅ Implemented | ProcessInfo-backed (homedir, platform, tmpdir, release via operatingSystemVersion, uid/gid via POSIX) |
+| node:fs | ✅ Implemented | FileManager-backed (sync: readFile, writeFile, exists, stat, lstat, mkdir, readdir, unlink, rename, realpath, access, chmod, copyFile; promises: readFile, writeFile, stat, lstat, access, mkdir, readdir, unlink, rename, realpath, chmod, rm, copyFile, open). stat follows symlinks, lstat does not. chmod sets POSIX permissions. stat().mode returns actual file type prefix + posixPermissions. |
+| node:crypto | ✅ Implemented | CryptoKit-backed binary hashing (SHA-256/512 accept Uint8Array), HMAC (binary key+data), SecRandomCopyBytes (randomBytes, randomInt, randomUUID) |
 | node:http / node:https | ✅ Implemented | URLSession-backed fetch + http.request |
 | node:stream | ✅ Implemented | Readable, Writable, Transform, Duplex, EventEmitter |
 | node:events | ✅ Implemented | EventEmitter (constructor, supports extends) |
@@ -198,10 +240,18 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 - `process.exit()` throws a frozen sentinel object to unwind the JS stack. If JS code catches this, the exit may be suppressed.
 - `node:child_process` is stubbed (throws) — subprocess execution is not available on iOS.
 - `node:net` / `node:tls` are stubbed — raw TCP/TLS connections not implemented.
-- `crypto.getRandomValues` uses `Math.random()`, not cryptographically secure. CryptoKit-backed `node:crypto` provides secure alternatives via `require('crypto')`.
+- `process.chdir()` throws — working directory is fixed at BunProcess init.
+- `process.kill()` throws — not supported on iOS.
+- `crypto.subtle` methods throw "not supported" — Web Crypto SubtleCrypto API is not implemented.
+- `crypto.randomInt()` uses modulo on 4 random bytes — slight bias for non-power-of-2 ranges (~2^-32).
 - `Bun.serve()` is not supported.
 - `WebSocket` is a stub — class exists for type checks but cannot establish connections.
-- `crypto.subtle` methods return empty buffers — Web Crypto API is not functionally implemented.
+- `Bun.deepEquals()` uses JSON.stringify comparison — fails on undefined, Symbol, circular refs, Map/Set.
+- `process.platform` / `process.arch` — detected at compile time via `#if os()` / `#if arch()`.
+- `process.pid` / `process.ppid` / `uid` / `gid` — read at runtime from POSIX APIs.
+- `os.release()` — read from `ProcessInfo.operatingSystemVersion`.
+- `os.freemem()` / `os.cpus()` / `os.loadavg()` / `os.networkInterfaces()` — return approximate/stub values.
+- `Buffer.write()` ignores encoding parameter (always UTF-8). `Buffer.from()` and `Buffer.toString()` support utf8/base64/hex.
 
 ### Streams: stdout vs output
 
@@ -228,7 +278,7 @@ Each pending timer/fetch/stdin listener holds a ref. When refCount drops to 0, t
 
 Modules needing system APIs use `@convention(block)` closures registered on JSContext:
 
-- **NodeFS**: `__fsReadFileSync` etc. → `FileManager`
-- **NodeCrypto**: `__cryptoSHA256` etc. → `CryptoKit`
+- **NodeFS**: `__fsReadFileSync`, `__fsStatSync`, `__fsLstatSync`, `__fsChmodSync` etc. → `FileManager` (stat resolves symlinks, lstat does not, chmod sets posixPermissions)
+- **NodeCrypto**: `__cryptoSHA256([UInt8])`, `__cryptoSHA512([UInt8])` → `CryptoKit` (binary input), `__cryptoHMAC(String, [UInt8], [UInt8])` → `CryptoKit` HMAC, `__cryptoRandomBytes(Int)` → `SecRandomCopyBytes`
 - **NodeHTTP**: `__nativeFetch` → `URLSession` (EventLoop-safe)
 - **NodeOS**: `__osHostname` etc. → `ProcessInfo`

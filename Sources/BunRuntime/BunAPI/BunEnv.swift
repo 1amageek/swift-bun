@@ -3,9 +3,12 @@ import Foundation
 
 /// `Bun.env` implementation backed by `ProcessInfo.environment`.
 enum BunEnv {
-    static func install(in context: JSContext) {
-        // Pre-populate process.env with actual environment variables
-        let env = ProcessInfo.processInfo.environment
+    static func install(in context: JSContext, environment: [String: String] = [:]) {
+        // Pre-populate process.env with merged runtime environment.
+        var env = ProcessInfo.processInfo.environment
+        for (key, value) in environment {
+            env[key] = value
+        }
         for (key, value) in env {
             let escapedKey = escapeForJSString(key)
             let escapedValue = escapeForJSString(value)

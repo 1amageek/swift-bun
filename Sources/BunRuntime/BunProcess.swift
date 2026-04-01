@@ -1,78 +1,46 @@
 @preconcurrency import JavaScriptCore
 import Foundation
 import NIOCore
-import NIOPosix
+import Synchronization
 
-/// A JavaScript execution context backed by a NIO EventLoop.
+/// A JavaScript execution context backed by a single JS-dedicated executor.
 ///
-/// All JSContext access happens on a dedicated EventLoop thread,
-/// guaranteeing thread safety. The EventLoop drives timers, fetch callbacks,
-/// and stdin delivery — enabling both library-style function calls and
-/// long-running process execution.
-///
-/// Configuration is provided at initialization. `load()` and `run()` are
-/// mutually exclusive on a single instance.
-///
-/// ## Process mode
-///
-/// ```swift
-/// let process = BunProcess(
-///     bundle: cliJS,
-///     arguments: ["-p", "--input-format", "stream-json"],
-///     cwd: "/path/to/project",
-///     environment: ["HOME": NSHomeDirectory()]
-/// )
-/// Task { for await data in process.stdout { parse(data) } }
-/// let exitCode = try await process.run()
-/// ```
-///
-/// ## Library mode
-///
-/// ```swift
-/// let runtime = BunProcess(bundle: myLib)
-/// try await runtime.load()
-/// let result = try await runtime.evaluate(js: "myFunction()")
-/// ```
+/// `BunProcess` remains the public facade, while internal scheduling, lifecycle,
+/// and native async work are delegated to dedicated runtime components.
 public final class BunProcess: Sendable {
+    private enum ShutdownState: Sendable {
+        case active
+        case shuttingDown
+        case shutDown
+    }
 
-    // MARK: - Configuration (immutable, set at init)
+    // MARK: - Configuration
 
     private let bundle: URL?
     private let arguments: [String]
     private let cwd: String?
     private let environment: [String: String]
 
-    // MARK: - EventLoop
+    // MARK: - Runtime Components
 
-    private let eventLoopGroup: MultiThreadedEventLoopGroup
-    private let eventLoop: EventLoop
+    private let executor: JavaScriptExecutor
+    private let lifecycle: LifecycleController
+    private let handleRegistry: RuntimeHandleRegistry
+    private let scheduler: HostScheduler
+    private let nativeRuntime: NativeRuntime
+    private let fileSystemAsyncBridge: FileSystemAsyncBridge
 
-    // MARK: - EventLoop-thread state
+    // MARK: - Process State
 
-    private nonisolated(unsafe) var jsContext: JSContext?
-    private nonisolated(unsafe) var refCount: Int = 0
-    private nonisolated(unsafe) var exitPromise: EventLoopPromise<Int32>?
-    private nonisolated(unsafe) var nextTimerID: Int32 = 1
-    private nonisolated(unsafe) var activeTimers: [Int32: TimerState] = [:]
-    private nonisolated(unsafe) var stdinValue: JSValue?
-    private nonisolated(unsafe) var state: State = .idle
-
-    private struct TimerState {
-        var scheduled: Scheduled<Void>
-        var isRefed: Bool
-    }
-
-    private enum State {
-        case idle
-        case loaded
-        case running
-        case exited
-    }
+    private nonisolated(unsafe) var exitPromise: AsyncResultBox<Int32>?
+    private nonisolated(unsafe) var runStartupBarrier: LifecycleController.BootBarrierToken?
+    private nonisolated(unsafe) var startupPromiseVisibleHandle: LifecycleController.VisibleHandleToken?
+    private nonisolated(unsafe) var streamsFinished = false
+    private let shutdownState = Mutex<ShutdownState>(.active)
 
     // MARK: - Streams
 
     /// Data written to `process.stdout.write()` from JS.
-    /// Application data channel (e.g. NDJSON protocol messages).
     public let stdout: AsyncStream<String>
     private let stdoutContinuation: AsyncStream<String>.Continuation
 
@@ -82,14 +50,6 @@ public final class BunProcess: Sendable {
 
     // MARK: - Init
 
-    /// Create a JavaScript process with the given configuration.
-    ///
-    /// - Parameters:
-    ///   - bundle: URL to the `.js` bundle file. Required for `run()`, optional for `load()`.
-    ///   - arguments: Command-line arguments (excluding node/script path).
-    ///     `process.argv` is set to `["node", bundlePath, ...arguments]`.
-    ///   - cwd: Working directory for `process.cwd()`. Defaults to `"/"`.
-    ///   - environment: Environment variables for `process.env`.
     public init(
         bundle: URL? = nil,
         arguments: [String] = [],
@@ -104,148 +64,423 @@ public final class BunProcess: Sendable {
         let (stdoutStream, stdoutCont) = AsyncStream<String>.makeStream()
         self.stdout = stdoutStream
         self.stdoutContinuation = stdoutCont
+
         let (outputStream, outputCont) = AsyncStream<String>.makeStream()
         self.output = outputStream
         self.outputContinuation = outputCont
 
-        self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.eventLoop = eventLoopGroup.next()
+        let logger: @Sendable (String) -> Void = { [outputCont] line in
+            outputCont.yield(line)
+        }
+
+        let executor = JavaScriptExecutor(log: logger)
+        let lifecycle = LifecycleController(log: logger)
+        let handleRegistry = RuntimeHandleRegistry()
+        let scheduler = HostScheduler(
+            executor: executor,
+            onHostCallbackEnqueued: { source in
+                lifecycle.hostCallbackEnqueued(source: source)
+            },
+            onHostCallbackCompleted: { source in
+                lifecycle.hostCallbackCompleted(source: source)
+            },
+            log: logger
+        )
+        let nativeRuntime = NativeRuntime(
+            assertOnJSThread: { [executor] in
+                executor.preconditionInExecutor()
+            },
+            scheduler: scheduler,
+            log: logger
+        )
+        let fileSystemAsyncBridge = FileSystemAsyncBridge(
+            completeOnJSThread: { token, source, detail, payload in
+                let schedulerSource = "\(source):\(token)"
+                let dispatchUptimeMs = Int(ProcessInfo.processInfo.systemUptime * 1000)
+                if let detail {
+                    logger("[bun:fs] dispatch \(source) token=\(token) t=\(dispatchUptimeMs) path=\(detail)")
+                } else {
+                    logger("[bun:fs] dispatch \(source) token=\(token) t=\(dispatchUptimeMs)")
+                }
+                scheduler.enqueueHostCallback(source: schedulerSource) {
+                    let resolveUptimeMs = Int(ProcessInfo.processInfo.systemUptime * 1000)
+                    if let detail {
+                        logger("[bun:fs] resolve \(source) token=\(token) t=\(resolveUptimeMs) wait=\(resolveUptimeMs - dispatchUptimeMs) path=\(detail)")
+                    } else {
+                        logger("[bun:fs] resolve \(source) token=\(token) t=\(resolveUptimeMs) wait=\(resolveUptimeMs - dispatchUptimeMs)")
+                    }
+                    guard let ctx = executor.context else { return }
+                    guard let resolver = ctx.objectForKeyedSubscript("__resolveFSAsyncToken"), !resolver.isUndefined else {
+                        return
+                    }
+                    _ = resolver.call(withArguments: [token, payload.jsValue])
+                    if let exception = ctx.exception {
+                        let message = exception.toString() ?? "Unknown JS exception"
+                        ctx.exception = nil
+                        logger("[bun:exception] fs.async.complete: \(message)")
+                    }
+                }
+            },
+            log: logger
+        )
+
+        self.executor = executor
+        self.lifecycle = lifecycle
+        self.handleRegistry = handleRegistry
+        self.scheduler = scheduler
+        self.nativeRuntime = nativeRuntime
+        self.fileSystemAsyncBridge = fileSystemAsyncBridge
+
+        executor.execute {
+            self.scheduler.setTurnCompletedHandler {
+                self.evaluateExitCondition()
+                self.schedulePostTurnCheckpoint()
+            }
+        }
     }
 
     deinit {
-        stdoutContinuation.finish()
-        outputContinuation.finish()
-        try? eventLoopGroup.syncShutdownGracefully()
+        let state = lifecycle.currentState
+        let shouldWarn = shutdownState.withLock { shutdownState in
+            switch shutdownState {
+            case .shutDown:
+                return false
+            case .active, .shuttingDown:
+                return state != .idle
+            }
+        }
+        if !streamsFinished {
+            if shouldWarn {
+                outputContinuation.yield("[bun:deinit] BunProcess deinitialized without shutdown()")
+            }
+            finishStreams()
+        }
     }
 
     // MARK: - Public API
 
-    /// Load the bundle for library-style usage.
+    /// Starts the runtime in library mode.
     ///
-    /// If no bundle was specified at init, creates a bare context with polyfills.
-    /// After loading, call `evaluate(js:)` or `call()` to execute code.
+    /// Library mode never exits naturally. Callers must pair every successful
+    /// `load()` with `shutdown()` after finishing `evaluate`/`call` work.
     public func load() async throws {
-        try await eventLoop.submit {
-            precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
-            try self.setupContext()
-            self.state = .loaded
-        }.get()
+        guard isAcceptingPublicWork else {
+            throw BunRuntimeError.shutdownRequired
+        }
+        do {
+            try await executor.submit {
+                guard self.isAcceptingPublicWork else {
+                    throw BunRuntimeError.shutdownRequired
+                }
+                precondition(self.lifecycle.currentState == .idle, "BunProcess already started. Use a new instance.")
+                self.lifecycle.enterBooting(mode: .library)
+                let setupBarrier = self.lifecycle.acquireBootBarrier(name: "context-setup")
+                try self.setupContext()
+                self.lifecycle.releaseBootBarrier(setupBarrier)
+                self.lifecycle.enterRunningIfBootComplete()
+            }
+        } catch {
+            do {
+                try await shutdown()
+            } catch {
+            }
+            throw error
+        }
     }
 
-    /// Evaluate JavaScript and return the result.
-    ///
-    /// Must be called after `load()`. Cannot be called after `run()` exits.
     @discardableResult
     public func evaluate(js source: String) async throws -> JSResult {
-        try await eventLoop.submit {
-            self.eventLoop.preconditionInEventLoop()
-            guard self.state == .loaded, let ctx = self.jsContext else {
+        guard isAcceptingPublicWork else {
+            throw BunRuntimeError.shutdownRequired
+        }
+        return try await executor.submit {
+            guard self.isAcceptingPublicWork else {
+                throw BunRuntimeError.shutdownRequired
+            }
+            self.executor.preconditionInExecutor()
+            guard self.lifecycle.isJavaScriptReady else {
                 throw BunRuntimeError.contextNotReady
             }
+            guard let ctx = self.executor.context else {
+                throw BunRuntimeError.contextNotReady
+            }
+
             let result = ctx.evaluateScript(source)
+            self.scheduler.ensureDrainScheduled(reason: "evaluate")
             try self.checkException()
+            if self.isThenable(result) {
+                throw BunRuntimeError.asyncResultRequiresAsyncAPI
+            }
             return JSResult(from: result)
-        }.get()
+        }
     }
 
-    /// Call a global JavaScript function by name.
-    ///
-    /// Must be called after `load()`. Cannot be called after `run()` exits.
+    @discardableResult
+    public func evaluateAsync(js source: String) async throws -> JSResult {
+        guard isAcceptingPublicWork else {
+            throw BunRuntimeError.shutdownRequired
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let promise = AsyncResultBox<JSResult>(
+                onSuccess: { continuation.resume(returning: $0) },
+                onFailure: { continuation.resume(throwing: $0) }
+            )
+
+            let accepted = executor.execute {
+                guard self.isAcceptingPublicWork else {
+                    promise.fail(BunRuntimeError.shutdownRequired)
+                    return
+                }
+                self.executor.preconditionInExecutor()
+                guard self.lifecycle.isJavaScriptReady, let ctx = self.executor.context else {
+                    promise.fail(BunRuntimeError.contextNotReady)
+                    return
+                }
+
+                let token = self.handleRegistry.createAsyncWait(promise)
+                let result = ctx.evaluateScript(source)
+                self.scheduler.ensureDrainScheduled(reason: "evaluateAsync")
+
+                do {
+                    try self.checkException()
+                    self.awaitAsyncResult(result, token: token)
+                } catch {
+                    self.handleRegistry.failAsyncWait(token: token, error: error)
+                }
+            }
+            if !accepted {
+                continuation.resume(throwing: BunRuntimeError.shutdownRequired)
+            }
+        }
+    }
+
     @discardableResult
     public func call(_ function: String, arguments: [Any] = []) async throws -> JSResult {
-        try await eventLoop.submit {
-            self.eventLoop.preconditionInEventLoop()
-            guard self.state == .loaded, let ctx = self.jsContext else {
+        guard isAcceptingPublicWork else {
+            throw BunRuntimeError.shutdownRequired
+        }
+        return try await executor.submit {
+            guard self.isAcceptingPublicWork else {
+                throw BunRuntimeError.shutdownRequired
+            }
+            self.executor.preconditionInExecutor()
+            guard self.lifecycle.isJavaScriptReady else {
                 throw BunRuntimeError.contextNotReady
             }
-            guard let fn = ctx.objectForKeyedSubscript(function),
-                  !fn.isUndefined else {
+            guard let ctx = self.executor.context else {
+                throw BunRuntimeError.contextNotReady
+            }
+            guard let fn = ctx.objectForKeyedSubscript(function), !fn.isUndefined else {
                 throw BunRuntimeError.functionNotFound(function)
             }
+
             let result = fn.call(withArguments: arguments)
+            self.scheduler.ensureDrainScheduled(reason: "call")
             try self.checkException()
+            if self.isThenable(result) {
+                throw BunRuntimeError.asyncResultRequiresAsyncAPI
+            }
             return JSResult(from: result)
-        }.get()
+        }
     }
 
-    /// Run the bundle as a long-lived process.
-    ///
-    /// Returns when `process.exit(code)` is called or all pending work completes.
-    /// Requires a bundle to be specified at init.
-    public func run() async throws -> Int32 {
-        let promise = eventLoop.makePromise(of: Int32.self)
+    @discardableResult
+    public func callAsync(_ function: String, arguments: [Any] = []) async throws -> JSResult {
+        guard isAcceptingPublicWork else {
+            throw BunRuntimeError.shutdownRequired
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let promise = AsyncResultBox<JSResult>(
+                onSuccess: { continuation.resume(returning: $0) },
+                onFailure: { continuation.resume(throwing: $0) }
+            )
 
-        eventLoop.execute {
-            do {
-                precondition(self.state == .idle, "BunProcess already started. Use a new instance.")
-                guard self.bundle != nil else {
-                    throw BunRuntimeError.bundleNotFound(URL(fileURLWithPath: "<none>"))
+            let accepted = executor.execute {
+                guard self.isAcceptingPublicWork else {
+                    promise.fail(BunRuntimeError.shutdownRequired)
+                    return
                 }
-                self.exitPromise = promise
-                self.state = .running
-                try self.setupContext()
-                self.scheduleExitCheck(source: "initial")
-            } catch {
-                self.state = .exited
-                self.exitPromise = nil
-                promise.fail(error)
+                self.executor.preconditionInExecutor()
+                guard self.lifecycle.isJavaScriptReady, let ctx = self.executor.context else {
+                    promise.fail(BunRuntimeError.contextNotReady)
+                    return
+                }
+                guard let fn = ctx.objectForKeyedSubscript(function), !fn.isUndefined else {
+                    promise.fail(BunRuntimeError.functionNotFound(function))
+                    return
+                }
+
+                let token = self.handleRegistry.createAsyncWait(promise)
+                let result = fn.call(withArguments: arguments)
+                self.scheduler.ensureDrainScheduled(reason: "callAsync")
+
+                do {
+                    try self.checkException()
+                    self.awaitAsyncResult(result, token: token)
+                } catch {
+                    self.handleRegistry.failAsyncWait(token: token, error: error)
+                }
+            }
+            if !accepted {
+                continuation.resume(throwing: BunRuntimeError.shutdownRequired)
+            }
+        }
+    }
+
+    public func run() async throws -> Int32 {
+        guard isAcceptingPublicWork else {
+            throw BunRuntimeError.shutdownRequired
+        }
+        let runResult: Result<Int32, any Error>
+        do {
+            let exitCode = try await withCheckedThrowingContinuation { continuation in
+                let promise = AsyncResultBox<Int32>(
+                    onSuccess: { continuation.resume(returning: $0) },
+                    onFailure: { continuation.resume(throwing: $0) }
+                )
+
+                let accepted = executor.execute {
+                    do {
+                        guard self.isAcceptingPublicWork else {
+                            throw BunRuntimeError.shutdownRequired
+                        }
+                        precondition(self.lifecycle.currentState == .idle, "BunProcess already started. Use a new instance.")
+                        guard self.bundle != nil else {
+                            throw BunRuntimeError.bundleNotFound(URL(fileURLWithPath: "<none>"))
+                        }
+
+                        self.exitPromise = promise
+                        self.lifecycle.enterBooting(mode: .process)
+                        let setupBarrier = self.lifecycle.acquireBootBarrier(name: "context-setup")
+                        self.runStartupBarrier = self.lifecycle.acquireBootBarrier(name: "startup-sequence")
+                        try self.setupContext()
+                        self.lifecycle.releaseBootBarrier(setupBarrier)
+                        self.completeRunStartup()
+                    } catch {
+                        self.lifecycle.markExited()
+                        self.exitPromise = nil
+                        self.runStartupBarrier = nil
+                        promise.fail(error)
+                    }
+                }
+                if !accepted {
+                    continuation.resume(throwing: BunRuntimeError.shutdownRequired)
+                }
+            }
+            runResult = .success(exitCode)
+        } catch {
+            runResult = .failure(error)
+        }
+
+        do {
+            try await shutdown()
+        } catch {
+            switch runResult {
+            case .success:
+                throw error
+            case .failure(let runError):
+                throw runError
             }
         }
 
-        return try await promise.futureResult.get()
+        switch runResult {
+        case .success(let exitCode):
+            return exitCode
+        case .failure(let error):
+            throw error
+        }
     }
 
-    /// Send data to the process's stdin. Pass `nil` to signal EOF.
     public func sendInput(_ data: Data?) {
-        eventLoop.execute {
+        guard isAcceptingPublicWork else {
+            return
+        }
+        scheduler.enqueueHostCallback(source: "stdin") {
             self.deliverStdin(data)
         }
     }
 
-    /// Terminate the process.
     public func terminate(exitCode: Int32 = 0) {
-        eventLoop.execute {
-            self.doExit(code: exitCode)
+        guard isAcceptingPublicWork else {
+            return
         }
+        scheduler.enqueueHostCallback(source: "terminate") {
+            self.requestExit(code: exitCode)
+        }
+    }
+
+    /// Performs explicit runtime teardown.
+    ///
+    /// `shutdown()` is the required cleanup path for library mode. Process mode
+    /// callers normally rely on `run()` to invoke this before returning.
+    public func shutdown() async throws {
+        let shouldShutdown = shutdownState.withLock { state in
+            switch state {
+            case .shutDown, .shuttingDown:
+                return false
+            case .active:
+                state = .shuttingDown
+                return true
+            }
+        }
+        guard shouldShutdown else { return }
+
+        try await withCheckedThrowingContinuation { continuation in
+            let accepted = executor.execute {
+                self.performShutdown(reason: "shutdown()")
+                continuation.resume()
+            }
+            if !accepted {
+                continuation.resume()
+            }
+        }
+        try await nativeRuntime.shutdown()
+        try await executor.shutdown()
+        shutdownState.withLock { $0 = .shutDown }
     }
 
     // MARK: - Context Setup
 
     private func setupContext() throws {
-        eventLoop.preconditionInEventLoop()
+        executor.preconditionInExecutor()
 
         guard let ctx = JSContext() else {
             throw BunRuntimeError.contextCreationFailed
         }
-        self.jsContext = ctx
+        executor.installContext(ctx)
 
-        // Install Web API polyfills (ReadableStream, Event, etc.)
-        // Must come before ESMResolver since Node.js polyfills may depend on Web APIs.
-        outputContinuation.yield("[bun:setup] step 0: webAPIPolyfills")
-        installWebAPIPolyfills(in: ctx)
+        let runtimeEnvironment = mergedRuntimeEnvironment()
 
-        // Install Node.js polyfills
-        outputContinuation.yield("[bun:setup] step 1: installModules")
-        ESMResolver.installModules(in: ctx)
-        outputContinuation.yield("[bun:setup] step 2: consoleBridge")
+        installCryptoRandomBridge(in: ctx)
+        try installWebAPIPolyfills(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:webAPIPolyfills")
+
+        try ESMResolver.installModules(
+            in: ctx,
+            fileSystemAsyncBridge: fileSystemAsyncBridge,
+            environment: runtimeEnvironment,
+            cwd: cwd
+        )
+        try throwPendingJavaScriptException(source: "setup:installModules")
         installConsoleBridge(in: ctx)
-        outputContinuation.yield("[bun:setup] step 3: stdioBridges")
+        try throwPendingJavaScriptException(source: "setup:consoleBridge")
         installStdioBridges(in: ctx)
-        outputContinuation.yield("[bun:setup] step 4: timerBridge")
-        installTimerBridge(in: ctx)
-        outputContinuation.yield("[bun:setup] step 5: fetchBridge")
+        try throwPendingJavaScriptException(source: "setup:stdioBridges")
+        try installAsyncBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:asyncBridge")
+        try installTimerBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:timerBridge")
         installFetchBridge(in: ctx)
-        outputContinuation.yield("[bun:setup] step 6: processExitBridge")
-        installProcessExitBridge(in: ctx)
-        outputContinuation.yield("[bun:setup] step 7: stdinBridge")
+        try throwPendingJavaScriptException(source: "setup:fetchBridge")
+        try installProcessExitBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:processExitBridge")
         installStdinBridge(in: ctx)
-        outputContinuation.yield("[bun:setup] step 8: patchTimerRefs")
-        patchTimerModuleReferences(in: ctx)
-        outputContinuation.yield("[bun:setup] step 9: installRequire")
-        ESMResolver.installRequire(in: ctx)
-        outputContinuation.yield("[bun:setup] step 10: configuring argv/cwd/env")
+        try throwPendingJavaScriptException(source: "setup:stdinBridge")
+        try patchTimerModuleReferences(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:patchTimerRefs")
+        try ESMResolver.installRequire(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:installRequire")
 
-        // Configure process.argv
         if let bundle {
             let argvElements = (["node", bundle.path] + arguments)
                 .map { "'\(escapeJS($0))'" }
@@ -253,148 +488,321 @@ public final class BunProcess: Sendable {
             ctx.evaluateScript("process.argv = [\(argvElements)];")
         }
 
-        // Configure process.cwd
-        if let cwd {
-            ctx.evaluateScript("process.cwd = function() { return '\(escapeJS(cwd))'; };")
-        }
-
-        // Set environment variables
-        for (key, value) in environment {
-            ctx.evaluateScript("process.env['\(escapeJS(key))'] = '\(escapeJS(value))';")
-        }
-
-        // Install unhandled Promise rejection reporter
         let rejectionBlock: @convention(block) (String) -> Void = { [outputContinuation] message in
             outputContinuation.yield("[bun:rejection] \(message)")
         }
         ctx.setObject(rejectionBlock, forKeyedSubscript: "__reportRejection" as NSString)
-        // Unhandled rejection tracking is available via __reportRejection
-        // but Promise.prototype.then is not modified to avoid side effects.
 
-        // Evaluate bundle if present
         if let bundle {
-            guard FileManager.default.fileExists(atPath: bundle.path) else {
-                throw BunRuntimeError.bundleNotFound(bundle)
-            }
-            let rawSource = try String(contentsOf: bundle, encoding: .utf8)
-            var source = try ESMTransformer.transform(rawSource, bundleURL: bundle)
-
-            // Wrap the top-level async entry point to catch unhandled rejections.
-            // cli.js ends with `vsY();` — replace with `vsY().catch(...)` to surface errors.
-            if source.hasSuffix("vsY();") || source.contains("vsY();") {
-                source = source.replacingOccurrences(
-                    of: "vsY();",
-                    with: "vsY().catch(function(e){ __reportRejection((e instanceof Error ? e.message : String(e)) + ' | stack: ' + (e && e.stack ? e.stack : 'none')); });",
-                    options: .backwards,
-                    range: source.index(source.endIndex, offsetBy: -20)..<source.endIndex
-                )
-            }
-
-            ctx.evaluateScript(source, withSourceURL: bundle)
-            if let exception = ctx.exception {
-                let message = exception.toString() ?? ""
-                ctx.exception = nil
-                let isSentinel = isProcessExitSentinel(exception)
-                outputContinuation.yield("[bun:diag] exception after evaluateScript: \(String(message.prefix(300)))")
-                outputContinuation.yield("[bun:diag] isProcessExitSentinel: \(isSentinel)")
-                if !isSentinel {
-                    throw BunRuntimeError.javaScriptException(message)
-                }
-            } else {
-                outputContinuation.yield("[bun:diag] evaluateScript completed without exception")
-            }
-            outputContinuation.yield("[bun:diag] refCount after evaluateScript: \(refCount)")
+            try evaluateBundle(bundle, in: ctx)
         }
+    }
+
+    private func mergedRuntimeEnvironment() -> [String: String] {
+        var merged = ProcessInfo.processInfo.environment
+        for (key, value) in environment {
+            merged[key] = value
+        }
+        return merged
+    }
+
+    private var isAcceptingPublicWork: Bool {
+        shutdownState.withLock {
+            if case .active = $0 {
+                return true
+            }
+            return false
+        }
+    }
+
+    private func evaluateBundle(_ bundle: URL, in ctx: JSContext) throws {
+        guard FileManager.default.fileExists(atPath: bundle.path) else {
+            throw BunRuntimeError.bundleNotFound(bundle)
+        }
+
+        let rawSource = try String(contentsOf: bundle, encoding: .utf8)
+        let source = try ESMTransformer.transform(rawSource, bundleURL: bundle)
+        let result = ctx.evaluateScript(source, withSourceURL: bundle)
+        scheduler.ensureDrainScheduled(reason: "bundle")
+        if let exception = ctx.exception {
+            let message = exception.toString() ?? ""
+            ctx.exception = nil
+            let isSentinel = isProcessExitSentinel(exception)
+            if !isSentinel {
+                throw BunRuntimeError.javaScriptException(message)
+            }
+        }
+
+        try observeStartupPromiseIfPresent(in: ctx, candidate: result)
+    }
+
+    private func observeStartupPromiseIfPresent(in ctx: JSContext, candidate: JSValue? = nil) throws {
+        executor.preconditionInExecutor()
+        guard lifecycle.currentMode == .process else {
+            return
+        }
+        guard startupPromiseVisibleHandle == nil else {
+            return
+        }
+        let startupPromise = candidate ?? ctx.objectForKeyedSubscript("__swiftBunStartupPromise")
+        guard let startupPromise else {
+            return
+        }
+        guard isThenable(startupPromise) else {
+            return
+        }
+
+        startupPromiseVisibleHandle = lifecycle.acquireVisibleHandle(kind: "startupPromise")
+        try JavaScriptResource.evaluate(.runtime(.startupPromiseObserver), in: ctx)
+        reportPendingJavaScriptException(source: "observeStartupPromiseIfPresent")
     }
 
     // MARK: - Lifecycle
 
-    private func ref(_ source: String = "") {
-        eventLoop.preconditionInEventLoop()
-        refCount += 1
-        outputContinuation.yield("[bun:lifecycle] ref(\(source)) → refCount=\(refCount)")
-    }
+    private func evaluateExitCondition() {
+        executor.preconditionInExecutor()
 
-    private func unref(_ source: String = "") {
-        eventLoop.preconditionInEventLoop()
-        refCount -= 1
-        outputContinuation.yield("[bun:lifecycle] unref(\(source)) → refCount=\(refCount)")
-        checkExitCondition()
-    }
+        let executorSnapshot = executor.runtimeSnapshot()
+        lifecycle.updateRuntimeSnapshot(
+            hostQueueCount: scheduler.queuedHostCallbackCount,
+            nextTickQueueCount: scheduler.queuedNextTickCount,
+            jsTurnActive: scheduler.isTurnActive,
+            executorQueueCount: executorSnapshot.queuedJobCount,
+            executorJobActive: executorSnapshot.isJobActive
+        )
+        maybeCompleteRunStartup()
 
-    private func checkExitCondition() {
-        eventLoop.preconditionInEventLoop()
-        guard state == .running, refCount <= 0 else { return }
-        outputContinuation.yield("[bun:lifecycle] checkExitCondition → exiting (refCount=\(refCount))")
-        resolveExit(code: 0)
-    }
-
-    private func scheduleExitCheck(source: String) {
-        eventLoop.preconditionInEventLoop()
-        eventLoop.execute {
-            self.eventLoop.preconditionInEventLoop()
-            self.outputContinuation.yield("[bun:lifecycle] deferred checkExitCondition (\(source))")
-            self.checkExitCondition()
+        switch lifecycle.exitDisposition() {
+        case .notReady:
+            return
+        case .ready(let code):
+            resolveExit(code: code)
         }
     }
 
-    private func doExit(code: Int32) {
-        eventLoop.preconditionInEventLoop()
-        outputContinuation.yield("[bun:lifecycle] doExit(code=\(code)), activeTimers=\(activeTimers.count)")
-        for (_, timerState) in activeTimers {
-            timerState.scheduled.cancel()
+    private func schedulePostTurnCheckpoint() {
+        executor.preconditionInExecutor()
+        guard let ctx = executor.context,
+              let checkpoint = ctx.objectForKeyedSubscript("__swiftBunSchedulePostTurnCheckpoint"),
+              !checkpoint.isUndefined else {
+            evaluateExitCondition()
+            return
         }
-        activeTimers.removeAll()
-        refCount = 0
+
+        _ = checkpoint.call(withArguments: [])
+        reportPendingJavaScriptException(source: "schedulePostTurnCheckpoint")
+    }
+
+    private func completeRunStartup() {
+        executor.preconditionInExecutor()
+        evaluateExitCondition()
+        scheduler.forceDrain()
+    }
+
+    private func maybeCompleteRunStartup() {
+        executor.preconditionInExecutor()
+        guard let startupBarrier = runStartupBarrier else {
+            return
+        }
+
+        guard lifecycle.canAdvanceProcessStartup() else {
+            return
+        }
+
+        lifecycle.releaseBootBarrier(startupBarrier)
+        runStartupBarrier = nil
+        lifecycle.enterRunningIfBootComplete()
+    }
+
+    private func requestExit(code: Int32) {
+        executor.preconditionInExecutor()
+        lifecycle.requestExit(code: code)
+        cleanupActiveHandles(reason: "exit")
         resolveExit(code: code)
     }
 
     private func resolveExit(code: Int32) {
-        eventLoop.preconditionInEventLoop()
-        guard let promise = exitPromise else { return }
-        outputContinuation.yield("[bun:lifecycle] resolveExit(code=\(code))")
-        state = .exited
+        executor.preconditionInExecutor()
+        scheduler.deactivate()
+        nativeRuntime.deactivate()
+        guard let promise = exitPromise else {
+            lifecycle.markExited()
+            finishStreams()
+            return
+        }
+
+        lifecycle.markExited()
         exitPromise = nil
-        stdoutContinuation.finish()
-        outputContinuation.finish()
+        finishStreams()
         promise.succeed(code)
     }
 
-    // MARK: - Web API Polyfills
+    private func performShutdown(reason: String) {
+        executor.preconditionInExecutor()
+        if lifecycle.currentState != .exited {
+            lifecycle.beginShutdown()
+        }
+        runStartupBarrier = nil
+        scheduler.deactivate()
+        nativeRuntime.deactivate()
 
-    private func installWebAPIPolyfills(in ctx: JSContext) {
-        guard let url = Bundle.module.url(
-            forResource: "polyfills.bundle",
-            withExtension: "js"
-        ) else {
-            outputContinuation.yield("[bun:setup] polyfills.bundle.js not found")
-            return
+        cleanupActiveHandles(reason: reason)
+        handleRegistry.failAllAsyncWaits(BunRuntimeError.shutdownRequired)
+
+        if executor.context != nil {
+            deliverStdin(nil)
         }
-        do {
-            let source = try String(contentsOf: url, encoding: .utf8)
-            ctx.evaluateScript(source)
-            if let ex = ctx.exception {
-                outputContinuation.yield("[bun:setup] polyfills exception: \(ex)")
-                ctx.exception = nil
-            }
-        } catch {
-            outputContinuation.yield("[bun:setup] polyfills load error: \(error)")
+        executor.clearContext()
+        if let promise = exitPromise {
+            exitPromise = nil
+            promise.fail(BunRuntimeError.shutdownRequired)
         }
+        finishStreams()
+        lifecycle.markExited()
     }
+
+    private func cleanupActiveHandles(reason: String) {
+        executor.preconditionInExecutor()
+
+        let timers = handleRegistry.drainTimers()
+        for timer in timers {
+            timer.scheduled.cancel()
+            if let token = timer.visibleHandleToken {
+                lifecycle.releaseVisibleHandle(token)
+            }
+        }
+
+        nativeRuntime.cancelAllFetches()
+        let fetches = handleRegistry.drainFetches()
+        for fetch in fetches {
+            if let token = fetch.visibleHandleToken {
+                lifecycle.releaseVisibleHandle(token)
+            }
+        }
+
+        if let stdinToken = handleRegistry.currentStdinVisibleHandleToken {
+            lifecycle.releaseVisibleHandle(stdinToken)
+            handleRegistry.setStdinVisibleHandleToken(nil)
+        }
+        if let startupToken = startupPromiseVisibleHandle {
+            lifecycle.releaseVisibleHandle(startupToken)
+            startupPromiseVisibleHandle = nil
+        }
+        _ = handleRegistry.setStdinRefed(false)
+    }
+
+    private func finishStreams() {
+        guard !streamsFinished else { return }
+        streamsFinished = true
+        stdoutContinuation.finish()
+        outputContinuation.finish()
+    }
+
+    // MARK: - Helpers
 
     private func isProcessExitSentinel(_ value: JSValue) -> Bool {
         guard let flag = value.objectForKeyedSubscript("__processExit") else { return false }
         return flag.toBool()
     }
 
+    private func isThenable(_ value: JSValue?) -> Bool {
+        guard let value, !value.isUndefined, !value.isNull else { return false }
+        guard value.isObject || value.isArray else { return false }
+        guard let then = value.objectForKeyedSubscript("then") else { return false }
+        return !then.isUndefined && !then.isNull && then.isObject
+    }
+
+    private func awaitAsyncResult(_ value: JSValue?, token: Int32) {
+        executor.preconditionInExecutor()
+
+        guard let ctx = executor.context else {
+            handleRegistry.failAsyncWait(token: token, error: BunRuntimeError.contextNotReady)
+            return
+        }
+
+        if value == nil || value?.isUndefined == true {
+            handleRegistry.resolveAsyncWait(token: token, result: .undefined)
+            return
+        }
+
+        if !isThenable(value) {
+            handleRegistry.resolveAsyncWait(token: token, result: JSResult(from: value))
+            return
+        }
+
+        guard let awaiter = ctx.objectForKeyedSubscript("__swiftBunAwaitResult"), !awaiter.isUndefined else {
+            handleRegistry.failAsyncWait(token: token, error: BunRuntimeError.contextNotReady)
+            return
+        }
+
+        _ = awaiter.call(withArguments: [value as Any, token])
+        reportPendingJavaScriptException(source: "awaitAsyncResult")
+    }
+
     private func checkException() throws {
-        eventLoop.preconditionInEventLoop()
-        guard let ctx = jsContext, let exception = ctx.exception else { return }
+        executor.preconditionInExecutor()
+        guard let ctx = executor.context, let exception = ctx.exception else { return }
         ctx.exception = nil
         let message = exception.toString() ?? "Unknown JS exception"
         if !isProcessExitSentinel(exception) {
             throw BunRuntimeError.javaScriptException(message)
         }
+    }
+
+    private func reportPendingJavaScriptException(source: String) {
+        executor.preconditionInExecutor()
+        guard let ctx = executor.context, let exception = ctx.exception else { return }
+        ctx.exception = nil
+        guard !isProcessExitSentinel(exception) else { return }
+        let message = exception.toString() ?? "Unknown JS exception"
+        outputContinuation.yield("[bun:exception] \(source): \(message)")
+    }
+
+    private func throwPendingJavaScriptException(source: String) throws {
+        executor.preconditionInExecutor()
+        guard let ctx = executor.context, let exception = ctx.exception else { return }
+        ctx.exception = nil
+        guard !isProcessExitSentinel(exception) else { return }
+        let message = exception.toString() ?? "Unknown JS exception"
+        outputContinuation.yield("[bun:exception] \(source): \(message)")
+        throw BunRuntimeError.javaScriptException(message)
+    }
+
+    private func extractArgs(_ argsArray: JSValue) -> [Any] {
+        guard !argsArray.isUndefined, argsArray.isArray else { return [] }
+        let length = argsArray.objectForKeyedSubscript("length")?.toInt32() ?? 0
+        var args: [Any] = []
+        for index in 0..<length {
+            if let arg = argsArray.objectAtIndexedSubscript(Int(index)) {
+                args.append(arg)
+            }
+        }
+        return args
+    }
+
+    private func escapeJS(_ string: String) -> String {
+        string
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+    }
+
+    // MARK: - Crypto Random Bridge (must be installed before polyfills)
+
+    private func installCryptoRandomBridge(in ctx: JSContext) {
+        let randomBytesBlock: @convention(block) (Int) -> [UInt8] = { size in
+            var bytes = [UInt8](repeating: 0, count: size)
+            _ = SecRandomCopyBytes(kSecRandomDefault, size, &bytes)
+            return bytes
+        }
+        ctx.setObject(randomBytesBlock, forKeyedSubscript: "__cryptoRandomBytes" as NSString)
+    }
+
+    // MARK: - Web API Polyfills
+
+    private func installWebAPIPolyfills(in ctx: JSContext) throws {
+        try JavaScriptResource.evaluate(.bundle(.polyfills), in: ctx)
     }
 
     // MARK: - Console Bridge
@@ -409,9 +817,6 @@ public final class BunProcess: Sendable {
     // MARK: - stdout/stderr Bridge
 
     private func installStdioBridges(in ctx: JSContext) {
-        // Register native write bridges.
-        // polyfills.bundle.js has already created process.stdout/stderr as
-        // readable-stream Writable instances that call these bridges.
         let stdoutWrite: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
             stdoutContinuation.yield(data)
             return true
@@ -425,490 +830,301 @@ public final class BunProcess: Sendable {
         ctx.setObject(stderrWrite, forKeyedSubscript: "__nativeStderrWrite" as NSString)
     }
 
+    // MARK: - Async Bridge
+
+    private func installAsyncBridge(in ctx: JSContext) throws {
+        let resolveBlock: @convention(block) (Int32, JSValue) -> Void = { [self] token, value in
+            self.handleRegistry.resolveAsyncWait(token: token, result: JSResult(from: value))
+        }
+        ctx.setObject(resolveBlock, forKeyedSubscript: "__swiftResolveAsyncResult" as NSString)
+
+        let rejectBlock: @convention(block) (Int32, JSValue) -> Void = { [self] token, value in
+            let message = value.objectForKeyedSubscript("message")?.toString() ?? value.toString() ?? "Unknown JS error"
+            self.handleRegistry.failAsyncWait(
+                token: token,
+                error: BunRuntimeError.javaScriptException(message)
+            )
+        }
+        ctx.setObject(rejectBlock, forKeyedSubscript: "__swiftRejectAsyncResult" as NSString)
+
+        let startupSettledBlock: @convention(block) () -> Void = { [self] in
+            self.executor.preconditionInExecutor()
+            if let token = self.startupPromiseVisibleHandle {
+                self.lifecycle.releaseVisibleHandle(token)
+                self.startupPromiseVisibleHandle = nil
+            }
+            self.evaluateExitCondition()
+        }
+        ctx.setObject(startupSettledBlock, forKeyedSubscript: "__swiftStartupPromiseSettled" as NSString)
+
+        let postTurnCheckpointBlock: @convention(block) () -> Void = { [self] in
+            self.executor.preconditionInExecutor()
+            self.evaluateExitCondition()
+        }
+        ctx.setObject(postTurnCheckpointBlock, forKeyedSubscript: "__swiftPostTurnCheckpoint" as NSString)
+
+        try JavaScriptResource.evaluate(.runtime(.asyncBridge), in: ctx)
+    }
+
     // MARK: - Timer Bridge
 
-    private func installTimerBridge(in ctx: JSContext) {
-        eventLoop.preconditionInEventLoop()
+    private func installTimerBridge(in ctx: JSContext) throws {
+        executor.preconditionInExecutor()
 
         let nextTickBlock: @convention(block) (JSValue, JSValue) -> Void = { [self] callback, argsArray in
-            self.ref("nextTick")
-            self.eventLoop.execute {
-                self.eventLoop.preconditionInEventLoop()
-                callback.call(withArguments: self.extractArgs(argsArray))
+            let args = self.extractArgs(argsArray)
+            self.scheduler.enqueueNextTick {
+                callback.call(withArguments: args)
                 self.reportPendingJavaScriptException(source: "nextTick")
-                self.unref("nextTick")
             }
         }
         ctx.setObject(nextTickBlock, forKeyedSubscript: "__nativeNextTick" as NSString)
 
+        let drainNextTickBlock: @convention(block) () -> Void = { [self] in
+            self.scheduler.drainNextTicksNow(reason: "microtask", maxItems: 64)
+        }
+        ctx.setObject(drainNextTickBlock, forKeyedSubscript: "__drainNextTickQueue" as NSString)
+
         let setTimeoutBlock: @convention(block) (JSValue, JSValue, JSValue) -> Int32 = { [self] callback, delay, argsArray in
             let delayMs = delay.isUndefined ? 0 : max(0, Int64(delay.toInt32()))
-            let timerID = self.nextTimerID
-            self.nextTimerID += 1
-            self.ref("setTimeout")
+            let args = self.extractArgs(argsArray)
+            let timerID = self.handleRegistry.makeIdentifier()
+            let visibleHandle = self.lifecycle.acquireVisibleHandle(kind: "setTimeout")
 
-            let scheduled = self.eventLoop.scheduleTask(in: .milliseconds(delayMs)) {
-                self.eventLoop.preconditionInEventLoop()
-                let timerState = self.activeTimers.removeValue(forKey: timerID)
-                callback.call(withArguments: self.extractArgs(argsArray))
-                self.reportPendingJavaScriptException(source: "setTimeout")
-                if timerState?.isRefed == true {
-                    self.unref("setTimeout:fired")
-                } else {
-                    self.checkExitCondition()
-                }
+            let scheduled = self.nativeRuntime.scheduleTimer(after: delayMs, source: "setTimeout") {
+                self.handleTimerFired(id: timerID)
             }
-            self.activeTimers[timerID] = TimerState(scheduled: scheduled, isRefed: true)
+            let handle = RuntimeHandleRegistry.TimerHandle(
+                scheduled: scheduled,
+                callback: callback,
+                args: args,
+                repeating: false,
+                intervalMs: delayMs,
+                isRefed: true,
+                visibleHandleToken: visibleHandle
+            )
+            _ = self.handleRegistry.insertTimer(handle, id: timerID)
             return timerID
         }
         ctx.setObject(setTimeoutBlock, forKeyedSubscript: "__nativeSetTimeout" as NSString)
 
         let clearTimeoutBlock: @convention(block) (Int32) -> Void = { [self] timerID in
-            if let timerState = self.activeTimers.removeValue(forKey: timerID) {
-                timerState.scheduled.cancel()
-                if timerState.isRefed {
-                    self.unref("clearTimeout")
-                } else {
-                    self.checkExitCondition()
+            if let timer = self.handleRegistry.removeTimer(id: timerID) {
+                timer.scheduled.cancel()
+                if let visibleHandle = timer.visibleHandleToken {
+                    self.lifecycle.releaseVisibleHandle(visibleHandle)
                 }
+                self.evaluateExitCondition()
             }
         }
         ctx.setObject(clearTimeoutBlock, forKeyedSubscript: "__nativeClearTimeout" as NSString)
 
         let setIntervalBlock: @convention(block) (JSValue, JSValue, JSValue) -> Int32 = { [self] callback, delay, argsArray in
             let delayMs = max(1, Int64(delay.toInt32()))
-            let timerID = self.nextTimerID
-            self.nextTimerID += 1
-            self.ref("setInterval")
-            self.scheduleRepeating(timerID: timerID, callback: callback, intervalMs: delayMs, argsArray: argsArray)
+            let args = self.extractArgs(argsArray)
+            let timerID = self.handleRegistry.makeIdentifier()
+            let visibleHandle = self.lifecycle.acquireVisibleHandle(kind: "setInterval")
+
+            let scheduled = self.nativeRuntime.scheduleTimer(after: delayMs, source: "setInterval") {
+                self.handleTimerFired(id: timerID)
+            }
+            let handle = RuntimeHandleRegistry.TimerHandle(
+                scheduled: scheduled,
+                callback: callback,
+                args: args,
+                repeating: true,
+                intervalMs: delayMs,
+                isRefed: true,
+                visibleHandleToken: visibleHandle
+            )
+            _ = self.handleRegistry.insertTimer(handle, id: timerID)
             return timerID
         }
         ctx.setObject(setIntervalBlock, forKeyedSubscript: "__nativeSetInterval" as NSString)
 
         let timerRefBlock: @convention(block) (Int32) -> Void = { [self] timerID in
-            guard var timerState = self.activeTimers[timerID], !timerState.isRefed else { return }
-            timerState.isRefed = true
-            self.activeTimers[timerID] = timerState
-            self.ref("timer.ref")
+            guard let timer = self.handleRegistry.timer(id: timerID), !timer.isRefed else { return }
+            self.handleRegistry.updateTimerRef(id: timerID, isRefed: true)
+            let visibleHandle = self.lifecycle.acquireVisibleHandle(kind: timer.repeating ? "setInterval" : "setTimeout")
+            self.handleRegistry.updateTimerVisibleHandleToken(id: timerID, token: visibleHandle)
         }
         ctx.setObject(timerRefBlock, forKeyedSubscript: "__nativeTimerRef" as NSString)
 
         let timerUnrefBlock: @convention(block) (Int32) -> Void = { [self] timerID in
-            guard var timerState = self.activeTimers[timerID], timerState.isRefed else { return }
-            timerState.isRefed = false
-            self.activeTimers[timerID] = timerState
-            self.unref("timer.unref")
+            guard let timer = self.handleRegistry.timer(id: timerID), timer.isRefed else { return }
+            self.handleRegistry.updateTimerRef(id: timerID, isRefed: false)
+            if let visibleHandle = timer.visibleHandleToken {
+                self.lifecycle.releaseVisibleHandle(visibleHandle)
+                self.handleRegistry.updateTimerVisibleHandleToken(id: timerID, token: nil)
+            }
+            self.evaluateExitCondition()
         }
         ctx.setObject(timerUnrefBlock, forKeyedSubscript: "__nativeTimerUnref" as NSString)
 
         let timerHasRefBlock: @convention(block) (Int32) -> Bool = { [self] timerID in
-            self.activeTimers[timerID]?.isRefed ?? false
+            self.handleRegistry.timer(id: timerID)?.isRefed ?? false
         }
         ctx.setObject(timerHasRefBlock, forKeyedSubscript: "__nativeTimerHasRef" as NSString)
 
-        ctx.evaluateScript("""
-        (function() {
-            function normalizeTimerId(handle) {
-                if (handle && typeof handle === 'object' && typeof handle._id === 'number') {
-                    return handle._id;
-                }
-                return handle;
-            }
-
-            function makeTimerHandle(id, clearFn) {
-                var handle = {
-                    _id: id,
-                    ref: function() { __nativeTimerRef(id); return handle; },
-                    unref: function() { __nativeTimerUnref(id); return handle; },
-                    hasRef: function() { return __nativeTimerHasRef(id); },
-                    refresh: function() { return handle; },
-                    close: function() { clearFn(id); return handle; }
-                };
-                if (typeof Symbol !== 'undefined' && Symbol.toPrimitive) {
-                    handle[Symbol.toPrimitive] = function() { return id; };
-                }
-                return handle;
-            }
-
-            process.nextTick = function(fn) {
-                var args = [];
-                for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
-                __nativeNextTick(fn, args);
-            };
-            globalThis.queueMicrotask = function(fn) {
-                __nativeNextTick(fn, []);
-            };
-            globalThis.setTimeout = function(fn, delay) {
-                var args = [];
-                for (var i = 2; i < arguments.length; i++) args.push(arguments[i]);
-                return makeTimerHandle(__nativeSetTimeout(fn, delay || 0, args), __nativeClearTimeout);
-            };
-            globalThis.clearTimeout = function(id) { __nativeClearTimeout(normalizeTimerId(id)); };
-            globalThis.setInterval = function(fn, delay) {
-                var args = [];
-                for (var i = 2; i < arguments.length; i++) args.push(arguments[i]);
-                return makeTimerHandle(__nativeSetInterval(fn, delay || 0, args), __nativeClearTimeout);
-            };
-            globalThis.clearInterval = function(id) { __nativeClearTimeout(normalizeTimerId(id)); };
-            globalThis.setImmediate = function(fn) {
-                var args = [];
-                for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
-                return makeTimerHandle(__nativeSetTimeout(fn, 0, args), __nativeClearTimeout);
-            };
-            globalThis.clearImmediate = function(id) { __nativeClearTimeout(normalizeTimerId(id)); };
-        })();
-        """)
+        try JavaScriptResource.evaluate(.runtime(.timerBridge), in: ctx)
     }
 
-    private func scheduleRepeating(timerID: Int32, callback: JSValue, intervalMs: Int64, argsArray: JSValue) {
-        let scheduled = eventLoop.scheduleTask(in: .milliseconds(intervalMs)) { [self] in
-            self.eventLoop.preconditionInEventLoop()
-            callback.call(withArguments: self.extractArgs(argsArray))
-            self.reportPendingJavaScriptException(source: "setInterval")
-            if self.activeTimers[timerID] != nil {
-                self.scheduleRepeating(timerID: timerID, callback: callback, intervalMs: intervalMs, argsArray: argsArray)
-            } else {
-                self.checkExitCondition()
-            }
+    private func handleTimerFired(id: Int32) {
+        executor.preconditionInExecutor()
+        guard let timer = handleRegistry.timer(id: id) else { return }
+
+        if !timer.repeating {
+            _ = handleRegistry.removeTimer(id: id)
         }
-        let isRefed = activeTimers[timerID]?.isRefed ?? true
-        activeTimers[timerID] = TimerState(scheduled: scheduled, isRefed: isRefed)
-    }
 
-    private func patchTimerModuleReferences(in ctx: JSContext) {
-        ctx.evaluateScript("""
-        (function() {
-            if (!globalThis.__nodeModules || !__nodeModules.timers) return;
-            var t = __nodeModules.timers;
-            t.setTimeout = globalThis.setTimeout;
-            t.clearTimeout = globalThis.clearTimeout;
-            t.setInterval = globalThis.setInterval;
-            t.clearInterval = globalThis.clearInterval;
-            t.setImmediate = globalThis.setImmediate;
-            t.clearImmediate = globalThis.clearImmediate;
-            t.promises.setTimeout = function(ms, value) {
-                return new Promise(function(resolve) {
-                    globalThis.setTimeout(function() { resolve(value); }, ms);
-                });
-            };
-            t.promises.setImmediate = function(value) {
-                return new Promise(function(resolve) {
-                    globalThis.setTimeout(function() { resolve(value); }, 0);
-                });
-            };
-        })();
-        """)
-    }
+        timer.callback.call(withArguments: timer.args)
+        reportPendingJavaScriptException(source: timer.repeating ? "setInterval" : "setTimeout")
 
-    private func extractArgs(_ argsArray: JSValue) -> [Any] {
-        guard !argsArray.isUndefined, argsArray.isArray else { return [] }
-        let length = argsArray.objectForKeyedSubscript("length")!.toInt32()
-        var args: [Any] = []
-        for i in 0..<length {
-            if let arg = argsArray.objectAtIndexedSubscript(Int(i)) {
-                args.append(arg)
+        if timer.repeating {
+            guard handleRegistry.timer(id: id) != nil else { return }
+            let scheduled = nativeRuntime.scheduleTimer(after: timer.intervalMs, source: "setInterval") {
+                self.handleTimerFired(id: id)
             }
+            handleRegistry.updateTimerScheduled(id: id, scheduled: scheduled)
+            return
         }
-        return args
+
+        if let visibleHandle = timer.visibleHandleToken {
+            lifecycle.releaseVisibleHandle(visibleHandle)
+        }
+        evaluateExitCondition()
+    }
+
+    private func patchTimerModuleReferences(in ctx: JSContext) throws {
+        try JavaScriptResource.evaluate(.runtime(.patchTimerModuleReferences), in: ctx)
     }
 
     // MARK: - Fetch Bridge
 
     private func installFetchBridge(in ctx: JSContext) {
-        eventLoop.preconditionInEventLoop()
+        executor.preconditionInExecutor()
 
         let fetchBlock: @convention(block) (String, String, JSValue, JSValue) -> Void = { [self] urlString, optionsJSON, resolveCallback, rejectCallback in
-            self.ref("fetch")
             guard let url = URL(string: urlString) else {
                 rejectCallback.call(withArguments: ["Invalid URL: \(urlString)"])
-                self.unref("fetch:invalid-url")
                 return
             }
+
             var request = URLRequest(url: url)
-            if let data = optionsJSON.data(using: .utf8),
-               let options = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                request.httpMethod = (options["method"] as? String)?.uppercased() ?? "GET"
-                if let headers = options["headers"] as? [String: Any] {
-                    for (key, value) in headers {
-                        request.setValue("\(value)", forHTTPHeaderField: key)
+            if let data = optionsJSON.data(using: .utf8) {
+                do {
+                    let jsonObject = try JSONSerialization.jsonObject(with: data)
+                    if let options = jsonObject as? [String: Any] {
+                        request.httpMethod = (options["method"] as? String)?.uppercased() ?? "GET"
+                        if let headers = options["headers"] as? [String: Any] {
+                            for (key, value) in headers {
+                                request.setValue("\(value)", forHTTPHeaderField: key)
+                            }
+                        }
+                        if let body = options["body"] as? String {
+                            request.httpBody = body.data(using: .utf8)
+                        }
+                        if let signal = options["signal"] as? [String: Any],
+                           let timeout = signal["timeout"] as? Double {
+                            request.timeoutInterval = timeout / 1000.0
+                        }
                     }
-                }
-                if let body = options["body"] as? String {
-                    request.httpBody = body.data(using: .utf8)
-                }
-                if let signal = options["signal"] as? [String: Any],
-                   let timeout = signal["timeout"] as? Double {
-                    request.timeoutInterval = timeout / 1000.0
-                }
+                } catch {}
             }
-            let task = URLSession.shared.dataTask(with: request) { [self] data, response, error in
-                self.eventLoop.execute {
-                    defer { self.unref("fetch:complete") }
-                    if let error {
-                        rejectCallback.call(withArguments: [error.localizedDescription])
-                        return
-                    }
-                    guard let httpResponse = response as? HTTPURLResponse else {
-                        rejectCallback.call(withArguments: ["Invalid response"])
-                        return
-                    }
-                    let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                    var headerDict: [String: String] = [:]
-                    for (key, value) in httpResponse.allHeaderFields {
-                        headerDict["\(key)".lowercased()] = "\(value)"
-                    }
-                    let headerJSON: String
-                    do {
-                        let headerData = try JSONSerialization.data(withJSONObject: headerDict)
-                        headerJSON = String(data: headerData, encoding: .utf8) ?? "{}"
-                    } catch {
-                        headerJSON = "{}"
-                    }
-                    resolveCallback.call(withArguments: [
-                        httpResponse.statusCode,
-                        httpResponse.url?.absoluteString ?? urlString,
-                        headerJSON,
-                        body,
-                    ])
-                }
+
+            let operationID = self.handleRegistry.makeIdentifier()
+            _ = self.handleRegistry.insertFetch(
+                resolve: resolveCallback,
+                reject: rejectCallback,
+                isRefed: true,
+                visibleHandleToken: self.lifecycle.acquireVisibleHandle(kind: "fetch"),
+                id: operationID
+            )
+
+            self.nativeRuntime.startFetch(
+                operationID: operationID,
+                request: request,
+                urlString: urlString
+            ) { completion in
+                self.applyFetchCompletion(completion)
             }
-            task.resume()
         }
         ctx.setObject(fetchBlock, forKeyedSubscript: "__nativeFetch" as NSString)
     }
 
+    private func applyFetchCompletion(_ completion: NativeRuntime.FetchCompletion) {
+        executor.preconditionInExecutor()
+
+        switch completion {
+        case .failure(let operationID, let message):
+            guard let fetch = handleRegistry.removeFetch(id: operationID) else { return }
+            fetch.reject.call(withArguments: [message])
+            if let visibleHandle = fetch.visibleHandleToken {
+                lifecycle.releaseVisibleHandle(visibleHandle)
+            }
+
+        case .success(let success):
+            guard let fetch = handleRegistry.removeFetch(id: success.operationID) else { return }
+            fetch.resolve.call(withArguments: [
+                success.statusCode,
+                success.responseURL,
+                success.headerJSON,
+                success.body,
+            ])
+            if let visibleHandle = fetch.visibleHandleToken {
+                lifecycle.releaseVisibleHandle(visibleHandle)
+            }
+        }
+
+        reportPendingJavaScriptException(source: "fetchCompletion")
+        evaluateExitCondition()
+    }
+
     // MARK: - process.exit Bridge
 
-    private func installProcessExitBridge(in ctx: JSContext) {
+    private func installProcessExitBridge(in ctx: JSContext) throws {
         let exitBlock: @convention(block) (JSValue) -> Void = { [self] codeValue in
             let code: Int32 = codeValue.isUndefined ? 0 : codeValue.toInt32()
-            self.doExit(code: code)
+            self.requestExit(code: code)
         }
         ctx.setObject(exitBlock, forKeyedSubscript: "__processExit" as NSString)
 
-        ctx.evaluateScript("""
-        globalThis.__PROCESS_EXIT_SENTINEL__ = Object.freeze({ __processExit: true });
-        process.exit = function(code) {
-            __processExit(code === undefined ? 0 : (code | 0));
-            throw globalThis.__PROCESS_EXIT_SENTINEL__;
-        };
-        """)
+        try JavaScriptResource.evaluate(.runtime(.processExit), in: ctx)
     }
 
     // MARK: - stdin Bridge
 
     private func installStdinBridge(in ctx: JSContext) {
-        // polyfills.bundle.js created process.stdin as a readable-stream Readable
-        // with __deliverStdinData for pushing data. We add ref/unref tracking and
-        // setRawMode here.
-        let stdinRefBlock: @convention(block) () -> Void = { [self] in self.ref("stdin") }
-        let stdinUnrefBlock: @convention(block) () -> Void = { [self] in self.unref("stdin") }
+        let stdinRefBlock: @convention(block) () -> Void = { [self] in
+            if self.handleRegistry.setStdinRefed(true) {
+                let visibleHandle = self.lifecycle.acquireVisibleHandle(kind: "stdin")
+                self.handleRegistry.setStdinVisibleHandleToken(visibleHandle)
+            }
+        }
+        let stdinUnrefBlock: @convention(block) () -> Void = { [self] in
+            if self.handleRegistry.setStdinRefed(false) {
+                if let visibleHandle = self.handleRegistry.currentStdinVisibleHandleToken {
+                    self.lifecycle.releaseVisibleHandle(visibleHandle)
+                    self.handleRegistry.setStdinVisibleHandleToken(nil)
+                }
+                self.evaluateExitCondition()
+            }
+        }
         ctx.setObject(stdinRefBlock, forKeyedSubscript: "__stdinRef" as NSString)
         ctx.setObject(stdinUnrefBlock, forKeyedSubscript: "__stdinUnref" as NSString)
-
-        ctx.evaluateScript("""
-        (function() {
-            var stdin = process.stdin;
-            var _nativeRefed = false;
-            var _manualRefed = false;
-            var _listenerRefed = false;
-            var _iteratorRefs = 0;
-
-            function syncRefState() {
-                var shouldRef = _manualRefed || _listenerRefed || _iteratorRefs > 0;
-                if (shouldRef && !_nativeRefed) {
-                    _nativeRefed = true;
-                    __stdinRef();
-                } else if (!shouldRef && _nativeRefed) {
-                    _nativeRefed = false;
-                    __stdinUnref();
-                }
-            }
-
-            function refreshListenerRef() {
-                _listenerRefed = stdin.listenerCount('data') > 0 || stdin.listenerCount('readable') > 0;
-                syncRefState();
-            }
-
-            function releaseIteratorRef() {
-                if (_iteratorRefs > 0) {
-                    _iteratorRefs -= 1;
-                    syncRefState();
-                }
-            }
-
-            stdin.ref = function() {
-                _manualRefed = true;
-                syncRefState();
-                return stdin;
-            };
-            stdin.unref = function() {
-                _manualRefed = false;
-                syncRefState();
-                return stdin;
-            };
-            stdin.setRawMode = function() { return stdin; };
-            if (typeof stdin.write !== 'function') {
-                stdin.write = function() { return false; };
-            }
-
-            var _origOn = stdin.on.bind(stdin);
-            stdin.on = function(event, fn) {
-                var result = _origOn(event, fn);
-                if (event === 'data' || event === 'readable') {
-                    refreshListenerRef();
-                }
-                return result;
-            };
-            stdin.addListener = stdin.on;
-
-            if (typeof stdin.once === 'function') {
-                var _origOnce = stdin.once.bind(stdin);
-                stdin.once = function(event, fn) {
-                    var result = _origOnce(event, fn);
-                    if (event === 'data' || event === 'readable') {
-                        refreshListenerRef();
-                    }
-                    return result;
-                };
-            }
-
-            if (typeof stdin.prependListener === 'function') {
-                var _origPrependListener = stdin.prependListener.bind(stdin);
-                stdin.prependListener = function(event, fn) {
-                    var result = _origPrependListener(event, fn);
-                    if (event === 'data' || event === 'readable') {
-                        refreshListenerRef();
-                    }
-                    return result;
-                };
-            }
-
-            if (typeof stdin.prependOnceListener === 'function') {
-                var _origPrependOnceListener = stdin.prependOnceListener.bind(stdin);
-                stdin.prependOnceListener = function(event, fn) {
-                    var result = _origPrependOnceListener(event, fn);
-                    if (event === 'data' || event === 'readable') {
-                        refreshListenerRef();
-                    }
-                    return result;
-                };
-            }
-
-            var _origRemoveListener = stdin.removeListener.bind(stdin);
-            stdin.removeListener = function(event, fn) {
-                var result = _origRemoveListener(event, fn);
-                if (event === 'data' || event === 'readable') {
-                    refreshListenerRef();
-                }
-                return result;
-            };
-
-            if (typeof stdin.off === 'function') {
-                stdin.off = function(event, fn) {
-                    return stdin.removeListener(event, fn);
-                };
-            }
-
-            if (typeof stdin.removeAllListeners === 'function') {
-                var _origRemoveAllListeners = stdin.removeAllListeners.bind(stdin);
-                stdin.removeAllListeners = function(event) {
-                    var result = _origRemoveAllListeners(event);
-                    if (event === undefined || event === 'data' || event === 'readable') {
-                        refreshListenerRef();
-                    }
-                    return result;
-                };
-            }
-
-            stdin.on('end', function() {
-                _listenerRefed = false;
-                _iteratorRefs = 0;
-                syncRefState();
-            });
-
-            var _origIterator = stdin[Symbol.asyncIterator];
-            if (_origIterator) {
-                stdin[Symbol.asyncIterator] = function() {
-                    _iteratorRefs += 1;
-                    syncRefState();
-
-                    var iterator = _origIterator.call(stdin);
-                    var released = false;
-
-                    function releaseOnce() {
-                        if (released) return;
-                        released = true;
-                        releaseIteratorRef();
-                    }
-
-                    return {
-                        next: function() {
-                            return Promise.resolve(iterator.next.apply(iterator, arguments)).then(function(result) {
-                                if (result && result.done) releaseOnce();
-                                return result;
-                            }, function(error) {
-                                releaseOnce();
-                                throw error;
-                            });
-                        },
-                        return: function() {
-                            releaseOnce();
-                            if (typeof iterator.return === 'function') {
-                                return iterator.return.apply(iterator, arguments);
-                            }
-                            return Promise.resolve({ value: undefined, done: true });
-                        },
-                        throw: function() {
-                            releaseOnce();
-                            if (typeof iterator.throw === 'function') {
-                                return iterator.throw.apply(iterator, arguments);
-                            }
-                            return Promise.reject(arguments[0]);
-                        },
-                        [Symbol.asyncIterator]: function() {
-                            return this;
-                        }
-                    };
-                };
-            }
-        })();
-        """)
-
-        self.stdinValue = ctx.objectForKeyedSubscript("process")?
-            .objectForKeyedSubscript("stdin")
     }
 
     private func deliverStdin(_ data: Data?) {
-        eventLoop.preconditionInEventLoop()
-        guard let ctx = jsContext else { return }
-        guard let deliver = ctx.objectForKeyedSubscript("__deliverStdinData"),
-              !deliver.isUndefined else { return }
-        let argument: Any = if let data {
-            String(data: data, encoding: .utf8) ?? ""
+        executor.preconditionInExecutor()
+        guard let ctx = executor.context else { return }
+        guard let deliver = ctx.objectForKeyedSubscript("__deliverStdinData"), !deliver.isUndefined else { return }
+
+        if let data {
+            let string = String(data: data, encoding: .utf8) ?? ""
+            _ = deliver.call(withArguments: [string])
         } else {
-            NSNull()
+            _ = deliver.call(withArguments: [NSNull()])
         }
-        _ = deliver.call(withArguments: [argument])
         reportPendingJavaScriptException(source: "deliverStdin")
-    }
-
-    // MARK: - Helpers
-
-    private func escapeJS(_ string: String) -> String {
-        string
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-    }
-
-    private func reportPendingJavaScriptException(source: String) {
-        eventLoop.preconditionInEventLoop()
-        guard let ctx = jsContext, let exception = ctx.exception else { return }
-        ctx.exception = nil
-        guard !isProcessExitSentinel(exception) else { return }
-        let message = exception.toString() ?? "Unknown JS exception"
-        outputContinuation.yield("[bun:exception] \(source): \(message)")
     }
 }

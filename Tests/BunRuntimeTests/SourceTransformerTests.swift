@@ -13,19 +13,20 @@ struct ESMTransformTests {
             .appendingPathComponent(UUID().uuidString + ".js")
         try source.write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let process = BunProcess(bundle: tmp)
-        try await process.load()
+        _ = try await TestProcessSupport.withLoadedProcess(BunProcess(bundle: tmp)) { _ in
+            true
+        }
         return ""
     }
 
     // MARK: - Smoke tests (load succeeds = transform worked)
 
     @Test func namedImport() async throws {
-        try await transform(#"var{createRequire:_K5}=require("node:module");"#)
+        _ = try await transform(#"var{createRequire:_K5}=require("node:module");"#)
     }
 
     @Test func noESMSyntax() async throws {
-        try await transform("var x = 1; console.log(x);")
+        _ = try await transform("var x = 1; console.log(x);")
     }
 }
 

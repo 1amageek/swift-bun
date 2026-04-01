@@ -1,0 +1,70 @@
+import Testing
+@preconcurrency import JavaScriptCore
+import Foundation
+@testable import BunRuntime
+import TestHeartbeat
+
+@Suite("Buffer Edge Cases", .serialized, .heartbeat)
+struct BufferEdgeCaseTests {
+
+    @Test("Buffer.from base64 encoding")
+    func base64Roundtrip() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            Buffer.from('SGVsbG8gV29ybGQ=', 'base64').toString('utf-8')
+        """)
+        #expect(result.stringValue == "Hello World")
+    }
+
+    @Test("Buffer.from hex roundtrip")
+    func hexRoundtrip() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            Buffer.from(Buffer.from('test data').toString('hex'), 'hex').toString('utf-8')
+        """)
+        #expect(result.stringValue == "test data")
+    }
+
+    @Test("Buffer.alloc creates zeroed buffer")
+    func allocZeroed() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var b = Buffer.alloc(4);
+            b[0] === 0 && b[1] === 0 && b[2] === 0 && b[3] === 0;
+        """)
+        #expect(result.boolValue == true)
+    }
+
+    @Test("Buffer.isBuffer distinguishes Buffer from Uint8Array")
+    func isBuffer() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            Buffer.isBuffer(Buffer.from('x')) + '|' + Buffer.isBuffer(new Uint8Array(1));
+        """)
+        #expect(result.stringValue == "true|false")
+    }
+
+    @Test("Buffer.byteLength for multibyte UTF-8")
+    func byteLengthMultibyte() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            Buffer.byteLength('café')
+        """)
+        // 'café' = c(1) + a(1) + f(1) + é(2) = 5 bytes
+        #expect(result.int32Value == 5)
+    }
+
+    @Test("Buffer.concat with empty array")
+    func concatEmpty() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            Buffer.concat([]).length
+        """)
+        #expect(result.int32Value == 0)
+    }
+
+    @Test("Buffer.compare ordering")
+    func compare() async throws {
+        let result = try await TestProcessSupport.evaluate("""
+            var a = Buffer.from('abc');
+            var b = Buffer.from('abd');
+            var c = Buffer.from('abc');
+            a.compare(b) + '|' + b.compare(a) + '|' + a.compare(c);
+        """)
+        #expect(result.stringValue == "-1|1|0")
+    }
+}

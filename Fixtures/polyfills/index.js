@@ -26,26 +26,378 @@ if (typeof process.env === "undefined") process.env = {};
 // =============================================================================
 require("web-streams-polyfill/polyfill");
 
-// =============================================================================
-// Node.js Streams (readable-stream — official Node.js userland streams)
-// =============================================================================
-var RS = require("readable-stream");
+if (!globalThis.__swiftBunPackages) {
+  var __swiftBunStructuredClonePackage = require("@ungap/structured-clone");
+  var __swiftBunYAMLPackage = require("js-yaml");
+  globalThis.__swiftBunPackages = {
+    structuredClone:
+      __swiftBunStructuredClonePackage && __swiftBunStructuredClonePackage.default
+        ? __swiftBunStructuredClonePackage.default
+        : __swiftBunStructuredClonePackage,
+    semver: require("semver"),
+    YAML: {
+      parse: function (input) {
+        return __swiftBunYAMLPackage.load(String(input || ""));
+      },
+      stringify: function (value) {
+        return __swiftBunYAMLPackage.dump(value);
+      },
+    },
+    picomatch: require("picomatch"),
+  };
+}
 
-// Expose for require('stream') to pick up later
-globalThis.__readableStream = RS;
-
 // =============================================================================
-// process.stdin — Readable stream backed by native sendInput()
+// Node.js Streams (Layer 0 ownership)
 // =============================================================================
 (function () {
-  var Readable = RS.Readable;
+  function EventEmitter() {
+    this._events = {};
+    this._maxListeners = 10;
+  }
+  EventEmitter.prototype.on = function (event, fn) {
+    if (!this._events[event]) this._events[event] = [];
+    this._events[event].push(fn);
+    return this;
+  };
+  EventEmitter.prototype.addListener = EventEmitter.prototype.on;
+  EventEmitter.prototype.once = function (event, fn) {
+    var self = this;
+    function wrapper() {
+      self.removeListener(event, wrapper);
+      fn.apply(this, arguments);
+    }
+    wrapper._original = fn;
+    return this.on(event, wrapper);
+  };
+  EventEmitter.prototype.off = function (event, fn) {
+    return this.removeListener(event, fn);
+  };
+  EventEmitter.prototype.removeListener = function (event, fn) {
+    if (!this._events[event]) return this;
+    this._events[event] = this._events[event].filter(function (listener) {
+      return listener !== fn && listener._original !== fn;
+    });
+    return this;
+  };
+  EventEmitter.prototype.removeAllListeners = function (event) {
+    if (event) delete this._events[event];
+    else this._events = {};
+    return this;
+  };
+  EventEmitter.prototype.emit = function (event) {
+    if (!this._events[event]) return false;
+    var args = Array.prototype.slice.call(arguments, 1);
+    var listeners = this._events[event].slice();
+    for (var index = 0; index < listeners.length; index++) {
+      listeners[index].apply(this, args);
+    }
+    return true;
+  };
+  EventEmitter.prototype.listeners = function (event) {
+    return (this._events[event] || []).slice();
+  };
+  EventEmitter.prototype.listenerCount = function (event) {
+    return (this._events[event] || []).length;
+  };
+  EventEmitter.prototype.setMaxListeners = function (n) {
+    this._maxListeners = n;
+    return this;
+  };
+  EventEmitter.prototype.getMaxListeners = function () {
+    return this._maxListeners;
+  };
+  EventEmitter.prototype.rawListeners = EventEmitter.prototype.listeners;
+  EventEmitter.prototype.prependListener = EventEmitter.prototype.on;
+  EventEmitter.prototype.prependOnceListener = EventEmitter.prototype.once;
+  EventEmitter.prototype.eventNames = function () {
+    return Object.keys(this._events);
+  };
+  EventEmitter.defaultMaxListeners = 10;
+  EventEmitter.listenerCount = function (emitter, event) {
+    return emitter.listenerCount(event);
+  };
 
-  // Create stdin as a proper Readable stream
-  var stdin = new Readable({
-    read: function () {
-      // No-op: data is pushed externally via __deliverStdinData
-    },
-  });
+  function Readable() {
+    EventEmitter.call(this);
+    this.readable = true;
+    this.destroyed = false;
+    this._readableState = {
+      flowing: null,
+      ended: false,
+      buffer: [],
+      encoding: null,
+    };
+  }
+  Readable.prototype = Object.create(EventEmitter.prototype);
+  Readable.prototype.constructor = Readable;
+  Readable.prototype.read = function () {
+    if (this._readableState.buffer.length === 0) return null;
+    return this._readableState.buffer.shift();
+  };
+  Readable.prototype.pipe = function (dest) {
+    var self = this;
+    self.on("end", function () {
+      dest.end();
+    });
+    self.on("data", function (chunk) {
+      dest.write(chunk);
+    });
+    if (typeof self.resume === "function") {
+      self.resume();
+    }
+    return dest;
+  };
+  Readable.prototype.unpipe = function () {
+    return this;
+  };
+  Readable.prototype.resume = function () {
+    this._readableState.flowing = true;
+    while (this._readableState.buffer.length > 0) {
+      this.emit("data", this._readableState.buffer.shift());
+    }
+    if (this._readableState.ended && this._readableState.buffer.length === 0) {
+      this.emit("end");
+    }
+    return this;
+  };
+  Readable.prototype.pause = function () {
+    this._readableState.flowing = false;
+    return this;
+  };
+  Readable.prototype.setEncoding = function (encoding) {
+    this._readableState.encoding = encoding || "utf8";
+    return this;
+  };
+  Readable.prototype.destroy = function (error) {
+    this.destroyed = true;
+    if (error) this.emit("error", error);
+    return this;
+  };
+  Readable.prototype.push = function (chunk) {
+    if (chunk === null) {
+      this._readableState.ended = true;
+      if (this.listenerCount("readable") > 0) {
+        this.emit("readable");
+      }
+      if (this._readableState.flowing !== false && this._readableState.buffer.length === 0) {
+        this.emit("end");
+      }
+      return false;
+    }
+
+    if (this._readableState.flowing === false) {
+      this._readableState.buffer.push(chunk);
+      if (this.listenerCount("readable") > 0) {
+        this.emit("readable");
+      }
+      return true;
+    }
+
+    if (this.listenerCount("data") === 0) {
+      this._readableState.buffer.push(chunk);
+      if (this.listenerCount("readable") > 0) {
+        this.emit("readable");
+      }
+      return true;
+    }
+
+    if (this.listenerCount("readable") > 0) {
+      this._readableState.buffer.push(chunk);
+      this.emit("readable");
+      return true;
+    }
+
+    this.emit("data", chunk);
+    return true;
+  };
+  Readable.prototype[Symbol.asyncIterator] = function () {
+    var self = this;
+    var done = false;
+    var waiting = null;
+    var pendingError = null;
+
+    function resolveNext(result) {
+      if (!waiting) return;
+      var current = waiting;
+      waiting = null;
+      current.resolve(result);
+    }
+
+    self.on("data", function (chunk) {
+      if (waiting) {
+        resolveNext({ value: chunk, done: false });
+      }
+    });
+    self.on("end", function () {
+      done = true;
+      resolveNext({ value: undefined, done: true });
+    });
+    self.on("error", function (error) {
+      done = true;
+      if (waiting) {
+        var current = waiting;
+        waiting = null;
+        current.reject(error);
+      } else {
+        pendingError = error;
+      }
+    });
+
+    return {
+      next: function () {
+        var chunk = self.read();
+        if (chunk !== null) return Promise.resolve({ value: chunk, done: false });
+        if (pendingError) {
+          var error = pendingError;
+          pendingError = null;
+          return Promise.reject(error);
+        }
+        if (done) return Promise.resolve({ value: undefined, done: true });
+        return new Promise(function (resolve, reject) {
+          waiting = { resolve: resolve, reject: reject };
+          self.resume();
+        });
+      },
+      return: function () {
+        done = true;
+        self.destroy();
+        return Promise.resolve({ value: undefined, done: true });
+      },
+      [Symbol.asyncIterator]: function () {
+        return this;
+      },
+    };
+  };
+
+  function Writable(options) {
+    EventEmitter.call(this);
+    this.writable = true;
+    this.destroyed = false;
+    this._writableState = { ended: false, finished: false };
+    this._impl = options || {};
+  }
+  Writable.prototype = Object.create(EventEmitter.prototype);
+  Writable.prototype.constructor = Writable;
+  Writable.prototype.write = function (chunk, encoding, cb) {
+    if (typeof encoding === "function") cb = encoding;
+    if (typeof this._impl.write === "function") {
+      this._impl.write(chunk, encoding, cb || function () {});
+    } else if (cb) {
+      cb();
+    }
+    return true;
+  };
+  Writable.prototype.end = function (chunk, encoding, cb) {
+    if (chunk) this.write(chunk, encoding);
+    if (typeof chunk === "function") cb = chunk;
+    if (typeof encoding === "function") cb = encoding;
+    if (typeof this._impl.final === "function") {
+      this._impl.final(cb || function () {});
+    }
+    this._writableState.ended = true;
+    this._writableState.finished = true;
+    this.emit("finish");
+    if (cb) cb();
+    return this;
+  };
+  Writable.prototype.destroy = function (error) {
+    this.destroyed = true;
+    if (error) this.emit("error", error);
+    return this;
+  };
+  Writable.prototype.cork = function () {};
+  Writable.prototype.uncork = function () {};
+  Writable.prototype.setDefaultEncoding = function () {
+    return this;
+  };
+
+  function Duplex(options) {
+    Readable.call(this, options);
+    Writable.call(this, options);
+  }
+  Duplex.prototype = Object.create(Readable.prototype);
+  Object.assign(Duplex.prototype, Writable.prototype);
+  Duplex.prototype.constructor = Duplex;
+
+  function Transform(options) {
+    Duplex.call(this, options);
+  }
+  Transform.prototype = Object.create(Duplex.prototype);
+  Transform.prototype.constructor = Transform;
+  Transform.prototype._transform = function (chunk, encoding, cb) {
+    cb(null, chunk);
+  };
+
+  function PassThrough(options) {
+    Transform.call(this, options);
+  }
+  PassThrough.prototype = Object.create(Transform.prototype);
+  PassThrough.prototype.constructor = PassThrough;
+  PassThrough.prototype.write = function (chunk, encoding, cb) {
+    this.push(chunk);
+    if (typeof cb === "function") cb();
+    return true;
+  };
+  PassThrough.prototype.end = function (chunk, encoding, cb) {
+    if (chunk) this.write(chunk, encoding);
+    this.push(null);
+    this.emit("finish");
+    if (typeof cb === "function") cb();
+    return this;
+  };
+
+  function pipeline() {
+    var streams = Array.prototype.slice.call(arguments);
+    var callback = typeof streams[streams.length - 1] === "function" ? streams.pop() : null;
+    var last = streams[streams.length - 1];
+    if (callback) {
+      last.on("finish", function () {
+        callback(null);
+      });
+      last.on("error", function (error) {
+        callback(error);
+      });
+    }
+    for (var index = 0; index < streams.length - 1; index++) {
+      streams[index].pipe(streams[index + 1]);
+    }
+    return last;
+  }
+
+  function finished(stream, callback) {
+    stream.on("end", function () {
+      callback(null);
+    });
+    stream.on("finish", function () {
+      callback(null);
+    });
+    stream.on("error", function (error) {
+      callback(error);
+    });
+  }
+
+  var stream = {
+    Readable: Readable,
+    Writable: Writable,
+    Duplex: Duplex,
+    Transform: Transform,
+    PassThrough: PassThrough,
+    EventEmitter: EventEmitter,
+    pipeline: pipeline,
+    finished: finished,
+    Stream: Readable,
+  };
+  stream.default = stream;
+
+  globalThis.__readableStream = stream;
+  if (!globalThis.__nodeModules) globalThis.__nodeModules = {};
+  globalThis.__nodeModules.stream = stream;
+
+  // =============================================================================
+  // process.stdin — Readable stream backed by native sendInput()
+  // =============================================================================
+  var stdin = new Readable();
 
   // Default to utf-8 string mode (Node.js stdin is binary by default, but
   // cli.js and most consumers expect strings in stream-json mode)
@@ -73,10 +425,221 @@ globalThis.__readableStream = RS;
 })();
 
 // =============================================================================
+// stdin keep-alive semantics (bridged by Layer 2 through __stdinRef/__stdinUnref)
+// =============================================================================
+(function () {
+  if (!globalThis.process || !globalThis.process.stdin) return;
+
+  var stdin = globalThis.process.stdin;
+  if (typeof stdin.listenerCount !== "function") return;
+  var nativeRefed = false;
+  var manualRefed = false;
+  var listenerRefed = false;
+  var iteratorRefs = 0;
+  var resumeRefed = false;
+
+  function nativeRef() {
+    if (typeof globalThis.__stdinRef === "function") {
+      globalThis.__stdinRef();
+    }
+  }
+
+  function nativeUnref() {
+    if (typeof globalThis.__stdinUnref === "function") {
+      globalThis.__stdinUnref();
+    }
+  }
+
+  function syncRefState() {
+    var shouldRef = manualRefed || listenerRefed || iteratorRefs > 0 || resumeRefed;
+    if (shouldRef && !nativeRefed) {
+      nativeRefed = true;
+      nativeRef();
+    } else if (!shouldRef && nativeRefed) {
+      nativeRefed = false;
+      nativeUnref();
+    }
+  }
+
+  function refreshListenerRef() {
+    listenerRefed = stdin.listenerCount("data") > 0 || stdin.listenerCount("readable") > 0;
+    syncRefState();
+  }
+
+  function releaseIteratorRef() {
+    if (iteratorRefs > 0) {
+      iteratorRefs -= 1;
+      syncRefState();
+    }
+  }
+
+  stdin.ref = function () {
+    manualRefed = true;
+    syncRefState();
+    return stdin;
+  };
+
+  stdin.unref = function () {
+    manualRefed = false;
+    syncRefState();
+    return stdin;
+  };
+
+  if (typeof stdin.resume === "function") {
+    var origResume = stdin.resume;
+    stdin.resume = function () {
+      resumeRefed = true;
+      syncRefState();
+      return origResume.call(stdin);
+    };
+  }
+
+  if (typeof stdin.pause === "function") {
+    var origPause = stdin.pause;
+    stdin.pause = function () {
+      resumeRefed = false;
+      syncRefState();
+      return origPause.call(stdin);
+    };
+  }
+
+  if (typeof stdin.on === "function") {
+    var origOn = stdin.on;
+    stdin.on = function (event, fn) {
+      var result = origOn.call(stdin, event, fn);
+      if (event === "data" || event === "readable") {
+        refreshListenerRef();
+      }
+      return result;
+    };
+    stdin.addListener = stdin.on;
+  }
+
+  if (typeof stdin.once === "function") {
+    var origOnce = stdin.once;
+    stdin.once = function (event, fn) {
+      var result = origOnce.call(stdin, event, fn);
+      if (event === "data" || event === "readable") {
+        refreshListenerRef();
+      }
+      return result;
+    };
+  }
+
+  if (typeof stdin.prependListener === "function") {
+    var origPrependListener = stdin.prependListener;
+    stdin.prependListener = function (event, fn) {
+      var result = origPrependListener.call(stdin, event, fn);
+      if (event === "data" || event === "readable") {
+        refreshListenerRef();
+      }
+      return result;
+    };
+  }
+
+  if (typeof stdin.prependOnceListener === "function") {
+    var origPrependOnceListener = stdin.prependOnceListener;
+    stdin.prependOnceListener = function (event, fn) {
+      var result = origPrependOnceListener.call(stdin, event, fn);
+      if (event === "data" || event === "readable") {
+        refreshListenerRef();
+      }
+      return result;
+    };
+  }
+
+  if (typeof stdin.removeListener === "function") {
+    var origRemoveListener = stdin.removeListener;
+    stdin.removeListener = function (event, fn) {
+      var result = origRemoveListener.call(stdin, event, fn);
+      if (event === "data" || event === "readable") {
+        refreshListenerRef();
+      }
+      return result;
+    };
+  }
+
+  if (typeof stdin.off === "function") {
+    stdin.off = function (event, fn) {
+      return stdin.removeListener(event, fn);
+    };
+  }
+
+  if (typeof stdin.removeAllListeners === "function") {
+    var origRemoveAllListeners = stdin.removeAllListeners;
+    stdin.removeAllListeners = function (event) {
+      var result = origRemoveAllListeners.call(stdin, event);
+      if (event === undefined || event === "data" || event === "readable") {
+        refreshListenerRef();
+      }
+      return result;
+    };
+  }
+
+  if (typeof stdin.on === "function") {
+    stdin.on("end", function () {
+      listenerRefed = false;
+      iteratorRefs = 0;
+      resumeRefed = false;
+      syncRefState();
+    });
+  }
+
+  var origIterator = stdin[Symbol.asyncIterator];
+  if (origIterator) {
+    stdin[Symbol.asyncIterator] = function () {
+      iteratorRefs += 1;
+      syncRefState();
+
+      var iterator = origIterator.call(stdin);
+      var released = false;
+
+      function releaseOnce() {
+        if (released) return;
+        released = true;
+        releaseIteratorRef();
+      }
+
+      return {
+        next: function () {
+          return Promise.resolve(iterator.next.apply(iterator, arguments)).then(
+            function (result) {
+              if (result && result.done) releaseOnce();
+              return result;
+            },
+            function (error) {
+              releaseOnce();
+              throw error;
+            }
+          );
+        },
+        return: function () {
+          releaseOnce();
+          if (typeof iterator.return === "function") {
+            return iterator.return.apply(iterator, arguments);
+          }
+          return Promise.resolve({ value: undefined, done: true });
+        },
+        throw: function () {
+          releaseOnce();
+          if (typeof iterator.throw === "function") {
+            return iterator.throw.apply(iterator, arguments);
+          }
+          return Promise.reject(arguments[0]);
+        },
+        [Symbol.asyncIterator]: function () {
+          return this;
+        },
+      };
+    };
+  }
+})();
+
+// =============================================================================
 // process.stdout — Writable stream backed by native __nativeStdoutWrite
 // =============================================================================
 (function () {
-  var Writable = RS.Writable;
+  var Writable = globalThis.__readableStream.Writable;
 
   var stdout = new Writable({
     write: function (chunk, encoding, callback) {
@@ -112,7 +675,7 @@ globalThis.__readableStream = RS;
 // process.stderr — Writable stream backed by native __nativeStderrWrite
 // =============================================================================
 (function () {
-  var Writable = RS.Writable;
+  var Writable = globalThis.__readableStream.Writable;
 
   var stderr = new Writable({
     write: function (chunk, encoding, callback) {
@@ -130,6 +693,286 @@ globalThis.__readableStream = RS;
 
   if (!globalThis.process) globalThis.process = {};
   globalThis.process.stderr = stderr;
+})();
+
+// =============================================================================
+// queueMicrotask
+// =============================================================================
+if (typeof globalThis.queueMicrotask === "undefined") {
+  globalThis.queueMicrotask = function (fn) {
+    Promise.resolve().then(fn);
+  };
+}
+
+// =============================================================================
+// Fetch / Headers / Request / Response
+// =============================================================================
+(function () {
+  function getBufferCtor() {
+    return typeof Buffer !== "undefined" ? Buffer : null;
+  }
+
+  function normalizeHeaders(init) {
+    var map = {};
+    if (!init) return map;
+    if (typeof globalThis.Headers === "function" && init instanceof globalThis.Headers) {
+      init.forEach(function (value, key) {
+        map[key.toLowerCase()] = String(value);
+      });
+      return map;
+    }
+    if (Array.isArray(init)) {
+      for (var i = 0; i < init.length; i++) {
+        map[String(init[i][0]).toLowerCase()] = String(init[i][1]);
+      }
+      return map;
+    }
+    for (var key in init) {
+      map[key.toLowerCase()] = String(init[key]);
+    }
+    return map;
+  }
+
+  function bodyToText(body) {
+    if (body === undefined || body === null) return "";
+    if (typeof body === "string") return body;
+    var BufferCtor = getBufferCtor();
+    if (BufferCtor && BufferCtor.isBuffer && BufferCtor.isBuffer(body)) {
+      return body.toString("utf8");
+    }
+    if (body instanceof Uint8Array) {
+      return new TextDecoder().decode(body);
+    }
+    if (body instanceof ArrayBuffer) {
+      return new TextDecoder().decode(new Uint8Array(body));
+    }
+    if (typeof Blob === "function" && body instanceof Blob && typeof body.text === "function") {
+      throw new TypeError("Blob request bodies must be consumed before fetch()");
+    }
+    return String(body);
+  }
+
+  function encodeBodyChunk(bodyText) {
+    var BufferCtor = getBufferCtor();
+    if (BufferCtor) return BufferCtor.from(bodyText, "utf8");
+    return new TextEncoder().encode(bodyText);
+  }
+
+  function makeReadableBodyStream(bodyText) {
+    if (typeof ReadableStream !== "function") return null;
+    return new ReadableStream({
+      start: function (controller) {
+        var chunk = encodeBodyChunk(bodyText);
+        if (chunk && chunk.length > 0) {
+          controller.enqueue(chunk);
+        }
+        controller.close();
+      },
+    });
+  }
+
+  function createAbortError(message) {
+    var text = message || "The operation was aborted.";
+    if (typeof DOMException === "function") {
+      return new DOMException(text, "AbortError");
+    }
+    var error = new Error(text);
+    error.name = "AbortError";
+    return error;
+  }
+
+  function Headers(init) {
+    this._map = normalizeHeaders(init);
+  }
+
+  Headers.prototype.get = function (name) {
+    return this._map[name.toLowerCase()] || null;
+  };
+  Headers.prototype.set = function (name, value) {
+    this._map[name.toLowerCase()] = String(value);
+  };
+  Headers.prototype.has = function (name) {
+    return name.toLowerCase() in this._map;
+  };
+  Headers.prototype.delete = function (name) {
+    delete this._map[name.toLowerCase()];
+  };
+  Headers.prototype.append = function (name, value) {
+    var key = name.toLowerCase();
+    if (this._map[key]) this._map[key] += ", " + value;
+    else this._map[key] = String(value);
+  };
+  Headers.prototype.forEach = function (cb) {
+    for (var key in this._map) cb(this._map[key], key, this);
+  };
+  Headers.prototype.entries = function () {
+    var pairs = [];
+    for (var key in this._map) pairs.push([key, this._map[key]]);
+    return pairs[Symbol.iterator]();
+  };
+  Headers.prototype.keys = function () {
+    return Object.keys(this._map)[Symbol.iterator]();
+  };
+  Headers.prototype.values = function () {
+    var values = [];
+    for (var key in this._map) values.push(this._map[key]);
+    return values[Symbol.iterator]();
+  };
+  Headers.prototype[Symbol.iterator] = Headers.prototype.entries;
+
+  function Response(body, init) {
+    init = init || {};
+    this._bodyText = bodyToText(body);
+    this.status = init.status || 200;
+    this.ok = this.status >= 200 && this.status < 300;
+    this.statusText = init.statusText || "";
+    this.headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
+    this.url = init.url || "";
+    this.type = "default";
+    this.redirected = false;
+    this.bodyUsed = false;
+    this.body = body === undefined || body === null ? null : makeReadableBodyStream(this._bodyText);
+  }
+
+  Response.prototype._consumeBody = function (mapper) {
+    if (this.bodyUsed) {
+      return Promise.reject(new TypeError("Body is unusable"));
+    }
+    this.bodyUsed = true;
+    return Promise.resolve(mapper(this._bodyText));
+  };
+  Response.prototype.text = function () {
+    return this._consumeBody(function (text) {
+      return text;
+    });
+  };
+  Response.prototype.json = function () {
+    return this._consumeBody(function (text) {
+      return JSON.parse(text);
+    });
+  };
+  Response.prototype.arrayBuffer = function () {
+    return this._consumeBody(function (text) {
+      var chunk = encodeBodyChunk(text);
+      return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+    });
+  };
+  Response.prototype.blob = function () {
+    return this._consumeBody(function (text) {
+      return typeof Blob === "function" ? new Blob([text]) : text;
+    });
+  };
+  Response.prototype.clone = function () {
+    return new Response(this._bodyText, {
+      status: this.status,
+      statusText: this.statusText,
+      headers: new Headers(this.headers),
+      url: this.url,
+    });
+  };
+  Response.json = function (data, init) {
+    init = init || {};
+    var headers = new Headers(init.headers || {});
+    headers.set("content-type", "application/json");
+    return new Response(JSON.stringify(data), {
+      status: init.status || 200,
+      statusText: init.statusText || "",
+      headers: headers,
+    });
+  };
+
+  function Request(input, init) {
+    init = init || {};
+    if (typeof input === "string") {
+      this.url = input;
+    } else {
+      this.url = input.url;
+      init = Object.assign({}, input, init);
+    }
+    this.method = (init.method || "GET").toUpperCase();
+    this.headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
+    this.body = init.body || null;
+    this.signal = init.signal || null;
+  }
+
+  if (typeof globalThis.Headers === "undefined") globalThis.Headers = Headers;
+  if (typeof globalThis.Request === "undefined") globalThis.Request = Request;
+  if (typeof globalThis.Response === "undefined") globalThis.Response = Response;
+
+  if (typeof globalThis.fetch === "undefined") {
+    globalThis.fetch = function fetch(input, init) {
+      var request = input instanceof Request ? new Request(input, init) : new Request(input, init || {});
+      var fetchOptions = {
+        method: request.method,
+        headers: normalizeHeaders(request.headers),
+      };
+
+      if (request.body !== undefined && request.body !== null && request.method !== "GET" && request.method !== "HEAD") {
+        fetchOptions.body = bodyToText(request.body);
+      }
+
+      return new Promise(function (resolve, reject) {
+        if (typeof globalThis.__nativeFetch !== "function") {
+          reject(new TypeError("fetch failed: missing native transport"));
+          return;
+        }
+
+        var settled = false;
+        var abortHandler = null;
+
+        function finishWithFailure(error) {
+          if (settled) return;
+          settled = true;
+          if (request.signal && abortHandler && typeof request.signal.removeEventListener === "function") {
+            request.signal.removeEventListener("abort", abortHandler);
+          }
+          reject(error);
+        }
+
+        function finishWithSuccess(response) {
+          if (settled) return;
+          settled = true;
+          if (request.signal && abortHandler && typeof request.signal.removeEventListener === "function") {
+            request.signal.removeEventListener("abort", abortHandler);
+          }
+          resolve(response);
+        }
+
+        if (request.signal && request.signal.aborted) {
+          finishWithFailure(createAbortError());
+          return;
+        }
+
+        if (request.signal && typeof request.signal.addEventListener === "function") {
+          abortHandler = function () {
+            finishWithFailure(createAbortError());
+          };
+          request.signal.addEventListener("abort", abortHandler);
+        }
+
+        globalThis.__nativeFetch(
+          request.url,
+          JSON.stringify(fetchOptions),
+          function (statusCode, responseURL, headersJSON, body) {
+            var parsedHeaders = {};
+            try {
+              parsedHeaders = JSON.parse(headersJSON);
+            } catch (error) {}
+            finishWithSuccess(
+              new Response(body, {
+                status: statusCode,
+                headers: parsedHeaders,
+                url: responseURL,
+              })
+            );
+          },
+          function (error) {
+            finishWithFailure(new TypeError("fetch failed: " + error));
+          }
+        );
+      });
+    };
+  }
 })();
 
 // =============================================================================
@@ -208,44 +1051,93 @@ if (typeof globalThis.CustomEvent === "undefined") {
 // =============================================================================
 // Blob / File / FormData
 // =============================================================================
+function __swiftBunCloneArrayBuffer(buffer, byteOffset, byteLength) {
+  var start = byteOffset || 0;
+  var end = byteLength === undefined ? buffer.byteLength : start + byteLength;
+  return buffer.slice(start, end);
+}
+
+function __swiftBunEncodeText(value) {
+  return new TextEncoder().encode(String(value));
+}
+
+function __swiftBunDecodeText(bytes) {
+  return new TextDecoder().decode(bytes);
+}
+
+function __swiftBunConcatUint8Arrays(chunks) {
+  var total = 0;
+  for (var i = 0; i < chunks.length; i++) {
+    total += chunks[i].byteLength;
+  }
+  var merged = new Uint8Array(total);
+  var offset = 0;
+  for (var j = 0; j < chunks.length; j++) {
+    merged.set(chunks[j], offset);
+    offset += chunks[j].byteLength;
+  }
+  return merged;
+}
+
+function __swiftBunNormalizeBlobPart(part) {
+  if (part === undefined || part === null) {
+    return __swiftBunEncodeText("");
+  }
+  if (part instanceof Uint8Array) {
+    return new Uint8Array(part);
+  }
+  if (part instanceof ArrayBuffer) {
+    return new Uint8Array(__swiftBunCloneArrayBuffer(part));
+  }
+  if (ArrayBuffer.isView(part)) {
+    return new Uint8Array(__swiftBunCloneArrayBuffer(part.buffer, part.byteOffset, part.byteLength));
+  }
+  if (typeof Blob === "function" && part instanceof Blob && part._bytes instanceof Uint8Array) {
+    return new Uint8Array(part._bytes);
+  }
+  return __swiftBunEncodeText(String(part));
+}
+
 if (typeof globalThis.Blob === "undefined") {
   globalThis.Blob = function Blob(parts, options) {
     options = options || {};
-    this.type = options.type || "";
-    this._parts = parts || [];
-    var size = 0;
-    for (var i = 0; i < this._parts.length; i++) {
-      var p = this._parts[i];
-      if (typeof p === "string") size += p.length;
-      else if (p instanceof ArrayBuffer) size += p.byteLength;
-      else if (p instanceof Uint8Array) size += p.byteLength;
-      else if (p instanceof Blob) size += p.size;
+    var normalized = [];
+    var sourceParts = parts || [];
+    for (var i = 0; i < sourceParts.length; i++) {
+      normalized.push(__swiftBunNormalizeBlobPart(sourceParts[i]));
     }
-    this.size = size;
+    this.type = String(options.type || "").toLowerCase();
+    this._bytes = __swiftBunConcatUint8Arrays(normalized);
+    this.size = this._bytes.byteLength;
   };
   Blob.prototype.text = function () {
-    var result = "";
-    for (var i = 0; i < this._parts.length; i++) {
-      if (typeof this._parts[i] === "string") result += this._parts[i];
-    }
-    return Promise.resolve(result);
+    return Promise.resolve(__swiftBunDecodeText(this._bytes));
   };
   Blob.prototype.arrayBuffer = function () {
-    return this.text().then(function (t) {
-      return new TextEncoder().encode(t).buffer;
-    });
+    return Promise.resolve(__swiftBunCloneArrayBuffer(this._bytes.buffer, this._bytes.byteOffset, this._bytes.byteLength));
   };
   Blob.prototype.slice = function (start, end, type) {
-    return new Blob([], { type: type || this.type });
+    var relativeStart = start === undefined ? 0 : start;
+    var relativeEnd = end === undefined ? this.size : end;
+    var size = this.size;
+
+    if (relativeStart < 0) relativeStart = Math.max(size + relativeStart, 0);
+    else relativeStart = Math.min(relativeStart, size);
+    if (relativeEnd < 0) relativeEnd = Math.max(size + relativeEnd, 0);
+    else relativeEnd = Math.min(relativeEnd, size);
+
+    var span = Math.max(relativeEnd - relativeStart, 0);
+    var sliced = this._bytes.slice(relativeStart, relativeStart + span);
+    return new Blob([sliced], { type: type === undefined ? this.type : type });
   };
   Blob.prototype.stream = function () {
-    var blob = this;
+    var bytes = new Uint8Array(this._bytes);
     return new ReadableStream({
       start: function (controller) {
-        blob.text().then(function (t) {
-          controller.enqueue(new TextEncoder().encode(t));
-          controller.close();
-        });
+        if (bytes.byteLength > 0) {
+          controller.enqueue(bytes);
+        }
+        controller.close();
       },
     });
   };
@@ -254,8 +1146,8 @@ if (typeof globalThis.Blob === "undefined") {
 if (typeof globalThis.File === "undefined") {
   globalThis.File = function File(parts, name, options) {
     Blob.call(this, parts, options);
-    this.name = name;
-    this.lastModified = (options && options.lastModified) || Date.now();
+    this.name = String(name || "");
+    this.lastModified = options && typeof options.lastModified === "number" ? options.lastModified : Date.now();
   };
   File.prototype = Object.create(Blob.prototype);
   File.prototype.constructor = File;
@@ -356,11 +1248,217 @@ if (typeof globalThis.Worker === "undefined") {
 }
 
 if (typeof globalThis.XMLHttpRequest === "undefined") {
-  globalThis.XMLHttpRequest = function () { this.readyState = 0; this.status = 0; };
-  XMLHttpRequest.prototype.open = function () {};
-  XMLHttpRequest.prototype.send = function () {};
-  XMLHttpRequest.prototype.setRequestHeader = function () {};
-  XMLHttpRequest.prototype.abort = function () {};
+  function dispatchXMLHttpRequestEvent(target, type) {
+    var event = new Event(type);
+    target.dispatchEvent(event);
+    var handler = target["on" + type];
+    if (typeof handler === "function") {
+      handler.call(target, event);
+    }
+  }
+
+  function cloneHeaderMap(headers) {
+    var map = {};
+    if (!headers || typeof headers.forEach !== "function") {
+      return map;
+    }
+    headers.forEach(function(value, key) {
+      map[String(key).toLowerCase()] = String(value);
+    });
+    return map;
+  }
+
+  globalThis.XMLHttpRequest = function XMLHttpRequest() {
+    EventTarget.call(this);
+    this.readyState = XMLHttpRequest.UNSENT;
+    this.status = 0;
+    this.statusText = "";
+    this.responseType = "";
+    this.response = null;
+    this.responseText = "";
+    this.responseURL = "";
+    this.onreadystatechange = null;
+    this.onload = null;
+    this.onerror = null;
+    this.onabort = null;
+    this.onloadend = null;
+    this._method = "GET";
+    this._url = "";
+    this._async = true;
+    this._headers = {};
+    this._responseHeaders = {};
+    this._sendFlag = false;
+    this._aborted = false;
+    this._controller = null;
+  };
+  XMLHttpRequest.prototype = Object.create(EventTarget.prototype);
+  XMLHttpRequest.prototype.constructor = XMLHttpRequest;
+  XMLHttpRequest.UNSENT = 0;
+  XMLHttpRequest.OPENED = 1;
+  XMLHttpRequest.HEADERS_RECEIVED = 2;
+  XMLHttpRequest.LOADING = 3;
+  XMLHttpRequest.DONE = 4;
+  XMLHttpRequest.prototype.UNSENT = XMLHttpRequest.UNSENT;
+  XMLHttpRequest.prototype.OPENED = XMLHttpRequest.OPENED;
+  XMLHttpRequest.prototype.HEADERS_RECEIVED = XMLHttpRequest.HEADERS_RECEIVED;
+  XMLHttpRequest.prototype.LOADING = XMLHttpRequest.LOADING;
+  XMLHttpRequest.prototype.DONE = XMLHttpRequest.DONE;
+  XMLHttpRequest.prototype.open = function (method, url, async) {
+    if (async === false) {
+      throw new Error("Synchronous XMLHttpRequest is not supported in swift-bun");
+    }
+    this._method = String(method || "GET").toUpperCase();
+    this._url = String(url || "");
+    this._async = async !== false;
+    this._headers = {};
+    this._responseHeaders = {};
+    this._sendFlag = false;
+    this._aborted = false;
+    this.status = 0;
+    this.statusText = "";
+    this.response = null;
+    this.responseText = "";
+    this.responseURL = "";
+    this.readyState = XMLHttpRequest.OPENED;
+    dispatchXMLHttpRequestEvent(this, "readystatechange");
+  };
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (this.readyState !== XMLHttpRequest.OPENED || this._sendFlag) {
+      throw new Error("INVALID_STATE_ERR");
+    }
+    var headerName = String(name).toLowerCase();
+    var headerValue = String(value);
+    if (this._headers[headerName]) {
+      this._headers[headerName] += ", " + headerValue;
+    } else {
+      this._headers[headerName] = headerValue;
+    }
+  };
+  XMLHttpRequest.prototype.getResponseHeader = function (name) {
+    if (this.readyState < XMLHttpRequest.HEADERS_RECEIVED) return null;
+    var value = this._responseHeaders[String(name).toLowerCase()];
+    return value === undefined ? null : value;
+  };
+  XMLHttpRequest.prototype.getAllResponseHeaders = function () {
+    if (this.readyState < XMLHttpRequest.HEADERS_RECEIVED) return "";
+    var lines = [];
+    for (var key in this._responseHeaders) {
+      lines.push(key + ": " + this._responseHeaders[key]);
+    }
+    return lines.join("\r\n");
+  };
+  XMLHttpRequest.prototype.overrideMimeType = function () {};
+  XMLHttpRequest.prototype.abort = function () {
+    if (this.readyState === XMLHttpRequest.UNSENT || (this.readyState === XMLHttpRequest.OPENED && !this._sendFlag)) {
+      this.readyState = XMLHttpRequest.UNSENT;
+      return;
+    }
+    this._aborted = true;
+    this._sendFlag = false;
+    if (this._controller && typeof this._controller.abort === "function") {
+      this._controller.abort();
+    }
+    this.status = 0;
+    this.statusText = "";
+    this.response = null;
+    this.responseText = "";
+    this.readyState = XMLHttpRequest.DONE;
+    dispatchXMLHttpRequestEvent(this, "readystatechange");
+    dispatchXMLHttpRequestEvent(this, "abort");
+    dispatchXMLHttpRequestEvent(this, "loadend");
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    if (this.readyState !== XMLHttpRequest.OPENED) {
+      throw new Error("INVALID_STATE_ERR");
+    }
+    if (this._sendFlag) {
+      throw new Error("INVALID_STATE_ERR");
+    }
+
+    var self = this;
+    self._sendFlag = true;
+    self._aborted = false;
+    self.response = null;
+    self.responseText = "";
+
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    self._controller = controller;
+
+    var options = {
+      method: self._method,
+      headers: self._headers,
+    };
+    if (controller) {
+      options.signal = controller.signal;
+    }
+    if (self._method !== "GET" && self._method !== "HEAD" && body !== undefined) {
+      options.body = body;
+    }
+
+    var responseRef = null;
+    fetch(self._url, options).then(function (response) {
+      if (self._aborted) {
+        return null;
+      }
+      responseRef = response;
+      self.status = response.status;
+      self.statusText = response.statusText || "";
+      self.responseURL = response.url || self._url;
+      self._responseHeaders = cloneHeaderMap(response.headers);
+      self.readyState = XMLHttpRequest.HEADERS_RECEIVED;
+      dispatchXMLHttpRequestEvent(self, "readystatechange");
+      self.readyState = XMLHttpRequest.LOADING;
+      dispatchXMLHttpRequestEvent(self, "readystatechange");
+
+      if (self.responseType === "arraybuffer") {
+        return response.arrayBuffer();
+      }
+      if (self.responseType === "blob") {
+        return response.arrayBuffer().then(function (buffer) {
+          return new Blob([buffer], { type: response.headers.get("content-type") || "" });
+        });
+      }
+      return response.text();
+    }).then(function (payload) {
+      if (self._aborted || payload === null) {
+        return;
+      }
+      if (self.responseType === "arraybuffer" || self.responseType === "blob") {
+        self.response = payload;
+      } else if (self.responseType === "json") {
+        self.responseText = String(payload || "");
+        self.response = self.responseText ? JSON.parse(self.responseText) : null;
+      } else {
+        self.responseText = String(payload || "");
+        self.response = self.responseText;
+      }
+      if (self.responseType === "" || self.responseType === "text") {
+        self.responseText = String(payload || "");
+        self.response = self.responseText;
+      }
+      self._sendFlag = false;
+      self.readyState = XMLHttpRequest.DONE;
+      dispatchXMLHttpRequestEvent(self, "readystatechange");
+      dispatchXMLHttpRequestEvent(self, "load");
+      dispatchXMLHttpRequestEvent(self, "loadend");
+    }, function (error) {
+      if (self._aborted || (error && error.name === "AbortError")) {
+        if (!self._aborted) {
+          self.abort();
+        }
+        return;
+      }
+      self._sendFlag = false;
+      self.status = 0;
+      self.statusText = responseRef && responseRef.statusText ? responseRef.statusText : "";
+      self.response = null;
+      self.responseText = "";
+      self.readyState = XMLHttpRequest.DONE;
+      dispatchXMLHttpRequestEvent(self, "readystatechange");
+      dispatchXMLHttpRequestEvent(self, "error");
+      dispatchXMLHttpRequestEvent(self, "loadend");
+    });
+  };
 }
 
 // =============================================================================
@@ -369,7 +1467,18 @@ if (typeof globalThis.XMLHttpRequest === "undefined") {
 if (typeof globalThis.crypto === "undefined") {
   globalThis.crypto = {
     getRandomValues: function (arr) {
-      for (var i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256);
+      // Use native __cryptoRandomBytes if available (registered before polyfills load)
+      if (typeof globalThis.__cryptoRandomBytes === "function") {
+        // Fill the underlying byte buffer, then let the TypedArray view interpret the bytes
+        var byteLen = arr.byteLength || arr.length;
+        var randomBytes = globalThis.__cryptoRandomBytes(byteLen);
+        var view = new Uint8Array(arr.buffer, arr.byteOffset, byteLen);
+        for (var i = 0; i < byteLen; i++) view[i] = randomBytes[i];
+      } else {
+        // Fallback for environments without native bridge (should not happen in swift-bun)
+        var fallbackView = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength || arr.length);
+        for (var i = 0; i < fallbackView.length; i++) fallbackView[i] = Math.floor(Math.random() * 256);
+      }
       return arr;
     },
     randomUUID: function () {
@@ -382,12 +1491,12 @@ if (typeof globalThis.crypto === "undefined") {
       return h.slice(0,4).join("") + "-" + h.slice(4,6).join("") + "-" + h.slice(6,8).join("") + "-" + h.slice(8,10).join("") + "-" + h.slice(10).join("");
     },
     subtle: {
-      digest: function () { return Promise.resolve(new ArrayBuffer(32)); },
-      importKey: function () { return Promise.resolve({}); },
-      sign: function () { return Promise.resolve(new ArrayBuffer(32)); },
-      verify: function () { return Promise.resolve(true); },
-      encrypt: function () { return Promise.resolve(new ArrayBuffer(0)); },
-      decrypt: function () { return Promise.resolve(new ArrayBuffer(0)); },
+      digest: function () { return Promise.reject(new Error("crypto.subtle is not supported in swift-bun")); },
+      importKey: function () { return Promise.reject(new Error("crypto.subtle is not supported in swift-bun")); },
+      sign: function () { return Promise.reject(new Error("crypto.subtle is not supported in swift-bun")); },
+      verify: function () { return Promise.reject(new Error("crypto.subtle is not supported in swift-bun")); },
+      encrypt: function () { return Promise.reject(new Error("crypto.subtle is not supported in swift-bun")); },
+      decrypt: function () { return Promise.reject(new Error("crypto.subtle is not supported in swift-bun")); },
     },
   };
 }
@@ -396,9 +1505,24 @@ if (typeof globalThis.crypto === "undefined") {
 // Misc globals
 // =============================================================================
 if (typeof globalThis.structuredClone === "undefined") {
+  function cloneBlobLike(value) {
+    if (typeof File === "function" && value instanceof File) {
+      return new File([value._bytes ? new Uint8Array(value._bytes) : value], value.name, {
+        type: value.type,
+        lastModified: value.lastModified,
+      });
+    }
+    if (typeof Blob === "function" && value instanceof Blob) {
+      return new Blob([value._bytes ? new Uint8Array(value._bytes) : value], { type: value.type });
+    }
+    return null;
+  }
+
   globalThis.structuredClone = function (obj) {
     if (obj === undefined) return undefined;
-    return JSON.parse(JSON.stringify(obj));
+    var directBlobClone = cloneBlobLike(obj);
+    if (directBlobClone) return directBlobClone;
+    return globalThis.__swiftBunPackages.structuredClone(obj);
   };
 }
 
