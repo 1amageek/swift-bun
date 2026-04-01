@@ -8,6 +8,25 @@ import Foundation
 struct NodeStubs: JavaScriptModuleInstalling, Sendable {
     func install(into context: JSContext) throws {
         let childProcessRunSyncBlock: @convention(block) (String, String, String) -> [String: Any] = { file, argsJSON, optionsJSON in
+            // Intercept `security` commands and handle via native Keychain APIs.
+            // This works on both macOS and iOS without subprocess spawning.
+            do {
+                let args = try Self.parseStringArray(json: argsJSON)
+                if file == "security" || file.hasSuffix("/security") {
+                    if let result = NativeKeychainBridge.handleCommand(args: args) {
+                        return result
+                    }
+                }
+                if (file == "/bin/sh" || file == "/bin/bash" || file.hasSuffix("/sh") || file.hasSuffix("/bash")),
+                   args.count >= 2, args[0] == "-c" || args[0] == "-lc" {
+                    if let result = NativeKeychainBridge.handleShellCommand(args[1]) {
+                        return result
+                    }
+                }
+            } catch {
+                // Fall through to process-based execution
+            }
+
             #if os(macOS)
             do {
                 let args = try Self.parseStringArray(json: argsJSON)
