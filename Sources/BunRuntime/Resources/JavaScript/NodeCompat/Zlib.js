@@ -28,6 +28,14 @@
         gunzipSync: function() {
             throw new Error('node:zlib is not yet supported in swift-bun');
         },
+        inflateSync: function(input) {
+            var buffer = toBuffer(input);
+            var result = __zlibInflateSync(Array.from(buffer));
+            if (result && result.error) {
+                throw new Error(result.error);
+            }
+            return Buffer.from(result.bytes || []);
+        },
         deflateSync: function(input) {
             var buffer = toBuffer(input);
             var result = __zlibDeflateSync(Array.from(buffer));
@@ -36,7 +44,17 @@
             }
             return Buffer.from(result.bytes || []);
         },
-        constants: {},
+        constants: {
+            Z_NO_FLUSH: 0,
+            Z_PARTIAL_FLUSH: 1,
+            Z_SYNC_FLUSH: 2,
+            Z_FULL_FLUSH: 3,
+            Z_FINISH: 4,
+            Z_BLOCK: 5,
+            Z_DEFAULT_COMPRESSION: -1,
+            Z_DEFAULT_STRATEGY: 0,
+            Z_DEFLATED: 8,
+        },
     };
     zlib.default = zlib;
     __nodeModules.zlib = zlib;

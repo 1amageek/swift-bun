@@ -125,8 +125,34 @@ public final class BunProcess: Sendable {
             },
             log: logger
         )
-        let socketRuntime = SocketRuntime()
-        let httpServerRuntime = HTTPServerRuntime()
+        let socketRuntime = SocketRuntime(
+            onServerOpened: {
+                handleRegistry.incrementTCPServerCount()
+                return lifecycle.acquireVisibleHandle(kind: "tcpServer")
+            },
+            onServerClosed: { token in
+                handleRegistry.decrementTCPServerCount()
+                lifecycle.releaseVisibleHandle(token)
+            },
+            onSocketOpened: {
+                handleRegistry.incrementTCPSocketCount()
+                return lifecycle.acquireVisibleHandle(kind: "tcpSocket")
+            },
+            onSocketClosed: { token in
+                handleRegistry.decrementTCPSocketCount()
+                lifecycle.releaseVisibleHandle(token)
+            }
+        )
+        let httpServerRuntime = HTTPServerRuntime(
+            onServerOpened: {
+                handleRegistry.incrementHTTPServerCount()
+                return lifecycle.acquireVisibleHandle(kind: "httpServer")
+            },
+            onServerClosed: { token in
+                handleRegistry.decrementHTTPServerCount()
+                lifecycle.releaseVisibleHandle(token)
+            }
+        )
 
         self.executor = executor
         self.lifecycle = lifecycle
@@ -482,6 +508,8 @@ public final class BunProcess: Sendable {
         try throwPendingJavaScriptException(source: "setup:timerBridge")
         installFetchBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:fetchBridge")
+        installDNSBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:dnsBridge")
         installSocketBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:socketBridge")
         installHTTPServerBridge(in: ctx)
@@ -1142,6 +1170,39 @@ public final class BunProcess: Sendable {
             socketRuntime.destroy(socketID: socketID)
         }
         ctx.setObject(destroyBlock, forKeyedSubscript: "__netDestroy" as NSString)
+    }
+
+    private func installDNSBridge(in ctx: JSContext) {
+        let dispatchEvent: @Sendable ([String: Any]) -> Void = { [self] payload in
+            self.scheduler.enqueueHostCallback(source: "dns.lookup") {
+                guard let ctx = self.executor.context,
+                      let dispatcher = ctx.objectForKeyedSubscript("__swiftBunDNSDispatch"),
+                      !dispatcher.isUndefined else {
+                    return
+                }
+                _ = dispatcher.call(withArguments: [payload])
+                self.reportPendingJavaScriptException(source: "dnsDispatch")
+            }
+        }
+
+        let lookupAsyncBlock: @convention(block) (String, Int32, Int32) -> Void = { host, family, requestID in
+            Task {
+                do {
+                    let result = try NodeStubs.lookupAddress(for: host, family: family == 0 ? nil : Int(family))
+                    dispatchEvent([
+                        "requestID": Int(requestID),
+                        "address": result.address,
+                        "family": result.family,
+                    ])
+                } catch {
+                    dispatchEvent([
+                        "requestID": Int(requestID),
+                        "error": "\(error)",
+                    ])
+                }
+            }
+        }
+        ctx.setObject(lookupAsyncBlock, forKeyedSubscript: "__dnsLookupAsync" as NSString)
     }
 
     private func installHTTPServerBridge(in ctx: JSContext) {

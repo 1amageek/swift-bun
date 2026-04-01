@@ -4,8 +4,14 @@
                 this._maxListeners = 10;
             }
             EventEmitter.prototype.on = function(event, fn) {
+                if (event !== 'newListener' && this._events.newListener && this._events.newListener.length) {
+                    this.emit('newListener', event, fn);
+                }
                 if (!this._events[event]) this._events[event] = [];
                 this._events[event].push(fn);
+                if (this._maxListeners > 0 && this._events[event].length > this._maxListeners && typeof console !== 'undefined' && typeof console.warn === 'function') {
+                    console.warn('MaxListenersExceededWarning: Possible EventEmitter memory leak detected for event "' + event + '"');
+                }
                 return this;
             };
             EventEmitter.prototype.addListener = EventEmitter.prototype.on;
@@ -23,9 +29,15 @@
             };
             EventEmitter.prototype.removeListener = function(event, fn) {
                 if (!this._events[event]) return this;
+                var removed = false;
                 this._events[event] = this._events[event].filter(function(listener) {
-                    return listener !== fn && listener._original !== fn;
+                    var keep = listener !== fn && listener._original !== fn;
+                    if (!keep) removed = true;
+                    return keep;
                 });
+                if (removed && event !== 'removeListener' && this._events.removeListener && this._events.removeListener.length) {
+                    this.emit('removeListener', event, fn);
+                }
                 return this;
             };
             EventEmitter.prototype.removeAllListeners = function(event) {
@@ -34,7 +46,13 @@
                 return this;
             };
             EventEmitter.prototype.emit = function(event) {
-                if (!this._events[event]) return false;
+                if (!this._events[event] || this._events[event].length === 0) {
+                    if (event === 'error') {
+                        var error = arguments.length > 1 ? arguments[1] : undefined;
+                        throw error instanceof Error ? error : new Error(error == null ? 'Unhandled error event' : String(error));
+                    }
+                    return false;
+                }
                 var args = Array.prototype.slice.call(arguments, 1);
                 var listeners = this._events[event].slice();
                 for (var index = 0; index < listeners.length; index++) {
@@ -56,8 +74,26 @@
                 return this._maxListeners;
             };
             EventEmitter.prototype.rawListeners = EventEmitter.prototype.listeners;
-            EventEmitter.prototype.prependListener = EventEmitter.prototype.on;
-            EventEmitter.prototype.prependOnceListener = EventEmitter.prototype.once;
+            EventEmitter.prototype.prependListener = function(event, fn) {
+                if (event !== 'newListener' && this._events.newListener && this._events.newListener.length) {
+                    this.emit('newListener', event, fn);
+                }
+                if (!this._events[event]) this._events[event] = [];
+                this._events[event].unshift(fn);
+                if (this._maxListeners > 0 && this._events[event].length > this._maxListeners && typeof console !== 'undefined' && typeof console.warn === 'function') {
+                    console.warn('MaxListenersExceededWarning: Possible EventEmitter memory leak detected for event "' + event + '"');
+                }
+                return this;
+            };
+            EventEmitter.prototype.prependOnceListener = function(event, fn) {
+                var self = this;
+                function wrapper() {
+                    self.removeListener(event, wrapper);
+                    fn.apply(this, arguments);
+                }
+                wrapper._original = fn;
+                return this.prependListener(event, wrapper);
+            };
             EventEmitter.prototype.eventNames = function() {
                 return Object.keys(this._events);
             };

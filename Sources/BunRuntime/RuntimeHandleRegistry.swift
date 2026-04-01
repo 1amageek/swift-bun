@@ -1,9 +1,16 @@
 @preconcurrency import JavaScriptCore
 import Foundation
 import NIOCore
+import Synchronization
 
 /// Central registry for host-visible handles and async wait tokens.
 final class RuntimeHandleRegistry: Sendable {
+    private struct NetworkHandles: Sendable {
+        var tcpServers = 0
+        var tcpSockets = 0
+        var httpServers = 0
+    }
+
     struct TimerHandle {
         var scheduled: Scheduled<Void>
         let callback: JSValue
@@ -29,6 +36,7 @@ final class RuntimeHandleRegistry: Sendable {
     private nonisolated(unsafe) var asyncWaits: [Int32: AsyncResultBox<JSResult>] = [:]
     private nonisolated(unsafe) var stdinRefed = false
     private nonisolated(unsafe) var stdinVisibleHandleToken: LifecycleController.VisibleHandleToken?
+    private let networkHandles = Mutex(NetworkHandles())
 
     func makeIdentifier() -> Int32 {
         let id = nextIdentifier
@@ -161,6 +169,34 @@ final class RuntimeHandleRegistry: Sendable {
         if stdinRefed {
             labels.append("ReadStream")
         }
+        let network = networkHandles.withLock { $0 }
+        labels.append(contentsOf: Array(repeating: "TCPServer", count: network.tcpServers))
+        labels.append(contentsOf: Array(repeating: "TCPSocket", count: network.tcpSockets))
+        labels.append(contentsOf: Array(repeating: "HTTPServer", count: network.httpServers))
         return labels
+    }
+
+    func incrementTCPServerCount() {
+        networkHandles.withLock { $0.tcpServers += 1 }
+    }
+
+    func decrementTCPServerCount() {
+        networkHandles.withLock { $0.tcpServers = max(0, $0.tcpServers - 1) }
+    }
+
+    func incrementTCPSocketCount() {
+        networkHandles.withLock { $0.tcpSockets += 1 }
+    }
+
+    func decrementTCPSocketCount() {
+        networkHandles.withLock { $0.tcpSockets = max(0, $0.tcpSockets - 1) }
+    }
+
+    func incrementHTTPServerCount() {
+        networkHandles.withLock { $0.httpServers += 1 }
+    }
+
+    func decrementHTTPServerCount() {
+        networkHandles.withLock { $0.httpServers = max(0, $0.httpServers - 1) }
     }
 }

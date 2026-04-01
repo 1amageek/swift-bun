@@ -18,6 +18,8 @@
         this.killed = false;
         this.exitCode = null;
         this.signalCode = null;
+        this.pid = 0;
+        this.stdin = new Stream.PassThrough();
         this.stdout = new Stream.PassThrough();
         this.stderr = new Stream.PassThrough();
     }
@@ -148,7 +150,7 @@
 
             child.on('close', function(code, signal) {
                 if (!cb) return;
-                if (code === 0 || code === 1) cb(null, stdout, stderr);
+                if (code === 0) cb(null, stdout, stderr);
                 else {
                     var err = new Error(stderr || ('Command exited with code ' + code));
                     err.code = code;

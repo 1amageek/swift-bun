@@ -252,4 +252,37 @@ struct NodeCompatProcessTests {
         #expect(payload.contains(#""send":false"#))
         #expect(collector.values.contains(where: { $0.contains("[stderr] diagnostic line") }))
     }
+
+    @Test("process._getActiveHandles includes listening servers")
+    func processActiveHandlesIncludeServers() async throws {
+        let result = try await withLoadedProcess { process in
+            try await process.evaluateAsync(js: """
+                (async function() {
+                    var net = require('node:net');
+                    var http = require('node:http');
+
+                    var tcpServer = net.createServer(function() {});
+                    await new Promise(function(resolve, reject) {
+                        tcpServer.once('error', reject);
+                        tcpServer.listen(0, '127.0.0.1', resolve);
+                    });
+                    var afterTCP = process._getActiveHandles().slice();
+                    await new Promise(function(resolve) { tcpServer.close(resolve); });
+
+                    var httpServer = http.createServer(function(req, res) { res.end('ok'); });
+                    await new Promise(function(resolve, reject) {
+                        httpServer.once('error', reject);
+                        httpServer.listen(0, '127.0.0.1', resolve);
+                    });
+                    var afterHTTP = process._getActiveHandles().slice();
+                    await new Promise(function(resolve) { httpServer.close(resolve); });
+
+                    return JSON.stringify({ afterTCP: afterTCP, afterHTTP: afterHTTP });
+                })()
+            """)
+        }
+
+        #expect(result.stringValue.contains(#""TCPServer""#))
+        #expect(result.stringValue.contains(#""HTTPServer""#))
+    }
 }

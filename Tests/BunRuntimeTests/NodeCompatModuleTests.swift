@@ -64,6 +64,37 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == "hello")
     }
 
+    @Test("EventEmitter prepend APIs preserve listener order")
+    func eventEmitterPrependListener() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var EventEmitter = require('node:events').EventEmitter;
+                var ee = new EventEmitter();
+                var calls = [];
+                ee.on('tick', function() { calls.push('tail'); });
+                ee.prependListener('tick', function() { calls.push('head'); });
+                ee.prependOnceListener('tick', function() { calls.push('once'); });
+                ee.emit('tick');
+                ee.emit('tick');
+                return calls.join(',');
+            })()
+        """)
+        #expect(result.stringValue == "once,head,tail,head,tail")
+    }
+
+    @Test("EventEmitter throws on unhandled error")
+    func eventEmitterUnhandledError() async throws {
+        await #expect(throws: BunRuntimeError.self) {
+            try await evaluate("""
+                (function() {
+                    var EventEmitter = require('node:events').EventEmitter;
+                    var ee = new EventEmitter();
+                    ee.emit('error', new Error('boom'));
+                })()
+            """)
+        }
+    }
+
     @Test("events helpers support EventTarget and AbortSignal")
     func eventTargetHelpers() async throws {
         let result = try await evaluate("""
@@ -281,6 +312,31 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue.contains(#""family":4"#) || result.stringValue.contains(#""family":6"#))
     }
 
+    @Test("dns.lookup callback is async and respects family option")
+    func dnsLookupAsyncFamily() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var dns = require('node:dns');
+                var order = ['before'];
+                var callbackResult = await new Promise(function(resolve, reject) {
+                    dns.lookup('localhost', { family: 4 }, function(error, address, family) {
+                        order.push('callback');
+                        if (error) reject(error);
+                        else resolve({ address: address, family: family });
+                    });
+                    order.push('after');
+                });
+                return JSON.stringify({
+                    order: order,
+                    family: callbackResult.family,
+                    address: callbackResult.address
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""order":["before","after","callback"]"#))
+        #expect(result.stringValue.contains(#""family":4"#))
+    }
+
     @Test("v8.getHeapSpaceStatistics returns array shape")
     func v8HeapSpaceStatistics() async throws {
         let result = try await evaluate("""
@@ -299,6 +355,17 @@ struct NodeCompatModuleTests {
             require('node:zlib').deflateSync('hello').toString('hex')
         """)
         #expect(result.stringValue == "789ccb48cdc9c90700062c0215")
+    }
+
+    @Test("zlib inflate roundtrip works")
+    func zlibInflateSync() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var zlib = require('node:zlib');
+                return zlib.inflateSync(zlib.deflateSync('hello world')).toString();
+            })()
+        """)
+        #expect(result.stringValue == "hello world")
     }
 
     @Test("net.createServer and connect roundtrip")
@@ -360,7 +427,15 @@ struct NodeCompatModuleTests {
                         req.on('end', function() {
                             res.setHeader('content-type', 'application/json');
                             res.writeHead(201);
-                            res.end(JSON.stringify({ method: req.method, url: req.url, body: body }));
+                            res.end(JSON.stringify({
+                                method: req.method,
+                                url: req.url,
+                                body: body,
+                                remoteAddress: req.socket.remoteAddress,
+                                remotePort: req.socket.remotePort,
+                                localAddress: req.socket.localAddress,
+                                localPort: req.socket.localPort
+                            }));
                         });
                     });
                     server.on('error', reject);
@@ -387,8 +462,16 @@ struct NodeCompatModuleTests {
                 });
             })()
         """)
-        #expect(result.stringValue.contains(#""status":201"#))
-        #expect(result.stringValue.contains(#"\"body\":\"hello\""#))
+        let data = try #require(result.stringValue.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["status"] as? Int == 201)
+        let responsePayload = try #require((payload["payload"] as? String)?.data(using: .utf8))
+        let response = try #require(JSONSerialization.jsonObject(with: responsePayload) as? [String: Any])
+        #expect(response["body"] as? String == "hello")
+        #expect(response["remoteAddress"] as? String == "127.0.0.1")
+        #expect((response["remotePort"] as? Int ?? 0) > 0)
+        #expect((response["localPort"] as? Int ?? 0) > 0)
+        #expect(response["remotePort"] as? Int != response["localPort"] as? Int)
     }
 
     #if os(macOS)
@@ -432,6 +515,27 @@ struct NodeCompatModuleTests {
             })()
         """)
         #expect(result.stringValue == "hello")
+    }
+
+    @Test("child_process.execFile reports non-zero exit as error on macOS")
+    func childProcessExecFileFailure() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var cp = require('node:child_process');
+                return await new Promise(function(resolve) {
+                    cp.execFile('/usr/bin/false', [], function(err, stdout, stderr) {
+                        resolve(JSON.stringify({
+                            hasError: !!err,
+                            code: err && err.code,
+                            stdout: stdout,
+                            stderr: stderr
+                        }));
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""hasError":true"#))
+        #expect(result.stringValue.contains(#""code":1"#))
     }
 
     @Test("child_process.spawn emits close event on macOS")

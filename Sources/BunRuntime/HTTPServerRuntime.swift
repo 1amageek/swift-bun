@@ -5,6 +5,11 @@ import NIOPosix
 import Synchronization
 
 final class HTTPServerRuntime: Sendable {
+    private struct ServerEntry: Sendable {
+        let channel: Channel
+        let visibleHandleToken: LifecycleController.VisibleHandleToken
+    }
+
     private struct PendingResponse: Sendable {
         let channel: Channel
         let version: HTTPVersion
@@ -12,25 +17,35 @@ final class HTTPServerRuntime: Sendable {
 
     private struct State: Sendable {
         var nextRequestID: Int32 = 1
-        var serverChannels: [Int32: Channel] = [:]
+        var serverChannels: [Int32: ServerEntry] = [:]
         var pendingResponses: [Int32: PendingResponse] = [:]
     }
 
     private let group: MultiThreadedEventLoopGroup
     private let state = Mutex(State())
+    private let onServerOpened: @Sendable () -> LifecycleController.VisibleHandleToken
+    private let onServerClosed: @Sendable (LifecycleController.VisibleHandleToken) -> Void
 
-    init() {
+    init(
+        onServerOpened: @escaping @Sendable () -> LifecycleController.VisibleHandleToken,
+        onServerClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken) -> Void
+    ) {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        self.onServerOpened = onServerOpened
+        self.onServerClosed = onServerClosed
     }
 
     func shutdown() async throws {
-        let channels = state.withLock { state -> [Channel] in
+        let entries = state.withLock { state -> [ServerEntry] in
             let values = Array(state.serverChannels.values)
             state.serverChannels.removeAll()
             state.pendingResponses.removeAll()
             return values
         }
-        for channel in channels {
+        for entry in entries {
+            onServerClosed(entry.visibleHandleToken)
+        }
+        for channel in entries.map(\.channel) {
             do {
                 try await channel.close().get()
             } catch {
@@ -81,7 +96,8 @@ final class HTTPServerRuntime: Sendable {
             do {
                 let channel = try await bootstrap.bind(host: host, port: port).get()
                 let localPort = channel.localAddress?.port ?? port
-                state.withLock { $0.serverChannels[serverID] = channel }
+                let visibleHandleToken = self.onServerOpened()
+                state.withLock { $0.serverChannels[serverID] = ServerEntry(channel: channel, visibleHandleToken: visibleHandleToken) }
                 callback([
                     "type": "listening",
                     "serverID": Int(serverID),
@@ -93,8 +109,11 @@ final class HTTPServerRuntime: Sendable {
                         "type": "close",
                         "serverID": Int(serverID),
                     ])
-                    _ = self.state.withLock { state in
-                        state.serverChannels.removeValue(forKey: serverID)
+                    let token = self.state.withLock { state in
+                        state.serverChannels.removeValue(forKey: serverID)?.visibleHandleToken
+                    }
+                    if let token {
+                        self.onServerClosed(token)
                     }
                 }
             } catch {
@@ -108,7 +127,7 @@ final class HTTPServerRuntime: Sendable {
     }
 
     func closeServer(id: Int32) {
-        let channel = state.withLock { $0.serverChannels.removeValue(forKey: id) }
+        let channel = state.withLock { $0.serverChannels[id]?.channel }
         channel?.close(promise: nil)
     }
 
@@ -176,6 +195,10 @@ private final class HTTPServerInboundHandler: ChannelInboundHandler {
                 "requestID": Int(requestID),
                 "method": requestHead.method.rawValue,
                 "url": requestHead.uri,
+                "remoteAddress": context.channel.remoteAddress?.ipAddress ?? "",
+                "remotePort": context.channel.remoteAddress?.port ?? 0,
+                "localAddress": context.channel.localAddress?.ipAddress ?? "",
+                "localPort": context.channel.localAddress?.port ?? 0,
                 "headers": headers,
                 "body": bodyBytes.map(Int.init),
             ])

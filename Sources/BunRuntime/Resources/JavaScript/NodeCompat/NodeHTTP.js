@@ -402,8 +402,10 @@
                                 request.headers = event.headers || {};
                                 request.httpVersion = '1.1';
                                 request.socket = {
-                                    remoteAddress: currentServer._host,
-                                    remotePort: currentServer._port,
+                                    remoteAddress: event.remoteAddress || '',
+                                    remotePort: event.remotePort || 0,
+                                    localAddress: event.localAddress || currentServer._host,
+                                    localPort: event.localPort || currentServer._port,
                                     destroy: function() {}
                                 };
                                 var responseChunks = [];

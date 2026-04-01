@@ -26,6 +26,9 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
                     }
                 }
             } catch {
+                #if !os(macOS)
+                return ["error": "Invalid child_process arguments: \(error)"]
+                #endif
                 // Fall through to process-based execution
             }
 
@@ -96,9 +99,19 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
         }
         context.setObject(zlibDeflateSyncBlock, forKeyedSubscript: "__zlibDeflateSync" as NSString)
 
-        let dnsLookupBlock: @convention(block) (String) -> [String: Any] = { host in
+        let zlibInflateSyncBlock: @convention(block) ([UInt8]) -> [String: Any] = { bytes in
             do {
-                let result = try Self.lookupAddress(for: host)
+                return ["bytes": try Self.inflateZlib(Data(bytes)).map(Int.init)]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        context.setObject(zlibInflateSyncBlock, forKeyedSubscript: "__zlibInflateSync" as NSString)
+
+        let dnsLookupBlock: @convention(block) (String, Int32) -> [String: Any] = { host, family in
+            do {
+                let normalizedFamily = family == 0 ? nil : Int(family)
+                let result = try Self.lookupAddress(for: host, family: normalizedFamily)
                 return [
                     "address": result.address,
                     "family": result.family,
@@ -181,44 +194,89 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
             return [0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]
         }
 
-        let destinationCapacity = max(64, data.count * 2)
-        let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: destinationCapacity)
-        defer { destination.deallocate() }
+        var destinationCapacity = max(64, data.count + 64)
+        while destinationCapacity <= max(1_048_576, data.count * 16 + 64) {
+            let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: destinationCapacity)
+            defer { destination.deallocate() }
 
-        let compressedSize = data.withUnsafeBytes { sourceBytes in
-            guard let baseAddress = sourceBytes.bindMemory(to: UInt8.self).baseAddress else {
-                return 0
+            let compressedSize = data.withUnsafeBytes { sourceBytes in
+                guard let baseAddress = sourceBytes.bindMemory(to: UInt8.self).baseAddress else {
+                    return 0
+                }
+                return compression_encode_buffer(
+                    destination,
+                    destinationCapacity,
+                    baseAddress,
+                    data.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
             }
-            return compression_encode_buffer(
-                destination,
-                destinationCapacity,
-                baseAddress,
-                data.count,
-                nil,
-                COMPRESSION_ZLIB
-            )
+
+            if compressedSize > 0 {
+                let deflated = Array(UnsafeBufferPointer(start: destination, count: compressedSize))
+                let checksum = adler32(data)
+                return [0x78, 0x9c]
+                    + deflated
+                    + [
+                        UInt8((checksum >> 24) & 0xff),
+                        UInt8((checksum >> 16) & 0xff),
+                        UInt8((checksum >> 8) & 0xff),
+                        UInt8(checksum & 0xff),
+                    ]
+            }
+
+            destinationCapacity *= 2
         }
 
-        guard compressedSize > 0 else {
-            throw NSError(domain: NSCocoaErrorDomain, code: NSCompressionFailedError)
-        }
-
-        let deflated = Array(UnsafeBufferPointer(start: destination, count: compressedSize))
-        let checksum = adler32(data)
-        return [0x78, 0x9c]
-            + deflated
-            + [
-                UInt8((checksum >> 24) & 0xff),
-                UInt8((checksum >> 16) & 0xff),
-                UInt8((checksum >> 8) & 0xff),
-                UInt8(checksum & 0xff),
-            ]
+        throw NSError(domain: NSCocoaErrorDomain, code: NSCompressionFailedError)
     }
 
-    private static func lookupAddress(for host: String) throws -> (address: String, family: Int) {
+    private static func inflateZlib(_ data: Data) throws -> [UInt8] {
+        if data.isEmpty {
+            return []
+        }
+
+        let payload: Data
+        if data.count >= 6, data[0] == 0x78 {
+            payload = data.dropFirst(2).dropLast(4)
+        } else {
+            payload = data
+        }
+
+        var destinationCapacity = max(64, payload.count * 4)
+        while destinationCapacity <= max(1_048_576, payload.count * 64 + 64) {
+            let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: destinationCapacity)
+            defer { destination.deallocate() }
+
+            let decodedSize = payload.withUnsafeBytes { sourceBytes in
+                guard let baseAddress = sourceBytes.bindMemory(to: UInt8.self).baseAddress else {
+                    return 0
+                }
+                return compression_decode_buffer(
+                    destination,
+                    destinationCapacity,
+                    baseAddress,
+                    payload.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+
+            if decodedSize > 0 {
+                return Array(UnsafeBufferPointer(start: destination, count: decodedSize))
+            }
+
+            destinationCapacity *= 2
+        }
+
+        throw NSError(domain: NSCocoaErrorDomain, code: NSCompressionFailedError)
+    }
+
+    static func lookupAddress(for host: String, family: Int? = nil) throws -> (address: String, family: Int) {
         var hints = addrinfo(
             ai_flags: AI_ADDRCONFIG,
-            ai_family: AF_UNSPEC,
+            ai_family: family == 4 ? AF_INET : (family == 6 ? AF_INET6 : AF_UNSPEC),
             ai_socktype: SOCK_STREAM,
             ai_protocol: IPPROTO_TCP,
             ai_addrlen: 0,

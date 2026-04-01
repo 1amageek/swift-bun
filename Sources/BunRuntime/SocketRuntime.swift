@@ -4,28 +4,59 @@ import NIOPosix
 import Synchronization
 
 final class SocketRuntime: Sendable {
+    private struct ServerEntry: Sendable {
+        let channel: Channel
+        let visibleHandleToken: LifecycleController.VisibleHandleToken
+    }
+
+    private struct SocketEntry: Sendable {
+        let channel: Channel
+        let visibleHandleToken: LifecycleController.VisibleHandleToken
+    }
+
     private struct State: Sendable {
         var nextSocketID: Int32 = 1
-        var serverChannels: [Int32: Channel] = [:]
-        var socketChannels: [Int32: Channel] = [:]
+        var serverChannels: [Int32: ServerEntry] = [:]
+        var socketChannels: [Int32: SocketEntry] = [:]
     }
 
     private let group: MultiThreadedEventLoopGroup
     private let state = Mutex(State())
+    private let onServerOpened: @Sendable () -> LifecycleController.VisibleHandleToken
+    private let onServerClosed: @Sendable (LifecycleController.VisibleHandleToken) -> Void
+    private let onSocketOpened: @Sendable () -> LifecycleController.VisibleHandleToken
+    private let onSocketClosed: @Sendable (LifecycleController.VisibleHandleToken) -> Void
 
-    init() {
+    init(
+        onServerOpened: @escaping @Sendable () -> LifecycleController.VisibleHandleToken,
+        onServerClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken) -> Void,
+        onSocketOpened: @escaping @Sendable () -> LifecycleController.VisibleHandleToken,
+        onSocketClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken) -> Void
+    ) {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        self.onServerOpened = onServerOpened
+        self.onServerClosed = onServerClosed
+        self.onSocketOpened = onSocketOpened
+        self.onSocketClosed = onSocketClosed
     }
 
     func shutdown() async throws {
-        let channels = state.withLock { state -> [Channel] in
-            let values = Array(state.serverChannels.values) + Array(state.socketChannels.values)
+        let entries = state.withLock { state -> ([ServerEntry], [SocketEntry]) in
+            let servers = Array(state.serverChannels.values)
+            let sockets = Array(state.socketChannels.values)
             state.serverChannels.removeAll()
             state.socketChannels.removeAll()
-            return values
+            return (servers, sockets)
         }
 
-        for channel in channels {
+        for entry in entries.0 {
+            onServerClosed(entry.visibleHandleToken)
+        }
+        for entry in entries.1 {
+            onSocketClosed(entry.visibleHandleToken)
+        }
+
+        for channel in entries.0.map(\.channel) + entries.1.map(\.channel) {
             do {
                 try await channel.close().get()
             } catch {
@@ -55,10 +86,11 @@ final class SocketRuntime: Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [weak self] channel in
                 guard let self else { return channel.eventLoop.makeSucceededFuture(()) }
+                let visibleHandleToken = self.onSocketOpened()
                 let socketID = self.state.withLock { state -> Int32 in
                     let identifier = state.nextSocketID
                     state.nextSocketID += 1
-                    state.socketChannels[identifier] = channel
+                    state.socketChannels[identifier] = SocketEntry(channel: channel, visibleHandleToken: visibleHandleToken)
                     return identifier
                 }
 
@@ -67,8 +99,11 @@ final class SocketRuntime: Sendable {
                     serverID: serverID,
                     callback: callback,
                     onClose: { [weak self] identifier in
-                        _ = self?.state.withLock { state in
-                            state.socketChannels.removeValue(forKey: identifier)
+                        let token = self?.state.withLock { state in
+                            state.socketChannels.removeValue(forKey: identifier)?.visibleHandleToken
+                        }
+                        if let token {
+                            self?.onSocketClosed(token)
                         }
                     }
                 )
@@ -81,7 +116,8 @@ final class SocketRuntime: Sendable {
             do {
                 let channel = try await bootstrap.bind(host: host, port: port).get()
                 let localPort = channel.localAddress?.port ?? port
-                state.withLock { $0.serverChannels[serverID] = channel }
+                let visibleHandleToken = self.onServerOpened()
+                state.withLock { $0.serverChannels[serverID] = ServerEntry(channel: channel, visibleHandleToken: visibleHandleToken) }
                 callback([
                     "type": "listening",
                     "serverID": Int(serverID),
@@ -93,8 +129,11 @@ final class SocketRuntime: Sendable {
                         "type": "close",
                         "serverID": Int(serverID),
                     ])
-                    self.state.withLock { state in
-                        state.serverChannels.removeValue(forKey: serverID)
+                    let token = self.state.withLock { state in
+                        state.serverChannels.removeValue(forKey: serverID)?.visibleHandleToken
+                    }
+                    if let token {
+                        self.onServerClosed(token)
                     }
                 }
             } catch {
@@ -108,7 +147,7 @@ final class SocketRuntime: Sendable {
     }
 
     func closeServer(id: Int32) {
-        let channel = state.withLock { $0.serverChannels.removeValue(forKey: id) }
+        let channel = state.withLock { $0.serverChannels[id]?.channel }
         channel?.close(promise: nil)
     }
 
@@ -120,15 +159,20 @@ final class SocketRuntime: Sendable {
     ) {
         let bootstrap = ClientBootstrap(group: group)
             .channelInitializer { [weak self] channel in
-                self?.state.withLock { $0.socketChannels[socketID] = channel }
+                guard let self else { return channel.eventLoop.makeSucceededFuture(()) }
+                let visibleHandleToken = self.onSocketOpened()
+                self.state.withLock { $0.socketChannels[socketID] = SocketEntry(channel: channel, visibleHandleToken: visibleHandleToken) }
                 return channel.pipeline.addHandler(
                     TCPSocketInboundHandler(
                         socketID: socketID,
                         serverID: nil,
                         callback: callback,
                         onClose: { [weak self] identifier in
-                            _ = self?.state.withLock { state in
-                                state.socketChannels.removeValue(forKey: identifier)
+                            let token = self?.state.withLock { state in
+                                state.socketChannels.removeValue(forKey: identifier)?.visibleHandleToken
+                            }
+                            if let token {
+                                self?.onSocketClosed(token)
                             }
                         }
                     )
@@ -159,14 +203,14 @@ final class SocketRuntime: Sendable {
     }
 
     func write(socketID: Int32, bytes: [UInt8]) {
-        guard let channel = state.withLock({ $0.socketChannels[socketID] }) else { return }
+        guard let channel = state.withLock({ $0.socketChannels[socketID]?.channel }) else { return }
         var buffer = channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
         channel.writeAndFlush(buffer, promise: nil)
     }
 
     func end(socketID: Int32, bytes: [UInt8]?) {
-        guard let channel = state.withLock({ $0.socketChannels[socketID] }) else { return }
+        guard let channel = state.withLock({ $0.socketChannels[socketID]?.channel }) else { return }
         if let bytes, !bytes.isEmpty {
             var buffer = channel.allocator.buffer(capacity: bytes.count)
             buffer.writeBytes(bytes)
@@ -179,7 +223,7 @@ final class SocketRuntime: Sendable {
     }
 
     func destroy(socketID: Int32) {
-        let channel = state.withLock { $0.socketChannels.removeValue(forKey: socketID) }
+        let channel = state.withLock { $0.socketChannels[socketID]?.channel }
         channel?.close(promise: nil)
     }
 }

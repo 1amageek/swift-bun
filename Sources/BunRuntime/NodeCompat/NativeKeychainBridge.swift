@@ -48,7 +48,7 @@ struct NativeKeychainBridge: Sendable {
     // MARK: - Subcommand handlers
 
     private static func handleFind(args: [String]) -> [String: Any] {
-        let parsed = parseSecurityFlags(args)
+        let parsed = parseSecurityFlags(subcommand: "find-generic-password", args)
         let account = parsed["-a"]
         let service = parsed["-s"]
         let outputPassword = parsed.keys.contains("-w")
@@ -72,12 +72,17 @@ struct NativeKeychainBridge: Sendable {
         if outputPassword {
             return success(stdout: password)
         }
-        // Without -w, return minimal info (actual `security` outputs multi-line detail)
-        return success(stdout: password)
+        let summary = [
+            service.map { "service: \($0)" },
+            account.map { "account: \($0)" },
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n")
+        return success(stdout: summary.isEmpty ? "password item found" : summary)
     }
 
     private static func handleAdd(args: [String]) -> [String: Any] {
-        let parsed = parseSecurityFlags(args)
+        let parsed = parseSecurityFlags(subcommand: "add-generic-password", args)
         let account = parsed["-a"]
         let service = parsed["-s"]
         let update = parsed.keys.contains("-U")
@@ -131,7 +136,7 @@ struct NativeKeychainBridge: Sendable {
     }
 
     private static func handleDelete(args: [String]) -> [String: Any] {
-        let parsed = parseSecurityFlags(args)
+        let parsed = parseSecurityFlags(subcommand: "delete-generic-password", args)
         let account = parsed["-a"]
         let service = parsed["-s"]
 
@@ -162,15 +167,20 @@ struct NativeKeychainBridge: Sendable {
     ///
     /// Flags like `-a value`, `-s value`, `-X value`, `-w value` produce `["-a": "value", ...]`.
     /// Standalone flags like `-w` (no value) or `-U` produce `["-w": "", "-U": ""]`.
-    private static func parseSecurityFlags(_ args: [String]) -> [String: String] {
+    private static func parseSecurityFlags(subcommand: String, _ args: [String]) -> [String: String] {
         var result: [String: String] = [:]
+        let valuedFlags: Set<String>
+        switch subcommand {
+        case "add-generic-password":
+            valuedFlags = ["-a", "-s", "-X", "-l", "-D", "-j", "-w"]
+        default:
+            valuedFlags = ["-a", "-s", "-X", "-l", "-D", "-j"]
+        }
         var i = 0
         while i < args.count {
             let arg = args[i]
             guard arg.hasPrefix("-") else { i += 1; continue }
 
-            // Flags that take a value argument
-            let valuedFlags: Set<String> = ["-a", "-s", "-X", "-l", "-D", "-j"]
             if valuedFlags.contains(arg) {
                 if i + 1 < args.count {
                     result[arg] = args[i + 1]
@@ -189,11 +199,11 @@ struct NativeKeychainBridge: Sendable {
         return result
     }
 
-    /// Parses a shell argument string, respecting double quotes.
+    /// Parses a shell argument string, respecting single and double quotes.
     private static func parseShellArguments(_ command: String) -> [String] {
         var args: [String] = []
         var current = ""
-        var inQuotes = false
+        var quote: Character?
         var escaped = false
 
         for char in command {
@@ -202,9 +212,15 @@ struct NativeKeychainBridge: Sendable {
                 escaped = false
             } else if char == "\\" {
                 escaped = true
-            } else if char == "\"" {
-                inQuotes.toggle()
-            } else if char == " " && !inQuotes {
+            } else if char == "\"" || char == "'" {
+                if quote == nil {
+                    quote = char
+                } else if quote == char {
+                    quote = nil
+                } else {
+                    current.append(char)
+                }
+            } else if char == " " && quote == nil {
                 if !current.isEmpty {
                     args.append(current)
                     current = ""
