@@ -5,12 +5,18 @@ import Darwin
 #endif
 
 /// `node:os` implementation bridging to `ProcessInfo`.
-enum NodeOS {
-    static func install(in context: JSContext, environment: [String: String] = [:]) throws {
+struct NodeOS: JavaScriptModuleInstalling {
+    let environment: [String: String]
+
+    init(environment: [String: String] = [:]) {
+        self.environment = environment
+    }
+
+    func install(into context: JSContext) throws {
         let info = ProcessInfo.processInfo
-        let mergedEnvironment = mergedHostEnvironment(overrides: environment)
-        let homeDirectory = configuredHomeDirectory(from: mergedEnvironment)
-        let temporaryDirectory = configuredTemporaryDirectory(from: mergedEnvironment)
+        let mergedEnvironment = Self.mergedHostEnvironment(overrides: environment)
+        let homeDirectory = Self.configuredHomeDirectory(from: mergedEnvironment)
+        let temporaryDirectory = Self.configuredTemporaryDirectory(from: mergedEnvironment)
         let username = mergedEnvironment["USER"] ?? mergedEnvironment["LOGNAME"] ?? "mobile"
         let shell = mergedEnvironment["SHELL"] ?? "/bin/zsh"
         let osVersion = info.operatingSystemVersion
@@ -43,7 +49,7 @@ enum NodeOS {
         }
         context.setObject(cpuCountBlock, forKeyedSubscript: "__osCpuCount" as NSString)
 
-        let configJSON = try makeConfigJSON([
+        let configJSON = try Self.makeConfigJSON([
             "release": releaseString,
             "username": username,
             "uid": Int(uid),
@@ -54,7 +60,7 @@ enum NodeOS {
         globalThis.__swiftBunConfig = globalThis.__swiftBunConfig || {};
         globalThis.__swiftBunConfig.os = \(configJSON);
         """)
-        try JavaScriptResource.evaluate(.nodeCompat(.os), in: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.os)).install(into: context)
     }
 
     private static func mergedHostEnvironment(overrides: [String: String]) -> [String: String] {

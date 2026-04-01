@@ -5,8 +5,8 @@ import CryptoKit
 #endif
 
 /// `node:crypto` implementation bridging to `CryptoKit`.
-enum NodeCrypto {
-    static func install(in context: JSContext) throws {
+struct NodeCrypto: JavaScriptModuleInstalling {
+    func install(into context: JSContext) throws {
         // randomBytes
         let randomBytesBlock: @convention(block) (Int) -> [UInt8] = { size in
             var bytes = [UInt8](repeating: 0, count: size)
@@ -53,6 +53,6 @@ enum NodeCrypto {
         }
         context.setObject(hmacBlock, forKeyedSubscript: "__cryptoHMAC" as NSString)
 
-        try JavaScriptResource.evaluate(.nodeCompat(.crypto), in: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.crypto)).install(into: context)
     }
 }

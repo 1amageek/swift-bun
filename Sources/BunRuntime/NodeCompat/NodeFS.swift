@@ -2,9 +2,21 @@
 import Foundation
 
 /// `node:fs` implementation bridging to `FileManager`.
-enum NodeFS {
-    static func install(in context: JSContext, asyncBridge: FileSystemAsyncBridge? = nil) throws {
+struct NodeFS: JavaScriptModuleInstalling {
+    let asyncBridge: FileSystemAsyncBridge?
+
+    init(asyncBridge: FileSystemAsyncBridge? = nil) {
+        self.asyncBridge = asyncBridge
+    }
+
+    func install(into context: JSContext) throws {
         let fm = FileManager.default
+        func mapFSError(_ error: any Error, operation: String, path: String) -> String {
+            Self.mapFSError(error, operation: operation, path: path)
+        }
+        func performRename(using fileManager: FileManager, from oldPath: String, to newPath: String) throws {
+            try Self.performRename(using: fileManager, from: oldPath, to: newPath)
+        }
 
         // readFileSync — returns { value: string|[UInt8] } or { error: string }
         let readFileBlock: @convention(block) (String, String) -> [String: Any] = { path, encoding in
@@ -488,7 +500,7 @@ enum NodeFS {
             context.setObject(closeHandleAsyncBlock, forKeyedSubscript: "__fsCloseHandleAsync" as NSString)
         }
 
-        try JavaScriptResource.evaluate(.nodeCompat(.fs), in: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.fs)).install(into: context)
 
     }
 

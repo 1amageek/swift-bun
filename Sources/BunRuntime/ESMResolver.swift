@@ -2,59 +2,58 @@
 import Foundation
 
 /// Resolves `require("node:*")` calls by returning polyfill module objects.
-enum ESMResolver {
-    /// Install the `require()` function and all built-in modules into the given context.
-    static func install(
-        in context: JSContext,
+struct ESMResolver {
+    let fileSystemAsyncBridge: FileSystemAsyncBridge?
+    let environment: [String: String]
+    let cwd: String?
+
+    init(
         fileSystemAsyncBridge: FileSystemAsyncBridge? = nil,
         environment: [String: String] = [:],
         cwd: String? = nil
-    ) throws {
-        try installModules(
-            in: context,
-            fileSystemAsyncBridge: fileSystemAsyncBridge,
-            environment: environment,
-            cwd: cwd
-        )
-        try installRequire(in: context)
+    ) {
+        self.fileSystemAsyncBridge = fileSystemAsyncBridge
+        self.environment = environment
+        self.cwd = cwd
+    }
+
+    /// Install the `require()` function and all built-in modules into the given context.
+    func install(into context: JSContext) throws {
+        try installModules(into: context)
+        try installRequire(into: context)
     }
 
     /// Install all module polyfills without `require()`.
     ///
     /// `BunProcess` calls this, then installs its NIO-backed timer/fetch bridges
     /// (which override the default ones), then calls `installRequire()` separately.
-    static func installModules(
-        in context: JSContext,
-        fileSystemAsyncBridge: FileSystemAsyncBridge? = nil,
-        environment: [String: String] = [:],
-        cwd: String? = nil
-    ) throws {
+    func installModules(into context: JSContext) throws {
         try installGlobals(in: context, environment: environment, cwd: cwd)
-        try installPureJavaScriptModules(
+        try installResourceModules(
             in: context,
-            NodePath.self,
-            NodeBuffer.self,
-            NodeURL.self,
-            NodeUtil.self
+            .nodeCompat(.path),
+            .nodeCompat(.buffer),
+            .nodeCompat(.url),
+            .nodeCompat(.util)
         )
-        try NodeOS.install(in: context, environment: environment)
-        try NodeFS.install(in: context, asyncBridge: fileSystemAsyncBridge)
-        try NodeCrypto.install(in: context)
-        try installPureJavaScriptModules(
+        try NodeOS(environment: environment).install(into: context)
+        try NodeFS(asyncBridge: fileSystemAsyncBridge).install(into: context)
+        try NodeCrypto().install(into: context)
+        try installResourceModules(
             in: context,
-            NodeHTTP.self,
-            NodeStream.self,
-            NodeTimers.self
+            .nodeCompat(.http),
+            .nodeCompat(.stream),
+            .nodeCompat(.timers)
         )
-        try NodeStubs.install(in: context)
-        try installPureJavaScriptModules(in: context, BunShims.self)
-        BunEnv.install(in: context, environment: environment)
-        try installPureJavaScriptModules(in: context, BunFile.self, BunSpawn.self)
+        try NodeStubs().install(into: context)
+        try installResourceModules(in: context, .bunAPI(.shims))
+        BunEnvironmentInstaller(environment: environment).install(into: context)
+        try installResourceModules(in: context, .bunAPI(.file), .bunAPI(.spawn))
     }
 
     // MARK: - Private
 
-    private static func installGlobals(
+    private func installGlobals(
         in context: JSContext,
         environment: [String: String],
         cwd: String?
@@ -69,15 +68,15 @@ enum ESMResolver {
         context.setObject(logBlock, forKeyedSubscript: "__nativeLog" as NSString)
         try JavaScriptResource.evaluate(.bootstrap(.console), in: context)
 
-        let platformName = runtimePlatform()
-        let archName = runtimeArch()
+        let platformName = Self.runtimePlatform()
+        let archName = Self.runtimeArch()
         let processID = ProcessInfo.processInfo.processIdentifier
         let parentPID: Int32 = getppid()
         let uid = getuid()
         let gid = getgid()
         let euid = geteuid()
         let egid = getegid()
-        let processConfig = try makeConfigJSON([
+        let processConfig = try Self.makeConfigJSON([
             "platform": platformName,
             "arch": archName,
             "pid": Int(processID),
@@ -100,16 +99,16 @@ enum ESMResolver {
     }
 
     /// Install the `require()` function. Must be called after all modules are registered.
-    static func installRequire(in context: JSContext) throws {
+    func installRequire(into context: JSContext) throws {
         try JavaScriptResource.evaluate(.bootstrap(.require), in: context)
     }
 
-    private static func installPureJavaScriptModules(
+    private func installResourceModules(
         in context: JSContext,
-        _ installers: any JavaScriptResourceBackedInstaller.Type...
+        _ scripts: JavaScriptResource.Script...
     ) throws {
-        for installer in installers {
-            try installer.install(in: context)
+        for script in scripts {
+            try JavaScriptModuleInstaller(script: script).install(into: context)
         }
     }
 

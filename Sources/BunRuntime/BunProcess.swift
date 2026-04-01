@@ -455,12 +455,12 @@ public final class BunProcess: Sendable {
         try installWebAPIPolyfills(in: ctx)
         try throwPendingJavaScriptException(source: "setup:webAPIPolyfills")
 
-        try ESMResolver.installModules(
-            in: ctx,
+        let resolver = ESMResolver(
             fileSystemAsyncBridge: fileSystemAsyncBridge,
             environment: runtimeEnvironment,
             cwd: cwd
         )
+        try resolver.installModules(into: ctx)
         try throwPendingJavaScriptException(source: "setup:installModules")
         installConsoleBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:consoleBridge")
@@ -478,7 +478,7 @@ public final class BunProcess: Sendable {
         try throwPendingJavaScriptException(source: "setup:stdinBridge")
         try patchTimerModuleReferences(in: ctx)
         try throwPendingJavaScriptException(source: "setup:patchTimerRefs")
-        try ESMResolver.installRequire(in: ctx)
+        try resolver.installRequire(into: ctx)
         try throwPendingJavaScriptException(source: "setup:installRequire")
 
         if let bundle {

@@ -51,7 +51,7 @@ struct NodeCompatStreamTests {
             #expect(Bool(false))
             return
         }
-        try NodeHTTP.install(in: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.http)).install(into: context)
         let result = context.evaluateScript("typeof __nativeFetch")
         #expect(result?.toString() == "undefined")
     }
@@ -62,7 +62,7 @@ struct NodeCompatStreamTests {
         let stdinBefore = context.evaluateScript("process.stdin")
         let stdoutBefore = context.evaluateScript("process.stdout")
 
-        try ESMResolver.installModules(in: context)
+        try ESMResolver().installModules(into: context)
 
         let stdinAfter = context.evaluateScript("process.stdin")
         let stdoutAfter = context.evaluateScript("process.stdout")
@@ -74,8 +74,9 @@ struct NodeCompatStreamTests {
     @Test("node:stream reuses Layer 0 stream constructors")
     func nodeStreamReusesLayer0Constructors() throws {
         let context = try makeLayer0Context()
-        try ESMResolver.installModules(in: context)
-        try ESMResolver.installRequire(in: context)
+        let resolver = ESMResolver()
+        try resolver.installModules(into: context)
+        try resolver.installRequire(into: context)
 
         let result = context.evaluateScript("""
             (function() {

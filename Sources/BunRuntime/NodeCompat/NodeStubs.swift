@@ -5,16 +5,16 @@ import Foundation
 ///
 /// These provide minimal interfaces to prevent import errors
 /// while clearly indicating that the functionality is not available.
-enum NodeStubs {
-    static func install(in context: JSContext) throws {
+struct NodeStubs: JavaScriptModuleInstalling {
+    func install(into context: JSContext) throws {
         let childProcessRunSyncBlock: @convention(block) (String, String, String) -> [String: Any] = { file, argsJSON, optionsJSON in
             #if os(macOS)
             do {
-                let args = try parseStringArray(json: argsJSON)
-                let options = try parseJSONObject(json: optionsJSON)
+                let args = try Self.parseStringArray(json: argsJSON)
+                let options = try Self.parseJSONObject(json: optionsJSON)
 
                 let process = Process()
-                process.executableURL = try resolveExecutableURL(for: file)
+                process.executableURL = try Self.resolveExecutableURL(for: file)
                 process.arguments = args
 
                 if let cwd = options["cwd"] as? String, !cwd.isEmpty {
@@ -65,23 +65,23 @@ enum NodeStubs {
             #endif
         }
         context.setObject(childProcessRunSyncBlock, forKeyedSubscript: "__cpRunSync" as NSString)
-        try JavaScriptResource.evaluate(.nodeCompat(.net), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.tls), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.zlib), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.childProcess), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.tty), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.readline), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.asyncHooks), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.module), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.assert), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.workerThreads), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.perfHooks), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.http2), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.inspector), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.v8), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.dns), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.constants), in: context)
-        try JavaScriptResource.evaluate(.nodeCompat(.diagnosticsChannel), in: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.net)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.tls)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.zlib)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.childProcess)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.tty)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.readline)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.asyncHooks)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.module)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.assert)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.workerThreads)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.perfHooks)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.http2)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.inspector)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.v8)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.dns)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.constants)).install(into: context)
+        try JavaScriptModuleInstaller(script: .nodeCompat(.diagnosticsChannel)).install(into: context)
     }
 
     private static func parseStringArray(json: String) throws -> [String] {
