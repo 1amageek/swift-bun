@@ -1,7 +1,7 @@
 @preconcurrency import JavaScriptCore
 import Foundation
 
-enum JavaScriptResource {
+enum JavaScriptResource: Sendable {
     enum Script: Hashable, Sendable {
         case bootstrap(BootstrapScript)
         case bunAPI(BunAPIScript)

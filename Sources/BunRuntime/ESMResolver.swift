@@ -2,7 +2,7 @@
 import Foundation
 
 /// Resolves `require("node:*")` calls by returning polyfill module objects.
-struct ESMResolver {
+struct ESMResolver: Sendable {
     let fileSystemAsyncBridge: FileSystemAsyncBridge?
     let environment: [String: String]
     let cwd: String?
@@ -29,26 +29,26 @@ struct ESMResolver {
     /// (which override the default ones), then calls `installRequire()` separately.
     func installModules(into context: JSContext) throws {
         try installGlobals(in: context, environment: environment, cwd: cwd)
-        try installResourceModules(
-            in: context,
+        try JavaScriptModuleInstaller.installAll(
             .nodeCompat(.path),
             .nodeCompat(.buffer),
             .nodeCompat(.url),
-            .nodeCompat(.util)
+            .nodeCompat(.util),
+            into: context
         )
         try NodeOS(environment: environment).install(into: context)
         try NodeFS(asyncBridge: fileSystemAsyncBridge).install(into: context)
         try NodeCrypto().install(into: context)
-        try installResourceModules(
-            in: context,
+        try JavaScriptModuleInstaller.installAll(
             .nodeCompat(.http),
             .nodeCompat(.stream),
-            .nodeCompat(.timers)
+            .nodeCompat(.timers),
+            into: context
         )
         try NodeStubs().install(into: context)
-        try installResourceModules(in: context, .bunAPI(.shims))
-        BunEnvironmentInstaller(environment: environment).install(into: context)
-        try installResourceModules(in: context, .bunAPI(.file), .bunAPI(.spawn))
+        try JavaScriptModuleInstaller.installAll(.bunAPI(.shims), into: context)
+        try BunEnvironmentInstaller(environment: environment).install(into: context)
+        try JavaScriptModuleInstaller.installAll(.bunAPI(.file), .bunAPI(.spawn), into: context)
     }
 
     // MARK: - Private
@@ -58,9 +58,12 @@ struct ESMResolver {
         environment: [String: String],
         cwd: String?
     ) throws {
-        try JavaScriptResource.evaluate(.bootstrap(.globalAliases), in: context)
-        try JavaScriptResource.evaluate(.bootstrap(.performance), in: context)
-        try JavaScriptResource.evaluate(.bootstrap(.url), in: context)
+        try JavaScriptModuleInstaller.installAll(
+            .bootstrap(.globalAliases),
+            .bootstrap(.performance),
+            .bootstrap(.url),
+            into: context
+        )
 
         let logBlock: @convention(block) (String, String) -> Void = { level, message in
             print("[\(level)] \(message)")
@@ -76,7 +79,7 @@ struct ESMResolver {
         let gid = getgid()
         let euid = geteuid()
         let egid = getegid()
-        let processConfig = try Self.makeConfigJSON([
+        let processConfig: [String: Any] = [
             "platform": platformName,
             "arch": archName,
             "pid": Int(processID),
@@ -86,38 +89,21 @@ struct ESMResolver {
             "gid": Int(gid),
             "euid": Int(euid),
             "egid": Int(egid),
-        ])
-        context.evaluateScript("""
-        globalThis.__swiftBunConfig = globalThis.__swiftBunConfig || {};
-        globalThis.__swiftBunConfig.process = \(processConfig);
-        """)
-        try JavaScriptResource.evaluate(.bootstrap(.process), in: context)
-        try JavaScriptResource.evaluate(.bootstrap(.textCodec), in: context)
-        try JavaScriptResource.evaluate(.bootstrap(.base64), in: context)
-        try JavaScriptResource.evaluate(.bootstrap(.domException), in: context)
-        try JavaScriptResource.evaluate(.bootstrap(.abortController), in: context)
+        ]
+        try JavaScriptConfigurationInstaller().install(processConfig, as: "process", into: context)
+        try JavaScriptModuleInstaller.installAll(
+            .bootstrap(.process),
+            .bootstrap(.textCodec),
+            .bootstrap(.base64),
+            .bootstrap(.domException),
+            .bootstrap(.abortController),
+            into: context
+        )
     }
 
     /// Install the `require()` function. Must be called after all modules are registered.
     func installRequire(into context: JSContext) throws {
         try JavaScriptResource.evaluate(.bootstrap(.require), in: context)
-    }
-
-    private func installResourceModules(
-        in context: JSContext,
-        _ scripts: JavaScriptResource.Script...
-    ) throws {
-        for script in scripts {
-            try JavaScriptModuleInstaller(script: script).install(into: context)
-        }
-    }
-
-    private static func makeConfigJSON(_ value: [String: Any]) throws -> String {
-        let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw BunRuntimeError.javaScriptException("Failed to encode ESMResolver config as UTF-8")
-        }
-        return json
     }
 
     private static func runtimePlatform() -> String {

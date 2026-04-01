@@ -2,7 +2,7 @@
 import Foundation
 
 /// `node:fs` implementation bridging to `FileManager`.
-struct NodeFS: JavaScriptModuleInstalling {
+struct NodeFS: JavaScriptModuleInstalling, Sendable {
     let asyncBridge: FileSystemAsyncBridge?
 
     init(asyncBridge: FileSystemAsyncBridge? = nil) {

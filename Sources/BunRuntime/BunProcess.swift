@@ -482,10 +482,12 @@ public final class BunProcess: Sendable {
         try throwPendingJavaScriptException(source: "setup:installRequire")
 
         if let bundle {
-            let argvElements = (["node", bundle.path] + arguments)
-                .map { "'\(escapeJS($0))'" }
-                .joined(separator: ",")
-            ctx.evaluateScript("process.argv = [\(argvElements)];")
+            let argv = ["node", bundle.path] + arguments
+            guard let process = ctx.objectForKeyedSubscript("process"), !process.isUndefined else {
+                throw BunRuntimeError.javaScriptException("process is not installed")
+            }
+            process.setObject(argv, forKeyedSubscript: "argv" as NSString)
+            try throwPendingJavaScriptException(source: "setup:processArgv")
         }
 
         let rejectionBlock: @convention(block) (String) -> Void = { [outputContinuation] message in
@@ -499,11 +501,7 @@ public final class BunProcess: Sendable {
     }
 
     private func mergedRuntimeEnvironment() -> [String: String] {
-        var merged = ProcessInfo.processInfo.environment
-        for (key, value) in environment {
-            merged[key] = value
-        }
-        return merged
+        RuntimeEnvironment(overrides: environment).values
     }
 
     private var isAcceptingPublicWork: Bool {
@@ -778,14 +776,6 @@ public final class BunProcess: Sendable {
             }
         }
         return args
-    }
-
-    private func escapeJS(_ string: String) -> String {
-        string
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
     }
 
     // MARK: - Crypto Random Bridge (must be installed before polyfills)

@@ -5,7 +5,7 @@ import CryptoKit
 #endif
 
 /// `node:crypto` implementation bridging to `CryptoKit`.
-struct NodeCrypto: JavaScriptModuleInstalling {
+struct NodeCrypto: JavaScriptModuleInstalling, Sendable {
     func install(into context: JSContext) throws {
         // randomBytes
         let randomBytesBlock: @convention(block) (Int) -> [UInt8] = { size in

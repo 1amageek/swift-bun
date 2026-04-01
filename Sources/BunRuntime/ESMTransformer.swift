@@ -5,7 +5,7 @@ import Foundation
 ///
 /// JS parses JS — no false positives on strings, comments, regex, or template literals.
 /// Used by both `BunRuntime` (library mode) and `BunProcess` (process mode).
-enum ESMTransformer {
+enum ESMTransformer: Sendable {
 
     /// Transform ESM source to CJS equivalents.
     ///

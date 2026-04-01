@@ -2,23 +2,23 @@
 import Foundation
 
 /// `Bun.env` implementation backed by `ProcessInfo.environment`.
-struct BunEnvironmentInstaller {
+struct BunEnvironmentInstaller: Sendable {
     let environment: [String: String]
 
     init(environment: [String: String] = [:]) {
         self.environment = environment
     }
 
-    func install(into context: JSContext) {
-        // Pre-populate process.env with merged runtime environment.
-        var env = ProcessInfo.processInfo.environment
-        for (key, value) in environment {
-            env[key] = value
+    func install(into context: JSContext) throws {
+        let runtimeEnvironment = RuntimeEnvironment(overrides: environment)
+        guard let process = context.objectForKeyedSubscript("process"), !process.isUndefined else {
+            throw BunRuntimeError.javaScriptException("process is not installed")
         }
-        for (key, value) in env {
-            let escapedKey = Self.escapeForJSString(key)
-            let escapedValue = Self.escapeForJSString(value)
-            context.evaluateScript("process.env['\(escapedKey)'] = '\(escapedValue)';")
+
+        process.setObject(runtimeEnvironment.values, forKeyedSubscript: "env" as NSString)
+        if let exception = context.exception {
+            context.exception = nil
+            throw BunRuntimeError.javaScriptException(exception.toString())
         }
 
         // Bun.env is an alias for process.env
@@ -33,16 +33,9 @@ struct BunEnvironmentInstaller {
             return result;
         };
         """)
-    }
-
-    private static func escapeForJSString(_ string: String) -> String {
-        string
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-            .replacingOccurrences(of: "\t", with: "\\t")
-            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
-            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        if let exception = context.exception {
+            context.exception = nil
+            throw BunRuntimeError.javaScriptException(exception.toString())
+        }
     }
 }

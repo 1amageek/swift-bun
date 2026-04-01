@@ -1,6 +1,6 @@
 @preconcurrency import JavaScriptCore
 
-protocol JavaScriptModuleInstalling {
+protocol JavaScriptModuleInstalling: Sendable {
     func install(into context: JSContext) throws
 }
 
@@ -10,5 +10,21 @@ struct JavaScriptModuleInstaller: JavaScriptModuleInstalling, Sendable {
 
     func install(into context: JSContext) throws {
         try JavaScriptResource.evaluate(script, in: context)
+    }
+
+    static func installAll(
+        _ scripts: JavaScriptResource.Script...,
+        into context: JSContext
+    ) throws {
+        try installAll(scripts, into: context)
+    }
+
+    static func installAll(
+        _ scripts: [JavaScriptResource.Script],
+        into context: JSContext
+    ) throws {
+        for script in scripts {
+            try JavaScriptModuleInstaller(script: script).install(into: context)
+        }
     }
 }

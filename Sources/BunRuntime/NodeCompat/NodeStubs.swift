@@ -5,7 +5,7 @@ import Foundation
 ///
 /// These provide minimal interfaces to prevent import errors
 /// while clearly indicating that the functionality is not available.
-struct NodeStubs: JavaScriptModuleInstalling {
+struct NodeStubs: JavaScriptModuleInstalling, Sendable {
     func install(into context: JSContext) throws {
         let childProcessRunSyncBlock: @convention(block) (String, String, String) -> [String: Any] = { file, argsJSON, optionsJSON in
             #if os(macOS)
@@ -21,7 +21,7 @@ struct NodeStubs: JavaScriptModuleInstalling {
                     process.currentDirectoryURL = URL(fileURLWithPath: cwd)
                 }
 
-                var env = ProcessInfo.processInfo.environment
+                var env = RuntimeEnvironment().values
                 if let extraEnv = options["env"] as? [String: Any] {
                     for (key, value) in extraEnv {
                         env[key] = "\(value)"
@@ -65,23 +65,26 @@ struct NodeStubs: JavaScriptModuleInstalling {
             #endif
         }
         context.setObject(childProcessRunSyncBlock, forKeyedSubscript: "__cpRunSync" as NSString)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.net)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.tls)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.zlib)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.childProcess)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.tty)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.readline)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.asyncHooks)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.module)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.assert)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.workerThreads)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.perfHooks)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.http2)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.inspector)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.v8)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.dns)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.constants)).install(into: context)
-        try JavaScriptModuleInstaller(script: .nodeCompat(.diagnosticsChannel)).install(into: context)
+        try JavaScriptModuleInstaller.installAll(
+            .nodeCompat(.net),
+            .nodeCompat(.tls),
+            .nodeCompat(.zlib),
+            .nodeCompat(.childProcess),
+            .nodeCompat(.tty),
+            .nodeCompat(.readline),
+            .nodeCompat(.asyncHooks),
+            .nodeCompat(.module),
+            .nodeCompat(.assert),
+            .nodeCompat(.workerThreads),
+            .nodeCompat(.perfHooks),
+            .nodeCompat(.http2),
+            .nodeCompat(.inspector),
+            .nodeCompat(.v8),
+            .nodeCompat(.dns),
+            .nodeCompat(.constants),
+            .nodeCompat(.diagnosticsChannel),
+            into: context
+        )
     }
 
     private static func parseStringArray(json: String) throws -> [String] {
@@ -104,7 +107,7 @@ struct NodeStubs: JavaScriptModuleInstalling {
             return url
         }
 
-        let environment = ProcessInfo.processInfo.environment
+        let environment = RuntimeEnvironment().values
         let pathValue = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
         for directory in pathValue.split(separator: ":") {
             let candidate = String(directory) + "/" + executable
