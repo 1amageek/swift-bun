@@ -32,6 +32,17 @@ Layer 0 prefers community JS polyfills when they are compatible with JavaScriptC
 - `BuiltinModuleBootstrap`
 - `RequireBootstrap`
 
+The current package-loading target is deliberately narrow:
+- plain `node_modules` layout
+- CommonJS packages
+- `package.json.main`, `.js`, `.json`, `index.js`, and `index.json`
+
+The architecture does not currently promise support for:
+- `exports` / `imports`
+- `.mjs` / `.cjs` mode distinctions
+- native addons
+- package-manager-specific install layouts
+
 Examples:
 - `node:http` composes `fetch` and stream constructors from Layer 0
 - `node:stream` re-exports Layer 0 stream constructors and adds `stream/promises` / `stream/consumers`

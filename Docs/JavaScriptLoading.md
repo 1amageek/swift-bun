@@ -135,6 +135,13 @@ context.evaluateScript(source, withSourceURL: url)
 
 The `.js` file should own behavior. Swift should only provide inputs.
 
+At runtime, `ModuleBootstrap` orchestrates that setup in three explicit phases:
+- `ModuleGlobalBootstrap`
+- `BuiltinModuleBootstrap`
+- `RequireBootstrap`
+
+This split is intentional. Globals can be installed before built-in modules exist, and `require()` is exposed only after the built-in module registry and CommonJS bridge are ready.
+
 For application bundles, the final execution path depends on runtime mode:
 
 - `load()` evaluates the transformed bundle directly with `evaluateScript(..., withSourceURL:)`
@@ -238,5 +245,19 @@ The CommonJS loader owns:
 - `require.resolve()`
 - `module.createRequire()`
 - process-mode entry script execution as the main module
+
+Current supported package-loading scope:
+- CommonJS only
+- `package.json.main`
+- `index.js` / `index.json`
+- `.js` / `.json`
+- bare specifiers and subpath specifiers from a plain `node_modules` layout
+
+Current non-goals for the loader:
+- `package.json.exports`
+- `package.json.imports`
+- `.mjs` / `.cjs` mode differences
+- native `.node` addons
+- package manager behavior such as `bun install`
 
 Swift-owned library mode intentionally does not run its bundle through the CommonJS main-module path.

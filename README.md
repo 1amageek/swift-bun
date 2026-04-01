@@ -8,6 +8,7 @@ swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, e
 
 **What it does:**
 - Loads and executes ESM and CJS bundles built by Bun or esbuild
+- Resolves installed CommonJS packages from plain `node_modules` without rebundling
 - Polyfills Node.js built-in modules (`fs`, `path`, `crypto`, `http`, `stream`, etc.)
 - Bridges `fetch()` to `URLSession` for real HTTP networking
 - Provides `Bun.*` API shims (`Bun.file()`, `Bun.env`, `Bun.write()`, etc.)
@@ -17,6 +18,7 @@ swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, e
 **What it doesn't do:**
 - Bundle or transpile JavaScript (use Bun or esbuild for that)
 - Provide `bun install`, `bun test`, or other CLI features
+- Fully emulate Node/Bun package resolution features such as `exports`, `imports`, `.mjs`, `.cjs`, or native addons
 
 ## Requirements
 
@@ -112,6 +114,25 @@ try await runtime.evaluate(js: "var path = require('node:path')")
 let result = try await runtime.evaluate(js: "path.join('/usr', 'local')")
 ```
 
+### Installed CommonJS packages from `node_modules`
+
+`run()` and `require()` support plain CommonJS package loading from a normal `node_modules` tree.
+
+Supported today:
+- bare specifiers such as `require("semver")`
+- package subpaths such as `require("semver/functions/valid")`
+- `package.json.main`
+- `index.js` / `index.json`
+- `.js` / `.json`
+- `module.createRequire(...)`
+
+Not supported yet:
+- `package.json.exports`
+- `package.json.imports`
+- `.mjs` / `.cjs` specific behavior
+- native `.node` addons
+- package-manager-specific install logic such as `bun install`
+
 ## API
 
 ```swift
@@ -146,6 +167,11 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 - **Layer 0**: `polyfills.bundle.js` — Web APIs (npm packages, esbuild bundled)
 - **Layer 1**: ModuleBootstrap — Node.js globals + modules (Swift strings)
 - **Layer 2**: NIO bridges — EventLoop-backed overrides (Swift closures)
+
+`ModuleBootstrap` is split internally into:
+- `ModuleGlobalBootstrap`
+- `BuiltinModuleBootstrap`
+- `RequireBootstrap`
 
 ### Web APIs (Layer 0)
 
@@ -213,6 +239,8 @@ npx esbuild src/index.ts --bundle --platform=node --format=cjs \
 ```
 
 Both ESM and CJS bundles are supported. ESM bundles are automatically transformed to CJS before evaluation using es-module-lexer (WASM).
+
+When a bundle is not required, `swift-bun` can also execute installed CommonJS packages directly from `node_modules` through its built-in loader.
 
 ## Architecture
 
