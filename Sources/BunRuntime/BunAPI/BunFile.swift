@@ -1,8 +1,6 @@
 @preconcurrency import JavaScriptCore
 
 /// `Bun.file()` and `Bun.write()` implementation.
-enum BunFile {
-    static func install(in context: JSContext) throws {
-        try JavaScriptResource.evaluate(.bunAPI(.file), in: context)
-    }
+enum BunFile: JavaScriptResourceBackedInstaller {
+    static let script: JavaScriptResource.Script = .bunAPI(.file)
 }

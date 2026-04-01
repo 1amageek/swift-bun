@@ -3,7 +3,6 @@ import Foundation
 
 /// Resolves `require("node:*")` calls by returning polyfill module objects.
 enum ESMResolver {
-
     /// Install the `require()` function and all built-in modules into the given context.
     static func install(
         in context: JSContext,
@@ -31,21 +30,26 @@ enum ESMResolver {
         cwd: String? = nil
     ) throws {
         try installGlobals(in: context, environment: environment, cwd: cwd)
-        try NodePath.install(in: context)
-        try NodeBuffer.install(in: context)
-        try NodeURL.install(in: context)
-        try NodeUtil.install(in: context)
+        try installPureJavaScriptModules(
+            in: context,
+            NodePath.self,
+            NodeBuffer.self,
+            NodeURL.self,
+            NodeUtil.self
+        )
         try NodeOS.install(in: context, environment: environment)
         try NodeFS.install(in: context, asyncBridge: fileSystemAsyncBridge)
         try NodeCrypto.install(in: context)
-        try NodeHTTP.install(in: context)
-        try NodeStream.install(in: context)
-        try NodeTimers.install(in: context)
+        try installPureJavaScriptModules(
+            in: context,
+            NodeHTTP.self,
+            NodeStream.self,
+            NodeTimers.self
+        )
         try NodeStubs.install(in: context)
-        try BunShims.install(in: context)
+        try installPureJavaScriptModules(in: context, BunShims.self)
         BunEnv.install(in: context, environment: environment)
-        try BunFile.install(in: context)
-        try BunSpawn.install(in: context)
+        try installPureJavaScriptModules(in: context, BunFile.self, BunSpawn.self)
     }
 
     // MARK: - Private
@@ -98,6 +102,15 @@ enum ESMResolver {
     /// Install the `require()` function. Must be called after all modules are registered.
     static func installRequire(in context: JSContext) throws {
         try JavaScriptResource.evaluate(.bootstrap(.require), in: context)
+    }
+
+    private static func installPureJavaScriptModules(
+        in context: JSContext,
+        _ installers: any JavaScriptResourceBackedInstaller.Type...
+    ) throws {
+        for installer in installers {
+            try installer.install(in: context)
+        }
     }
 
     private static func makeConfigJSON(_ value: [String: Any]) throws -> String {

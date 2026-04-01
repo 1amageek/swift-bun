@@ -1,8 +1,6 @@
 @preconcurrency import JavaScriptCore
 
 /// Pure JavaScript implementation of `node:util`.
-enum NodeUtil {
-    static func install(in context: JSContext) throws {
-        try JavaScriptResource.evaluate(.nodeCompat(.util), in: context)
-    }
+enum NodeUtil: JavaScriptResourceBackedInstaller {
+    static let script: JavaScriptResource.Script = .nodeCompat(.util)
 }

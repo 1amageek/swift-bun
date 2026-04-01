@@ -4,8 +4,6 @@
 ///
 /// JavaScriptCore has built-in `setTimeout`/`setInterval` support,
 /// so this module wraps them in the Node.js module shape.
-enum NodeTimers {
-    static func install(in context: JSContext) throws {
-        try JavaScriptResource.evaluate(.nodeCompat(.timers), in: context)
-    }
+enum NodeTimers: JavaScriptResourceBackedInstaller {
+    static let script: JavaScriptResource.Script = .nodeCompat(.timers)
 }
