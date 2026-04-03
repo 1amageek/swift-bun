@@ -13,8 +13,9 @@
         if (result && result.error) {
             throw new Error(result.error);
         }
+        var addresses = Array.isArray(result && result.addresses) ? result.addresses : [{ address: result.address, family: result.family }];
         if (normalized.all) {
-            return [{ address: result.address, family: result.family }];
+            return addresses;
         }
         return { address: result.address, family: result.family };
     }
@@ -54,8 +55,9 @@
             dispatchLookupResult(event.requestID, new Error(event.error), null, pending.callback);
             return;
         }
+        var addresses = Array.isArray(event.addresses) ? event.addresses : [{ address: event.address, family: event.family }];
         var result = pending.all
-            ? [{ address: event.address, family: event.family }]
+            ? addresses
             : { address: event.address, family: event.family };
         dispatchLookupResult(event.requestID, null, result, pending.callback);
     };

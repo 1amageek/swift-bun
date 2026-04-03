@@ -8,12 +8,16 @@ struct ModuleBootstrap: Sendable {
 
     init(
         fileSystemAsyncBridge: FileSystemAsyncBridge? = nil,
+        builtinCommandBridge: BuiltinCommandBridge? = nil,
+        zlibAsyncBridge: ZlibAsyncBridge? = nil,
         environment: [String: String] = [:],
         cwd: String? = nil
     ) {
         self.globalBootstrap = ModuleGlobalBootstrap(environment: environment, cwd: cwd)
         self.builtinModuleBootstrap = BuiltinModuleBootstrap(
             fileSystemAsyncBridge: fileSystemAsyncBridge,
+            builtinCommandBridge: builtinCommandBridge,
+            zlibAsyncBridge: zlibAsyncBridge,
             environment: environment
         )
         self.requireBootstrap = RequireBootstrap()

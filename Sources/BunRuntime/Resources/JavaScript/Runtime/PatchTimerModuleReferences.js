@@ -7,14 +7,4 @@
     timers.clearInterval = globalThis.clearInterval;
     timers.setImmediate = globalThis.setImmediate;
     timers.clearImmediate = globalThis.clearImmediate;
-    timers.promises.setTimeout = function(ms, value) {
-        return new Promise(function(resolve) {
-            globalThis.setTimeout(function() { resolve(value); }, ms);
-        });
-    };
-    timers.promises.setImmediate = function(value) {
-        return new Promise(function(resolve) {
-            globalThis.setTimeout(function() { resolve(value); }, 0);
-        });
-    };
 })();

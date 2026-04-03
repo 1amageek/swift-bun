@@ -208,7 +208,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | `node:events` | ✅ | EventEmitter (supports extends) |
 | `node:timers` | ✅ | NIO EventLoop-backed |
 | `node:async_hooks` | ⚠️ Partial | AsyncLocalStorage plus minimal `AsyncResource` APIs |
-| `node:child_process` | ⚠️ Partial | macOS execution APIs, iOS unsupported |
+| `node:child_process` | ⚠️ Limited | No general subprocess support. Native bridges may emulate specific commands. |
 | `node:net` | ✅ Basic | Plain TCP `createServer`, `connect`, `createConnection` |
 | `node:tls` | ⚠️ Stub | TLS not implemented |
 | `node:zlib` | ⚠️ Partial | `deflateSync` |
@@ -238,7 +238,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 - `crypto.getRandomValues` still uses a non-cryptographic fallback. Use `require('node:crypto')` or `crypto.subtle` for security-sensitive work.
 - `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
 - `node:tls`, `node:http2`, `WebSocket`, `Worker`, and native addons remain unsupported.
-- `node:child_process` is intentionally unsupported on iOS. On macOS, only the commonly used process APIs are implemented.
+- `node:child_process` does not provide general subprocess execution. Use native bridges for specific host capabilities instead.
 - `node:zlib` currently exposes `deflateSync` only.
 - `node:dns` currently exposes `lookup` only.
 - `http.createServer` and `node:net` are intentionally minimal and focused on local server/client use cases.

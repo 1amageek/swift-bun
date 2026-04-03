@@ -113,6 +113,84 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == #"{"listeners":1,"max":7}"#)
     }
 
+    @Test("string_decoder handles multibyte characters across chunk boundaries")
+    func stringDecoderHandlesSplitCodepoints() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var StringDecoder = require('node:string_decoder').StringDecoder;
+                var decoder = new StringDecoder('utf8');
+                var bytes = Buffer.from('😀');
+                return decoder.write(bytes.slice(0, 2)) + decoder.end(bytes.slice(2));
+            })()
+        """)
+        #expect(result.stringValue == "😀")
+    }
+
+    @Test("querystring parse and stringify support repeated keys and arrays")
+    func querystringSupportsRepeatedKeysAndArrays() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var qs = require('node:querystring');
+                var parsed = qs.parse('tag=swift&tag=bun&name=swift+bun');
+                var stringified = qs.stringify({ tag: ['swift', 'bun'], ok: true });
+                return JSON.stringify({
+                    tags: parsed.tag,
+                    name: parsed.name,
+                    stringified: stringified
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"tags":["swift","bun"],"name":"swift bun","stringified":"tag=swift&tag=bun&ok=true"}"#)
+    }
+
+    @Test("timers/promises rejects aborted timeouts with AbortError shape")
+    func timersPromisesAbortSignal() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var timers = require('node:timers/promises');
+                var controller = new AbortController();
+                var promise = timers.setTimeout(50, 'value', { signal: controller.signal });
+                controller.abort();
+                try {
+                    await promise;
+                    return 'fulfilled';
+                } catch (error) {
+                    return JSON.stringify({
+                        name: error && error.name,
+                        code: error && error.code
+                    });
+                }
+            })()
+        """)
+        #expect(result.stringValue == #"{"name":"AbortError","code":"ABORT_ERR"}"#)
+    }
+
+    @Test("timers/promises setInterval removes abort listeners after each tick")
+    func timersPromisesSetIntervalCleansAbortListeners() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var timers = require('node:timers/promises');
+                var added = 0;
+                var removed = 0;
+                var signal = {
+                    aborted: false,
+                    addEventListener: function(type, fn) {
+                        if (type === 'abort') added += 1;
+                    },
+                    removeEventListener: function(type, fn) {
+                        if (type === 'abort') removed += 1;
+                    }
+                };
+                var iterator = timers.setInterval(1, 'tick', { signal: signal });
+                await iterator.next();
+                await iterator.next();
+                await iterator.return();
+                return JSON.stringify({ added: added, removed: removed });
+            })()
+        """)
+        #expect(result.stringValue == #"{"added":3,"removed":3}"#)
+    }
+
     @Test("assert module supports equality throws and rejects")
     func assertModule() async throws {
         let result = try await evaluateAsync("""
@@ -127,6 +205,307 @@ struct NodeCompatModuleTests {
             })()
         """)
         #expect(result.boolValue == true)
+    }
+
+    @Test("assert strict, match, and negative deep equality behave like Node")
+    func assertStrictAndMatch() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var assert = require('node:assert');
+                var strictFailed = false;
+                try {
+                    assert.strict.equal(1, '1');
+                } catch (error) {
+                    strictFailed = error && error.code === 'ERR_ASSERTION';
+                }
+
+                assert.notDeepEqual({ value: 1 }, { value: 2 });
+                assert.notDeepStrictEqual({ value: 1 }, { value: '1' });
+                assert.match('hello world', /world/);
+                assert.doesNotMatch('hello world', /goodbye/);
+                await assert.doesNotReject(async function() { return 42; });
+
+                return JSON.stringify({
+                    strictFailed: strictFailed,
+                    failCode: (function() {
+                        try {
+                            assert.fail(1, 2, 'boom', '!==');
+                        } catch (error) {
+                            return error.code + ':' + error.operator;
+                        }
+                        return 'missing';
+                    })(),
+                    strictAlias: assert.strict === assert.strict.strict,
+                    strictDeepEqual: typeof assert.strict.deepEqual
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"strictFailed":true,"failCode":"ERR_ASSERTION:!==","strictAlias":true,"strictDeepEqual":"function"}"#)
+    }
+
+    @Test("assert partialDeepStrictEqual supports subset matching")
+    func assertPartialDeepStrictEqual() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var assert = require('node:assert');
+                assert.partialDeepStrictEqual(
+                    { a: 1, b: 2, nested: { c: 3, d: [1, 2, 3] } },
+                    { a: 1, nested: { c: 3, d: [1, 2] } }
+                );
+                try {
+                    assert.partialDeepStrictEqual(
+                        { a: 1, nested: { c: 4 } },
+                        { a: 1, nested: { c: 3 } }
+                    );
+                } catch (error) {
+                    return error.code + ':' + error.operator;
+                }
+                return 'missing';
+            })()
+        """)
+        #expect(result.stringValue == "ERR_ASSERTION:partialDeepStrictEqual")
+    }
+
+    @Test("assert partialDeepStrictEqual supports maps sets typed arrays and cycles")
+    func assertPartialDeepStrictEqualCompositeTypes() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var assert = require('node:assert');
+                var actual = {
+                    map: new Map([['a', { count: 1 }], ['b', { count: 2 }]]),
+                    set: new Set([{ id: 1 }, { id: 2 }, { id: 3 }]),
+                    bytes: Uint8Array.from([1, 2, 3]),
+                    nested: { value: 9 }
+                };
+                actual.self = actual;
+
+                var expected = {
+                    map: new Map([['a', { count: 1 }]]),
+                    set: new Set([{ id: 2 }, { id: 3 }]),
+                    bytes: Uint8Array.from([1, 2]),
+                    nested: { value: 9 }
+                };
+                expected.self = expected;
+
+                assert.partialDeepStrictEqual(actual, expected);
+
+                try {
+                    assert.partialDeepStrictEqual(actual, {
+                        map: new Map([['z', { count: 7 }]])
+                    });
+                } catch (error) {
+                    return error.code + ':' + error.operator;
+                }
+
+                return 'missing';
+            })()
+        """)
+        #expect(result.stringValue == "ERR_ASSERTION:partialDeepStrictEqual")
+    }
+
+    @Test("assert CallTracker tracks calls, reports pending counts, and resets tracked functions")
+    func assertCallTracker() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var assert = require('node:assert');
+                var tracker = new assert.CallTracker();
+                var wrapped = tracker.calls(function(a, b) { return a + b; }, 2);
+                var noop = tracker.calls(1);
+
+                var initialReport = tracker.report(wrapped);
+                var first = wrapped(1, 2);
+                noop();
+                var callsAfterFirst = tracker.getCalls(wrapped);
+                var verifyAfterFirst;
+                try {
+                    tracker.verify(wrapped);
+                    verifyAfterFirst = 'ok';
+                } catch (error) {
+                    verifyAfterFirst = error.code + ':' + String(error.actual) + ':' + String(error.expected);
+                }
+                var second = wrapped(3, 4);
+                tracker.verify(wrapped);
+                var reportBeforeReset = tracker.report(wrapped).length;
+                tracker.reset(wrapped);
+
+                return JSON.stringify({
+                    first: first,
+                    second: second,
+                    initialReport: initialReport[0].actual + ':' + initialReport[0].expected,
+                    callCount: callsAfterFirst.length,
+                    firstCallArgs: callsAfterFirst[0].arguments.join(','),
+                    verifyAfterFirst: verifyAfterFirst,
+                    reportBeforeReset: reportBeforeReset,
+                    reportAfterReset: tracker.report(wrapped).length,
+                    reportNoopAfterReset: tracker.report(noop).length,
+                    noopCalls: tracker.getCalls(noop).length,
+                    callsAfterReset: tracker.getCalls(wrapped).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"first":3,"second":7,"initialReport":"0:2","callCount":1,"firstCallArgs":"1,2","verifyAfterFirst":"ERR_ASSERTION:undefined:undefined","reportBeforeReset":0,"reportAfterReset":1,"reportNoopAfterReset":0,"noopCalls":1,"callsAfterReset":0}"#)
+    }
+
+    @Test("assert CallTracker validates expected range and invalid tracked functions")
+    func assertCallTrackerValidation() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var assert = require('node:assert');
+                var tracker = new assert.strict.CallTracker();
+                var invalidExact;
+                try {
+                    tracker.calls(function() {}, 0);
+                    invalidExact = 'missing';
+                } catch (error) {
+                    invalidExact = error.code + ':' + error.name;
+                }
+
+                var invalidTracked;
+                try {
+                    tracker.getCalls(function() {});
+                    invalidTracked = 'missing';
+                } catch (error) {
+                    invalidTracked = error.code + ':' + error.name;
+                }
+
+                var wrapped = tracker.calls(function(value) { return value; }, 1);
+                var pending = tracker.report(wrapped)[0];
+                return JSON.stringify({
+                    invalidExact: invalidExact,
+                    invalidTracked: invalidTracked,
+                    pending: pending.actual + ':' + pending.expected + ':' + (pending.stack instanceof Error),
+                    strictCallTracker: typeof assert.strict.CallTracker
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"invalidExact":"ERR_OUT_OF_RANGE:RangeError","invalidTracked":"ERR_INVALID_ARG_VALUE:TypeError","pending":"0:1:true","strictCallTracker":"function"}"#)
+    }
+
+    @Test("assert CallTracker report and verify cover multiple tracked functions")
+    func assertCallTrackerAggregateVerify() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var assert = require('node:assert');
+                var tracker = new assert.CallTracker();
+                var first = tracker.calls(function() {}, 2);
+                var second = tracker.calls(function() {}, 1);
+                first();
+
+                var report = tracker.report().map(function(item) {
+                    return item.actual + ':' + item.expected;
+                }).join(',');
+
+                try {
+                    tracker.verify();
+                } catch (error) {
+                    return JSON.stringify({
+                        report: report,
+                        code: error.code,
+                        message: error.message
+                    });
+                }
+
+                return 'missing';
+            })()
+        """)
+        #expect(result.stringValue == #"{"report":"1:2,0:1","code":"ERR_ASSERTION","message":"Functions were not called the expected number of times"}"#)
+    }
+
+    @Test("assert error matchers support deep object matching and selective rethrow")
+    func assertErrorMatchers() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var assert = require('node:assert');
+                assert.throws(function() {
+                    var error = new Error('boom');
+                    error.code = 'E_FAIL';
+                    error.meta = { retry: true, count: 2 };
+                    throw error;
+                }, {
+                    code: 'E_FAIL',
+                    meta: { retry: true }
+                });
+
+                await assert.rejects((async function() {
+                    var error = new Error('boom');
+                    error.code = 'E_ASYNC';
+                    error.meta = { retry: true, count: 3 };
+                    throw error;
+                })(), {
+                    code: 'E_ASYNC',
+                    meta: { retry: true }
+                });
+
+                var doesNotThrowSameError = false;
+                var doesNotRejectSameError = false;
+
+                var rangeError = new RangeError('range');
+                try {
+                    assert.doesNotThrow(function() { throw rangeError; }, TypeError);
+                } catch (error) {
+                    doesNotThrowSameError = error === rangeError;
+                }
+
+                var asyncRangeError = new RangeError('async-range');
+                try {
+                    await assert.doesNotReject(async function() { throw asyncRangeError; }, TypeError);
+                } catch (error) {
+                    doesNotRejectSameError = error === asyncRangeError;
+                }
+
+                var unwantedException;
+                try {
+                    assert.doesNotThrow(function() { throw new TypeError('boom'); }, TypeError);
+                    unwantedException = 'missing';
+                } catch (error) {
+                    unwantedException = error.code + ':' + error.operator + ':' + error.actual.name;
+                }
+
+                return JSON.stringify({
+                    doesNotThrowSameError: doesNotThrowSameError,
+                    doesNotRejectSameError: doesNotRejectSameError,
+                    unwantedException: unwantedException
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"doesNotThrowSameError":true,"doesNotRejectSameError":true,"unwantedException":"ERR_ASSERTION:doesNotThrow:TypeError"}"#)
+    }
+
+    @Test("assert AssertionError uses Node-like operator metadata")
+    func assertAssertionErrorShape() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var assert = require('node:assert');
+                var strictEqual;
+                try {
+                    assert.strictEqual(1, 2);
+                } catch (error) {
+                    strictEqual = {
+                        code: error.code,
+                        operator: error.operator,
+                        generatedMessage: error.generatedMessage,
+                        firstLine: error.message.split('\\n')[0]
+                    };
+                }
+
+                var notStrictEqual;
+                try {
+                    assert.notStrictEqual(1, 1);
+                } catch (error) {
+                    notStrictEqual = {
+                        operator: error.operator,
+                        generatedMessage: error.generatedMessage,
+                        firstLine: error.message.split('\\n')[0]
+                    };
+                }
+
+                return JSON.stringify({
+                    strictEqual: strictEqual,
+                    notStrictEqual: notStrictEqual
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"strictEqual":{"code":"ERR_ASSERTION","operator":"strictEqual","generatedMessage":true,"firstLine":"Expected values to be strictly equal:"},"notStrictEqual":{"operator":"notStrictEqual","generatedMessage":true,"firstLine":"Expected \"actual\" to be strictly unequal to: 1"}}"#)
     }
 
     @Test("module.createRequire exposes builtinModules")
@@ -237,6 +616,77 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == #"{"first":"line1","firstDone":false,"second":"line2","secondDone":false}"#)
     }
 
+    @Test("readline promises question and prompt helpers work")
+    func readlinePromisesAndPrompt() async throws {
+        let result = try await withLoadedProcess { process in
+            let stdoutCollector = NodeCompatLogCollector()
+            let outputTask = Task { [stdoutCollector] in
+                for await line in process.stdout {
+                    stdoutCollector.append(line)
+                }
+            }
+            defer { outputTask.cancel() }
+
+            let promise = Task {
+                try await process.evaluateAsync(js: """
+                    (async function() {
+                        var readline = require('node:readline');
+                        var rlp = readline.promises;
+                        var writes = [];
+                        var output = {
+                            write: function(text) {
+                                writes.push(String(text));
+                                process.stdout.write(String(text));
+                                return true;
+                            },
+                            clearLine: function(dir, cb) { writes.push('clear:' + dir); if (cb) cb(null); return true; },
+                            clearScreenDown: function(cb) { writes.push('clearScreen'); if (cb) cb(null); return true; },
+                            cursorTo: function(x, y, cb) { writes.push('cursor:' + x + ':' + y); if (cb) cb(null); return true; },
+                            moveCursor: function(dx, dy, cb) { writes.push('move:' + dx + ':' + dy); if (cb) cb(null); return true; }
+                        };
+                        var rl = rlp.createInterface({ input: process.stdin, output: output, prompt: 'prompt> ' });
+                        rl.setPrompt('next> ').prompt();
+                        var answer = await rl.question('ask> ');
+                        readline.clearLine(output, 0);
+                        readline.clearScreenDown(output);
+                        readline.cursorTo(output, 3, 1);
+                        readline.moveCursor(output, -1, 2);
+                        rl.close();
+                        return JSON.stringify({
+                            answer: answer,
+                            writes: writes,
+                            promisesInterface: typeof rlp.Interface,
+                            paused: typeof rl.pause,
+                            resumed: typeof rl.resume
+                        });
+                    })()
+                """)
+            }
+
+            try await Task.sleep(nanoseconds: 50_000_000)
+            process.sendInput("promise answer\n".data(using: .utf8)!)
+            let evaluation = try await promise.value
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return (evaluation.stringValue, stdoutCollector.values)
+        }
+
+        let data = try #require(result.0.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["answer"] as? String == "promise answer")
+        #expect(payload["promisesInterface"] as? String == "function")
+        #expect(payload["paused"] as? String == "function")
+        #expect(payload["resumed"] as? String == "function")
+        let writes = try #require(payload["writes"] as? [String])
+        #expect(writes.contains("next> "))
+        #expect(writes.contains("ask> "))
+        #expect(writes.contains("clear:0"))
+        #expect(writes.contains("clearScreen"))
+        #expect(writes.contains("cursor:3:1"))
+        #expect(writes.contains("move:-1:2"))
+        #expect(result.1.contains("next> "))
+        #expect(result.1.contains("ask> "))
+    }
+
     @Test("tty exposes non-TTY stream shape")
     func ttyModule() async throws {
         let result = try await evaluate("""
@@ -244,15 +694,44 @@ struct NodeCompatModuleTests {
                 var tty = require('node:tty');
                 var out = new tty.WriteStream(1);
                 var input = new tty.ReadStream(0);
+                var rawResult = input.setRawMode(true);
+                var size = out.getWindowSize();
                 return JSON.stringify({
                     isTTY: tty.isatty(1),
                     outTTY: out.isTTY,
                     inTTY: input.isTTY,
-                    colorDepth: out.getColorDepth()
+                    colorDepth: out.getColorDepth(),
+                    hasColors: out.hasColors(),
+                    columns: out.columns,
+                    rows: out.rows,
+                    windowSize: Array.isArray(size) && size.length === 2,
+                    rawMode: input.isRaw,
+                    rawReturn: rawResult === input,
+                    readSetRawMode: typeof input.setRawMode,
+                    writeRefreshSize: typeof out._refreshSize
                 });
             })()
         """)
-        #expect(result.stringValue == #"{"isTTY":false,"outTTY":false,"inTTY":false,"colorDepth":1}"#)
+        #expect(result.stringValue == #"{"isTTY":false,"outTTY":false,"inTTY":false,"colorDepth":1,"hasColors":false,"columns":80,"rows":24,"windowSize":true,"rawMode":false,"rawReturn":true,"readSetRawMode":"function","writeRefreshSize":"function"}"#)
+    }
+
+    @Test("process stdio exposes tty-compatible helpers")
+    func processTTYShape() async throws {
+        let result = try await evaluate("""
+            (function() {
+                return JSON.stringify({
+                    stdoutTTY: process.stdout.isTTY,
+                    stderrTTY: process.stderr.isTTY,
+                    stdinTTY: process.stdin.isTTY,
+                    stdoutColorDepth: typeof process.stdout.getColorDepth,
+                    stdoutHasColors: typeof process.stdout.hasColors,
+                    stdoutGetWindowSize: typeof process.stdout.getWindowSize,
+                    stdinSetRawMode: typeof process.stdin.setRawMode,
+                    stdinIsRaw: process.stdin.isRaw
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"stdoutTTY":false,"stderrTTY":false,"stdinTTY":false,"stdoutColorDepth":"function","stdoutHasColors":"function","stdoutGetWindowSize":"function","stdinSetRawMode":"function","stdinIsRaw":false}"#)
     }
 
     @Test("perf_hooks performance is exported")
@@ -337,6 +816,32 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue.contains(#""family":4"#))
     }
 
+    @Test("dns.lookup all:true returns all localhost addresses")
+    func dnsLookupAllAddresses() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var dns = require('node:dns');
+                var callbackResult = await new Promise(function(resolve, reject) {
+                    dns.lookup('localhost', { all: true }, function(error, addresses) {
+                        if (error) reject(error);
+                        else resolve(addresses);
+                    });
+                });
+                var promiseResult = await dns.promises.lookup('localhost', { all: true });
+                return JSON.stringify({
+                    callbackCount: callbackResult.length,
+                    promiseCount: promiseResult.length,
+                    callbackFamilies: callbackResult.map(function(entry) { return entry.family; }).sort(),
+                    promiseFamilies: promiseResult.map(function(entry) { return entry.family; }).sort()
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""callbackCount":2"#))
+        #expect(result.stringValue.contains(#""promiseCount":2"#))
+        #expect(result.stringValue.contains(#""callbackFamilies":[4,6]"#))
+        #expect(result.stringValue.contains(#""promiseFamilies":[4,6]"#))
+    }
+
     @Test("v8.getHeapSpaceStatistics returns array shape")
     func v8HeapSpaceStatistics() async throws {
         let result = try await evaluate("""
@@ -366,6 +871,106 @@ struct NodeCompatModuleTests {
             })()
         """)
         #expect(result.stringValue == "hello world")
+    }
+
+    @Test("zlib gzip, gunzip, and unzip sync APIs roundtrip")
+    func zlibGzipGunzipSync() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var zlib = require('node:zlib');
+                var gzip = zlib.gzipSync('hello gzip');
+                return JSON.stringify({
+                    gunzip: zlib.gunzipSync(gzip).toString(),
+                    unzip: zlib.unzipSync(gzip).toString()
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"gunzip":"hello gzip","unzip":"hello gzip"}"#)
+    }
+
+    @Test("zlib callback and transform APIs produce expected output")
+    func zlibCallbackAndTransformAPIs() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var consumers = require('node:stream/consumers');
+
+                var callbackResult = await new Promise(function(resolve, reject) {
+                    zlib.gzip('callback path', function(error, compressed) {
+                        if (error) {
+                            reject(error);
+                            return;
+                        }
+                        zlib.gunzip(compressed, function(secondError, uncompressed) {
+                            if (secondError) {
+                                reject(secondError);
+                                return;
+                            }
+                            resolve(uncompressed.toString());
+                        });
+                    });
+                });
+
+                var encoder = zlib.createGzip();
+                var decoder = zlib.createGunzip();
+                encoder.pipe(decoder);
+                encoder.end('stream path');
+                var streamed = await consumers.text(decoder);
+
+                return JSON.stringify({
+                    callbackResult: callbackResult,
+                    streamed: streamed
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"callbackResult":"callback path","streamed":"stream path"}"#)
+    }
+
+    @Test("zlib callback API does not block timers while compressing")
+    func zlibAsyncCallbackDoesNotBlockTimers() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var timers = require('node:timers/promises');
+                var input = Buffer.allocUnsafe(16 * 1024 * 1024);
+                for (var index = 0; index < input.length; index += 1) {
+                    input[index] = (index * 31) & 255;
+                }
+
+                var gzipDone = new Promise(function(resolve, reject) {
+                    zlib.gzip(input, function(error) {
+                        if (error) {
+                            reject(error);
+                            return;
+                        }
+                        resolve('gzip');
+                    });
+                });
+
+                return await Promise.race([
+                    gzipDone,
+                    timers.setTimeout(0, 'timer')
+                ]);
+            })()
+        """)
+        #expect(result.stringValue == "timer")
+    }
+
+    @Test("zlib rejects truncated gzip payloads")
+    func zlibRejectsTruncatedPayloads() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var zlib = require('node:zlib');
+                var compressed = zlib.gzipSync('hello gzip');
+                try {
+                    zlib.gunzipSync(compressed.slice(0, compressed.length - 2));
+                    return 'missing';
+                } catch (error) {
+                    return typeof error.message === 'string' && error.message.length > 0;
+                }
+            })()
+        """)
+        #expect(result.boolValue == true)
     }
 
     @Test("net.createServer and connect roundtrip")
@@ -474,59 +1079,16 @@ struct NodeCompatModuleTests {
         #expect(response["remotePort"] as? Int != response["localPort"] as? Int)
     }
 
-    #if os(macOS)
-    @Test("child_process.execSync runs command on macOS")
-    func childProcessExecSync() async throws {
-        let result = try await evaluate("""
-            require('node:child_process').execSync('printf hello').toString()
-        """)
-        #expect(result.stringValue == "hello")
-    }
-
-    @Test("child_process.execFileSync returns stdout on macOS")
-    func childProcessExecFileSync() async throws {
-        let result = try await evaluate("""
-            require('node:child_process').execFileSync('/bin/echo', ['hello']).toString().trim()
-        """)
-        #expect(result.stringValue == "hello")
-    }
-
-    @Test("child_process.spawnSync returns stdout on macOS")
-    func childProcessSpawnSync() async throws {
-        let result = try await evaluate("""
-            var r = require('node:child_process').spawnSync('/bin/echo', ['hello']);
-            JSON.stringify({ status: r.status, stdout: r.stdout.toString().trim() })
-        """)
-        #expect(result.stringValue.contains(#""status":0"#))
-        #expect(result.stringValue.contains(#""stdout":"hello""#))
-    }
-
-    @Test("child_process.execFile captures stdout on macOS")
-    func childProcessExecFile() async throws {
-        let result = try await evaluateAsync("""
-            (async function() {
-                var cp = require('node:child_process');
-                return await new Promise(function(resolve, reject) {
-                    cp.execFile('/usr/bin/printf', ['hello'], function(err, stdout) {
-                        if (err) reject(err);
-                        else resolve(stdout);
-                    });
-                });
-            })()
-        """)
-        #expect(result.stringValue == "hello")
-    }
-
-    @Test("child_process.execFile reports non-zero exit as error on macOS")
-    func childProcessExecFileFailure() async throws {
+    @Test("child_process.execFile reports unsupported command")
+    func childProcessExecFileUnsupported() async throws {
         let result = try await evaluateAsync("""
             (async function() {
                 var cp = require('node:child_process');
                 return await new Promise(function(resolve) {
-                    cp.execFile('/usr/bin/false', [], function(err, stdout, stderr) {
+                    cp.execFile('/usr/bin/printf', ['hello'], function(err, stdout, stderr) {
                         resolve(JSON.stringify({
                             hasError: !!err,
-                            code: err && err.code,
+                            message: err && err.message,
                             stdout: stdout,
                             stderr: stderr
                         }));
@@ -535,56 +1097,90 @@ struct NodeCompatModuleTests {
             })()
         """)
         #expect(result.stringValue.contains(#""hasError":true"#))
-        #expect(result.stringValue.contains(#""code":1"#))
+        #expect(result.stringValue.contains("not supported"))
     }
 
-    @Test("child_process.spawn emits close event on macOS")
-    func childProcessSpawn() async throws {
+    @Test("child_process.spawn bridges rg --files without subprocesses")
+    func childProcessBuiltinRipgrep() async throws {
+        let tempDirectory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("swift-bun-rg-\(UUID().uuidString)")
+        let nestedDirectory = tempDirectory.appendingPathComponent(".hidden")
+        let topLevelFile = tempDirectory.appendingPathComponent("visible.txt")
+        let nestedFile = nestedDirectory.appendingPathComponent("nested.txt")
+        try FileManager.default.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+        try Data("visible".utf8).write(to: topLevelFile)
+        try Data("nested".utf8).write(to: nestedFile)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
         let result = try await evaluateAsync("""
             (async function() {
                 var cp = require('node:child_process');
-                var child = cp.spawn('/bin/echo', ['hello']);
+                var child = cp.spawn('rg', ['--files', '--hidden', '\(tempDirectory.path)']);
                 var stdout = '';
-                child.stdout.on('data', function(c) { stdout += c.toString(); });
+                var events = [];
+                child.stdout.on('data', function(chunk) { stdout += chunk.toString(); });
+                child.on('exit', function() { events.push('exit'); });
                 return await new Promise(function(resolve) {
                     child.on('close', function(code) {
-                        resolve(JSON.stringify({ code: code, stdout: stdout.trim() }));
+                        events.push('close');
+                        resolve(JSON.stringify({
+                            code: code,
+                            stdout: stdout.trim().split('\\n').sort(),
+                            events: events,
+                            instance: child instanceof cp.ChildProcess
+                        }));
                     });
                 });
             })()
         """)
-        #expect(result.stringValue.contains(#""code":0"#))
-        #expect(result.stringValue.contains(#""stdout":"hello""#))
+
+        let data = try #require(result.stringValue.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["code"] as? Int == 0)
+        #expect(payload["instance"] as? Bool == true)
+        #expect((payload["events"] as? [String]) == ["exit", "close"])
+        let stdout = try #require(payload["stdout"] as? [String])
+        let normalizedStdout = Set(stdout.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+        #expect(normalizedStdout.contains(topLevelFile.standardizedFileURL.path))
+        #expect(normalizedStdout.contains(nestedFile.standardizedFileURL.path))
     }
 
-    @Test("child_process.spawn returns ChildProcess instance on macOS")
-    func childProcessInstance() async throws {
-        let result = try await evaluate("""
-            (function() {
+    @Test("child_process builtin from timer callback does not stall the runtime")
+    func childProcessBuiltinRipgrepInsideTimer() async throws {
+        let tempDirectory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("swift-bun-rg-timer-\(UUID().uuidString)")
+        let file = tempDirectory.appendingPathComponent("visible.txt")
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        try Data("visible".utf8).write(to: file)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let result = try await evaluateAsync("""
+            (async function() {
                 var cp = require('node:child_process');
-                var child = cp.spawn('/bin/echo', ['hello']);
-                return child instanceof cp.ChildProcess;
+                return await new Promise(function(resolve, reject) {
+                    setTimeout(function() {
+                        var child = cp.spawn('rg', ['--files', '\(tempDirectory.path)']);
+                        var stdout = '';
+                        child.stdout.on('data', function(chunk) { stdout += chunk.toString(); });
+                        child.on('error', reject);
+                        child.on('close', function(code) {
+                            resolve(JSON.stringify({
+                                code: code,
+                                files: stdout.trim().split('\\n').filter(Boolean)
+                            }));
+                        });
+                    }, 0);
+                });
             })()
         """)
-        #expect(result.boolValue == true)
-    }
-    #else
-    @Test("child_process.execFile is unsupported on iOS")
-    func childProcessExecFileUnsupported() async throws {
-        await #expect(throws: BunRuntimeError.self) {
-            try await evaluate("""
-                require('node:child_process').execFile('/usr/bin/printf', ['hello'])
-            """)
-        }
-    }
 
-    @Test("child_process.spawn is unsupported on iOS")
-    func childProcessSpawnUnsupported() async throws {
-        await #expect(throws: BunRuntimeError.self) {
-            try await evaluate("""
-                require('node:child_process').spawn('/bin/cat', [], {})
-            """)
-        }
+        let data = try #require(result.stringValue.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["code"] as? Int == 0)
+        let files = try #require(payload["files"] as? [String])
+        let normalizedFiles = Set(files.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+        #expect(normalizedFiles.contains(file.standardizedFileURL.path))
     }
-    #endif
 }

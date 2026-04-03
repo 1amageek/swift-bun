@@ -222,7 +222,33 @@ struct FetchRoundtripTests {
             """)
             let json = try parseJSONValue(value)
             #expect(json["body"] as? String == "hello world")
-            #expect((json["chunkCount"] as? Int ?? 0) > 1)
+            #expect((json["chunkCount"] as? Int ?? 0) > 0)
+        }
+    }
+
+    @Test("fetch batches large response body chunks")
+    func responseBodyStreamingBatchesLargePayload() async throws {
+        try await withServer { baseURL in
+            let payloadSize = 32768
+            let value = try await runAsyncExpression("""
+                (async function() {
+                    var response = await fetch('\(baseURL)/large-bytes?size=\(payloadSize)');
+                    var reader = response.body.getReader();
+                    var chunkCount = 0;
+                    var totalBytes = 0;
+                    while (true) {
+                        var step = await reader.read();
+                        if (step.done) break;
+                        chunkCount += 1;
+                        totalBytes += step.value.length;
+                    }
+                    return JSON.stringify({ chunkCount: chunkCount, totalBytes: totalBytes });
+                })()
+            """)
+            let json = try parseJSONValue(value)
+            #expect(json["totalBytes"] as? Int == payloadSize)
+            #expect((json["chunkCount"] as? Int ?? 0) > 0)
+            #expect((json["chunkCount"] as? Int ?? Int.max) < 16)
         }
     }
 

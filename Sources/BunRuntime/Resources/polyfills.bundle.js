@@ -9556,6 +9556,10 @@ if (typeof globalThis.queueMicrotask === "undefined") {
     init = init || {};
     if (typeof input === "string") {
       this.url = input;
+    } else if (input && typeof input.href === "string") {
+      this.url = input.href;
+    } else if (input && typeof input.toString === "function" && input.toString() !== "[object Object]") {
+      this.url = input.toString();
     } else {
       this.url = input.url;
       init = Object.assign({}, input, init);

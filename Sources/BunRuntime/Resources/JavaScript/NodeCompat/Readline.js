@@ -37,11 +37,13 @@
     Interface.prototype.constructor = Interface;
     Interface.prototype.setPrompt = function(prompt) {
         this._prompt = String(prompt);
+        return this;
     };
     Interface.prototype.prompt = function() {
         if (this.output && typeof this.output.write === 'function' && this._prompt) {
             this.output.write(this._prompt);
         }
+        return this;
     };
     Interface.prototype.question = function(query, callback) {
         if (this.output && typeof this.output.write === 'function' && query) {
@@ -50,6 +52,19 @@
         if (typeof callback === 'function') {
             this.once('line', callback);
         }
+        return this;
+    };
+    Interface.prototype.pause = function() {
+        if (this.input && typeof this.input.pause === 'function') {
+            this.input.pause();
+        }
+        return this;
+    };
+    Interface.prototype.resume = function() {
+        if (this.input && typeof this.input.resume === 'function') {
+            this.input.resume();
+        }
+        return this;
     };
     Interface.prototype.close = function() {
         if (this.closed) return;
@@ -116,6 +131,20 @@
         };
     };
 
+    function PromisesInterface(options) {
+        Interface.call(this, options);
+    }
+    PromisesInterface.prototype = Object.create(Interface.prototype);
+    PromisesInterface.prototype.constructor = PromisesInterface;
+    PromisesInterface.prototype.question = function(query, options) {
+        var self = this;
+        return new Promise(function(resolve) {
+            Interface.prototype.question.call(self, query, function(answer) {
+                resolve(answer);
+            });
+        });
+    };
+
     var readline = {
         Interface: Interface,
         createInterface: function(options) {
@@ -149,6 +178,12 @@
             }
             if (typeof cb === 'function') cb(null);
             return true;
+        },
+    };
+    readline.promises = {
+        Interface: PromisesInterface,
+        createInterface: function(options) {
+            return new PromisesInterface(options);
         },
     };
     readline.default = readline;

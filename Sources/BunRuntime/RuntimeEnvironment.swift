@@ -4,9 +4,15 @@ import Foundation
 struct RuntimeEnvironment: Sendable {
     let values: [String: String]
 
-    init(overrides: [String: String] = [:]) {
+    init(overrides: [String: String] = [:], removing removedKeys: Set<String> = []) {
         var merged = ProcessInfo.processInfo.environment
+        for key in removedKeys {
+            merged.removeValue(forKey: key)
+        }
         for (key, value) in overrides {
+            if removedKeys.contains(key) {
+                continue
+            }
             merged[key] = value
         }
         self.values = merged

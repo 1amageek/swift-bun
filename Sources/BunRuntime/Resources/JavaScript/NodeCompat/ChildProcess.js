@@ -40,6 +40,45 @@
         return __cpRunSync(file, JSON.stringify(args || []), JSON.stringify(opts || {}));
     }
 
+    var nextBuiltinRequestId = 1;
+    var pendingBuiltinChildren = Object.create(null);
+
+    globalThis.__swiftBunChildProcessComplete = function(requestId, resultJSON) {
+        var entry = pendingBuiltinChildren[requestId];
+        if (!entry) return;
+        delete pendingBuiltinChildren[requestId];
+
+        var result;
+        try {
+            result = JSON.parse(resultJSON);
+        } catch (error) {
+            result = { error: String(error), status: 1, stdout: '', stderr: '' };
+        }
+
+        entry.finish(result);
+    };
+
+    function startBuiltinCommand(file, args, opts, finish) {
+        if (typeof __cpBuiltinStart !== 'function') return false;
+        var requestId = nextBuiltinRequestId++;
+        pendingBuiltinChildren[requestId] = { finish: finish };
+        var started = __cpBuiltinStart(file, JSON.stringify(args || []), JSON.stringify(opts || {}), requestId);
+        if (!started) {
+            delete pendingBuiltinChildren[requestId];
+        }
+        return started;
+    }
+
+    function decodeOutput(value, opts) {
+        var encoding = opts && typeof opts.encoding === 'string' ? opts.encoding : null;
+        if (encoding && encoding !== 'buffer') return value || '';
+        return Buffer.from(value || '', 'utf8');
+    }
+
+    function commandDescription(file, args) {
+        return [file].concat(Array.isArray(args) ? args : []).join(' ');
+    }
+
     __nodeModules.child_process = {
         ChildProcess: ChildProcess,
         spawn: function(file, args, opts) {
@@ -88,8 +127,8 @@
                     if (result.stderr) child.stderr.write(Buffer.from(result.stderr, 'utf8'));
                     child.stderr.end();
 
-                    child.emit('close', child.exitCode, child.signalCode);
                     child.emit('exit', child.exitCode, child.signalCode);
+                    child.emit('close', child.exitCode, child.signalCode);
                 });
             }
 
@@ -100,6 +139,10 @@
                 var runOptions = Object.assign({}, opts);
                 if (stdinChunks.length > 0) {
                     runOptions.input = stdinChunks.join('');
+                }
+
+                if (startBuiltinCommand(file, args, runOptions, finishChild)) {
+                    return;
                 }
 
                 finishChild(runCommandSync(file, args, runOptions));
@@ -115,25 +158,26 @@
         execSync: function(cmd, opts) {
             var result = runCommandSync('/bin/sh', ['-lc', cmd], opts || {});
             if (result.error) throw new Error(result.error);
-            if ((result.status || 0) !== 0) throw new Error(result.stderr || ('Command exited with code ' + result.status));
-            return Buffer.from(result.stdout || '', 'utf8');
+            if ((result.status || 0) !== 0) throw new Error(result.stderr || ('Command failed: ' + cmd));
+            return decodeOutput(result.stdout, opts || {});
         },
         execFileSync: function(file, args, opts) {
             if (!Array.isArray(args) && args && typeof args === 'object') {
                 opts = args;
                 args = [];
             }
-            var result = runCommandSync(file, Array.isArray(args) ? args : [], opts || {});
+            opts = opts || {};
+            var result = runCommandSync(file, Array.isArray(args) ? args : [], opts);
             if (result.error) throw new Error(result.error);
             if ((result.status || 0) !== 0) {
-                var error = new Error(result.stderr || ('Command exited with code ' + result.status));
+                var error = new Error(result.stderr || ('Command failed: ' + commandDescription(file, args)));
                 error.status = result.status;
                 error.signal = result.signal || null;
-                error.stdout = Buffer.from(result.stdout || '', 'utf8');
-                error.stderr = Buffer.from(result.stderr || '', 'utf8');
+                error.stdout = decodeOutput(result.stdout, opts);
+                error.stderr = decodeOutput(result.stderr, opts);
                 throw error;
             }
-            return Buffer.from(result.stdout || '', 'utf8');
+            return decodeOutput(result.stdout, opts);
         },
         execFile: function(file, args, opts, cb) {
             if (typeof opts === 'function') cb = opts;
@@ -154,7 +198,11 @@
                 else {
                     var err = new Error(stderr || ('Command exited with code ' + code));
                     err.code = code;
+                    err.killed = child.killed;
                     err.signal = signal;
+                    err.cmd = [file].concat(args).join(' ');
+                    err.stdout = stdout;
+                    err.stderr = stderr;
                     cb(err, stdout, stderr);
                 }
             });
@@ -177,12 +225,13 @@
             if (result.error) {
                 return { error: new Error(result.error), status: null, stdout: '', stderr: '' };
             }
+            opts = opts || {};
             return {
                 pid: 0,
                 status: result.status || 0,
                 signal: result.signal || null,
-                stdout: Buffer.from(result.stdout || '', 'utf8'),
-                stderr: Buffer.from(result.stderr || '', 'utf8'),
+                stdout: decodeOutput(result.stdout, opts),
+                stderr: decodeOutput(result.stderr, opts),
             };
         },
     };

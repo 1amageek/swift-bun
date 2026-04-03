@@ -105,13 +105,16 @@ final class FileSystemAsyncBridge: Sendable {
     }
 
     private let completeOnJSThread: @Sendable (Int32, String, String?, Payload) -> Void
+    private let onOperationStarted: @Sendable (Int32, String, String?) -> Void
     private let log: @Sendable (String) -> Void
 
     init(
         completeOnJSThread: @escaping @Sendable (Int32, String, String?, Payload) -> Void,
+        onOperationStarted: @escaping @Sendable (Int32, String, String?) -> Void,
         log: @escaping @Sendable (String) -> Void
     ) {
         self.completeOnJSThread = completeOnJSThread
+        self.onOperationStarted = onOperationStarted
         self.log = log
     }
 
@@ -270,6 +273,7 @@ final class FileSystemAsyncBridge: Sendable {
 
     private func run(source: String, token: Int32, detail: String?, operation: @escaping @Sendable () -> Payload) {
         let startUptimeMs = Int(ProcessInfo.processInfo.systemUptime * 1000)
+        onOperationStarted(token, source, detail)
         if let detail {
             log("[bun:fs] start \(source) token=\(token) t=\(startUptimeMs) path=\(detail)")
         } else {

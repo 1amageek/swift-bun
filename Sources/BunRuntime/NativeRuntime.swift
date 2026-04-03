@@ -5,10 +5,113 @@ import Synchronization
 
 /// Hosts native async work off the JS thread and re-enters JS through the host scheduler.
 final class NativeRuntime: Sendable {
+    private static let fetchChunkSizeBytes = 8 * 1024
+    private static let fetchChunkFlushDelayMs: Int64 = 2
+
     private enum ShutdownState {
         case active
         case shuttingDown
         case shutDown
+    }
+
+    private final class FetchChunkEmitter: Sendable {
+        private struct State: Sendable {
+            var bufferedBytes: [UInt8] = []
+            var flushPending = false
+            var generation: UInt64 = 0
+        }
+
+        private let operationID: Int32
+        private let chunkSizeBytes: Int
+        private let flushDelayMs: Int64
+        private let state = Mutex(State())
+        private let acceptsNewWork: @Sendable () -> Bool
+        private let scheduleAfter: @Sendable (Int64, @escaping @Sendable () -> Void) -> Void
+        private let emit: @Sendable ([UInt8]) -> Void
+
+        init(
+            operationID: Int32,
+            chunkSizeBytes: Int,
+            flushDelayMs: Int64,
+            acceptsNewWork: @escaping @Sendable () -> Bool,
+            scheduleAfter: @escaping @Sendable (Int64, @escaping @Sendable () -> Void) -> Void,
+            emit: @escaping @Sendable ([UInt8]) -> Void
+        ) {
+            self.operationID = operationID
+            self.chunkSizeBytes = chunkSizeBytes
+            self.flushDelayMs = flushDelayMs
+            self.acceptsNewWork = acceptsNewWork
+            self.scheduleAfter = scheduleAfter
+            self.emit = emit
+        }
+
+        func append(_ byte: UInt8) {
+            var payload: [UInt8]?
+            var generationToFlush: UInt64?
+
+            state.withLock { state in
+                state.bufferedBytes.append(byte)
+                if state.bufferedBytes.count >= chunkSizeBytes {
+                    payload = state.bufferedBytes
+                    state.bufferedBytes.removeAll(keepingCapacity: true)
+                    state.flushPending = false
+                    state.generation &+= 1
+                    return
+                }
+
+                guard !state.flushPending else { return }
+                state.flushPending = true
+                state.generation &+= 1
+                generationToFlush = state.generation
+            }
+
+            if let payload {
+                emit(payload)
+            }
+
+            if let generationToFlush {
+                scheduleAfter(flushDelayMs) { [self] in
+                    flushIfPending(generation: generationToFlush)
+                }
+            }
+        }
+
+        func finish() {
+            var payload: [UInt8]?
+            state.withLock { state in
+                guard !state.bufferedBytes.isEmpty else {
+                    state.flushPending = false
+                    state.generation &+= 1
+                    return
+                }
+                payload = state.bufferedBytes
+                state.bufferedBytes.removeAll(keepingCapacity: true)
+                state.flushPending = false
+                state.generation &+= 1
+            }
+
+            if let payload {
+                emit(payload)
+            }
+        }
+
+        private func flushIfPending(generation: UInt64) {
+            guard acceptsNewWork() else { return }
+
+            var payload: [UInt8]?
+            state.withLock { state in
+                guard state.flushPending, state.generation == generation, !state.bufferedBytes.isEmpty else {
+                    return
+                }
+                payload = state.bufferedBytes
+                state.bufferedBytes.removeAll(keepingCapacity: true)
+                state.flushPending = false
+            }
+
+            if let payload {
+                emit(payload)
+            }
+        }
     }
 
     private final class UnsafeVoidCallback: Sendable {
@@ -166,16 +269,33 @@ final class NativeRuntime: Sendable {
                     callbackBox.callback(.headers(headers))
                 }
 
+                let chunkEmitter = FetchChunkEmitter(
+                    operationID: operationID,
+                    chunkSizeBytes: Self.fetchChunkSizeBytes,
+                    flushDelayMs: Self.fetchChunkFlushDelayMs,
+                    acceptsNewWork: { [weak self] in
+                        guard let self else { return false }
+                        return self.acceptsNewWork()
+                    },
+                    scheduleAfter: { [hostEventLoop] delayMs, callback in
+                        _ = hostEventLoop.scheduleTask(in: .milliseconds(delayMs), callback)
+                    },
+                    emit: { [scheduler] payload in
+                        scheduler.enqueueHostCallback(source: "fetch:\(operationID):chunk") {
+                            callbackBox.callback(.chunk(operationID: operationID, bytes: payload))
+                        }
+                    }
+                )
+
                 for try await byte in bytes {
                     guard self.acceptsNewWork() else { return }
                     if Task.isCancelled {
                         return
                     }
-                    let payload = [byte]
-                    self.scheduler.enqueueHostCallback(source: "fetch:\(operationID):chunk") {
-                        callbackBox.callback(.chunk(operationID: operationID, bytes: payload))
-                    }
+                    chunkEmitter.append(byte)
                 }
+
+                chunkEmitter.finish()
 
                 _ = self.fetchTaskStates.withLock { $0.removeValue(forKey: operationID) }
                 _ = self.fetchTasks.withLock { $0.removeValue(forKey: operationID) }

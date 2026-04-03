@@ -30,9 +30,12 @@ enum JavaScriptResource: Sendable {
     }
 
     enum NodeCompatScript: String, CaseIterable, Hashable, Sendable {
+        case events = "Events"
         case fs = "NodeFS"
         case http = "NodeHTTP"
         case stream = "NodeStream"
+        case stringDecoder = "StringDecoder"
+        case querystring = "QueryString"
         case path = "NodePath"
         case buffer = "NodeBuffer"
         case url = "NodeURL"

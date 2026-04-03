@@ -39,6 +39,53 @@ func withLocalHTTPServer(
 
 @Suite("BunProcess Lifecycle", .serialized, .heartbeat)
 struct BunProcessLifecycleTests {
+    private func makeRecursiveScanFixture() throws -> (root: URL, fileCount: Int) {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("swift-bun-startup-fs-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        var fileCount = 0
+        for topLevelIndex in 0..<8 {
+            let topLevelDirectory = root.appendingPathComponent("dir-\(topLevelIndex)", isDirectory: true)
+            try fileManager.createDirectory(at: topLevelDirectory, withIntermediateDirectories: true)
+
+            for fileIndex in 0..<8 {
+                let fileURL = topLevelDirectory.appendingPathComponent("file-\(fileIndex).txt")
+                try "top-level-\(topLevelIndex)-\(fileIndex)".write(to: fileURL, atomically: true, encoding: .utf8)
+                fileCount += 1
+            }
+
+            for nestedIndex in 0..<4 {
+                let nestedDirectory = topLevelDirectory.appendingPathComponent("nested-\(nestedIndex)", isDirectory: true)
+                try fileManager.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+
+                for fileIndex in 0..<4 {
+                    let fileURL = nestedDirectory.appendingPathComponent("leaf-\(fileIndex).txt")
+                    try "nested-\(topLevelIndex)-\(nestedIndex)-\(fileIndex)".write(
+                        to: fileURL,
+                        atomically: true,
+                        encoding: .utf8
+                    )
+                    fileCount += 1
+                }
+            }
+        }
+
+        return (root, fileCount)
+    }
+
+    private func removeIfPresent(_ url: URL) {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else {
+            return
+        }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+        }
+    }
+
 
     @Test func exitWithCode() async throws {
         let url = try tempBundle("process.exit(42);")
@@ -99,6 +146,161 @@ struct BunProcessLifecycleTests {
             }
         }
         #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test("startup promise keeps process alive through recursive async fs warmup")
+    func startupPromiseKeepsProcessAliveThroughRecursiveAsyncFSWarmup() async throws {
+        let fixture = try makeRecursiveScanFixture()
+        let url = try tempBundle("""
+            var fs = require('node:fs');
+            var path = require('node:path');
+
+            async function walk(dir) {
+                var entries = await fs.promises.readdir(dir, { withFileTypes: true });
+                var counts = await Promise.all(entries.map(async function(entry) {
+                    var fullPath = path.join(dir, entry.name);
+                    var stats = await fs.promises.stat(fullPath);
+                    if (stats.isDirectory()) {
+                        return await walk(fullPath);
+                    }
+                    return 1;
+                }));
+                return counts.reduce(function(total, count) {
+                    return total + count;
+                }, 0);
+            }
+
+            globalThis.__swiftBunStartupPromise = (async function() {
+                var fileCount = await walk('\(fixture.root.path)');
+                process.stdout.write(JSON.stringify({ fileCount: fileCount }) + '\\n');
+            })();
+        """)
+        defer {
+            removeIfPresent(url)
+            removeIfPresent(fixture.root)
+        }
+
+        let process = BunProcess(bundle: url)
+        let stdoutTask = Task { () -> [String] in
+            var lines: [String] = []
+            for await line in process.stdout {
+                lines.append(line)
+            }
+            return lines
+        }
+        let outputTask = Task { () -> [String] in
+            var lines: [String] = []
+            for await line in process.output {
+                lines.append(line)
+            }
+            return lines
+        }
+
+        let exitCode = try await process.run()
+        let stdout = await stdoutTask.value
+        let output = await outputTask.value
+
+        #expect(exitCode == 0)
+        #expect(stdout.joined().contains(#""fileCount":\#(fixture.fileCount)"#))
+
+        let startupBarrierReleaseIndex = output.lastIndex { $0.contains("releaseBootBarrier(startup-sequence)") }
+        let startupPromiseAcquireIndex = output.lastIndex { $0.contains("acquireVisibleHandle(startupPromise)") }
+        let startupPromiseReleaseIndex = output.lastIndex { $0.contains("releaseVisibleHandle(startupPromise)") }
+        let lastStatResolveIndex = output.lastIndex { $0.contains("[bun:fs] resolve fs.stat") }
+        let lastReaddirResolveIndex = output.lastIndex { $0.contains("[bun:fs] resolve fs.readdir") }
+        let lastStatCallbackIndex = output.lastIndex {
+            $0.contains("hostCallback(fs.stat:") && $0.contains(") end")
+        }
+        let lastReaddirCallbackIndex = output.lastIndex {
+            $0.contains("hostCallback(fs.readdir:") && $0.contains(") end")
+        }
+        let fsCallbackCount = output.reduce(into: 0) { count, line in
+            if line.contains("hostCallback(fs.stat:") && line.contains(") end") {
+                count += 1
+            }
+        }
+
+        #expect(startupBarrierReleaseIndex != nil)
+        #expect(startupPromiseAcquireIndex != nil)
+        #expect(startupPromiseReleaseIndex != nil)
+        #expect(lastStatResolveIndex != nil)
+        #expect(lastReaddirResolveIndex != nil)
+        #expect(lastStatCallbackIndex != nil)
+        #expect(lastReaddirCallbackIndex != nil)
+        #expect(fsCallbackCount >= fixture.fileCount)
+
+        if let startupBarrierReleaseIndex,
+           let startupPromiseAcquireIndex,
+           let startupPromiseReleaseIndex,
+           let lastStatResolveIndex,
+           let lastReaddirResolveIndex,
+           let lastStatCallbackIndex,
+           let lastReaddirCallbackIndex {
+            let lastFSResolveIndex = max(lastStatResolveIndex, lastReaddirResolveIndex)
+            let lastFSCallbackIndex = max(lastStatCallbackIndex, lastReaddirCallbackIndex)
+            #expect(startupPromiseAcquireIndex < startupBarrierReleaseIndex)
+            #expect(startupBarrierReleaseIndex < lastFSCallbackIndex)
+            #expect(lastFSResolveIndex < startupPromiseReleaseIndex)
+        }
+    }
+
+    @Test("top-level recursive async fs warmup completes without startup promise")
+    func topLevelRecursiveAsyncFSWarmupCompletesWithoutStartupPromise() async throws {
+        let fixture = try makeRecursiveScanFixture()
+        let url = try tempBundle("""
+            var fs = require('node:fs');
+            var path = require('node:path');
+
+            async function walk(dir) {
+                var entries = await fs.promises.readdir(dir, { withFileTypes: true });
+                var counts = await Promise.all(entries.map(async function(entry) {
+                    var fullPath = path.join(dir, entry.name);
+                    var stats = await fs.promises.stat(fullPath);
+                    if (stats.isDirectory()) {
+                        return await walk(fullPath);
+                    }
+                    return 1;
+                }));
+                return counts.reduce(function(total, count) {
+                    return total + count;
+                }, 0);
+            }
+
+            (async function() {
+                var fileCount = await walk('\(fixture.root.path)');
+                process.stdout.write(JSON.stringify({ fileCount: fileCount }) + '\\n');
+                process.exit(0);
+            })();
+        """)
+        defer {
+            removeIfPresent(url)
+            removeIfPresent(fixture.root)
+        }
+
+        let process = BunProcess(bundle: url)
+        let stdoutTask = Task { () -> [String] in
+            var lines: [String] = []
+            for await line in process.stdout {
+                lines.append(line)
+            }
+            return lines
+        }
+        let outputTask = Task { () -> [String] in
+            var lines: [String] = []
+            for await line in process.output {
+                lines.append(line)
+            }
+            return lines
+        }
+
+        let exitCode = try await process.run()
+        let stdout = await stdoutTask.value
+        let output = await outputTask.value
+
+        #expect(exitCode == 0)
+        #expect(stdout.joined().contains(#""fileCount":\#(fixture.fileCount)"#))
+        #expect(output.contains { $0.contains("hostCallback(fs.readdir:") && $0.contains(") end") })
+        #expect(output.contains { $0.contains("hostCallback(fs.stat:") && $0.contains(") end") })
     }
 
     @Test func terminate() async throws {

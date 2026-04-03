@@ -6,6 +6,23 @@ import TestHeartbeat
 
 @Suite("BunProcess Timers", .serialized, .heartbeat)
 struct BunProcessTimerTests {
+    private struct TimeoutError: Error {}
+
+    private func runWithTimeout(bundle: URL, seconds: Double = 3) async throws -> Int32 {
+        try await withThrowingTaskGroup(of: Int32.self) { group in
+            group.addTask {
+                try await BunProcess(bundle: bundle).run()
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw TimeoutError()
+            }
+
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
 
     @Test func setTimeout() async throws {
         let url = try tempBundle("setTimeout(function() { process.exit(0); }, 10);")
@@ -93,5 +110,39 @@ struct BunProcessTimerTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func timersPromisesRefFalseDoesNotKeepProcessAlive() async throws {
+        let url = try tempBundle("""
+            require('node:timers/promises').setTimeout(1_000, 'late', { ref: false });
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await runWithTimeout(bundle: url) == 0)
+    }
+
+    @Test func timersPromisesSetIntervalIteratorAndSchedulerWait() async throws {
+        let url = try tempBundle("""
+            (async function() {
+                var timers = require('node:timers/promises');
+                var count = 0;
+                for await (var value of timers.setInterval(5, 'tick')) {
+                    if (value !== 'tick') process.exit(1);
+                    count += 1;
+                    if (count === 3) break;
+                }
+                await timers.scheduler.wait(5);
+                process.exit(count === 3 ? 0 : 1);
+            })();
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await BunProcess(bundle: url).run() == 0)
+    }
+
+    @Test func invalidSetIntervalIsIgnoredWithoutScheduling() async throws {
+        let url = try tempBundle("""
+            setInterval(undefined, 10);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await runWithTimeout(bundle: url) == 0)
     }
 }

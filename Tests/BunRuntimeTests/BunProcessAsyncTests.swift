@@ -236,4 +236,47 @@ struct BunProcessAsyncTests {
 
         #expect(try await BunProcess(bundle: url).run() == 0)
     }
+
+    @Test func hostCallbackBudgetIsConfigurable() async throws {
+        let url = try tempBundle("""
+            var completed = 0;
+            var target = 100;
+            for (var i = 0; i < target; i++) {
+                setTimeout(function() {
+                    completed += 1;
+                    if (completed === target) {
+                        process.exit(0);
+                    }
+                }, 0);
+            }
+        """)
+        defer {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+            }
+        }
+
+        func runAndCollectBudgetLogs(hostBudget: Int) async throws -> [String] {
+            let process = BunProcess(bundle: url, hostCallbackBudgetPerTurn: hostBudget)
+            let outputTask = Task { () -> [String] in
+                var lines: [String] = []
+                for await line in process.output {
+                    lines.append(line)
+                }
+                return lines
+            }
+
+            let exitCode = try await process.run()
+            let output = await outputTask.value
+            #expect(exitCode == 0)
+            return output
+        }
+
+        let lowBudgetOutput = try await runAndCollectBudgetLogs(hostBudget: 16)
+        let highBudgetOutput = try await runAndCollectBudgetLogs(hostBudget: 256)
+
+        #expect(lowBudgetOutput.contains { $0.contains("host callback budget exhausted at 16") })
+        #expect(!highBudgetOutput.contains { $0.contains("host callback budget exhausted at 256") })
+    }
 }

@@ -1,6 +1,54 @@
         (function() {
+            function parseNodeErrorString(message) {
+                var text = String(message || '');
+                var match = /^([A-Z0-9]+):\s*([^,]+),\s*([a-z_]+)\s+'([^']+)'$/.exec(text);
+                if (!match) {
+                    return {
+                        code: undefined,
+                        message: text,
+                        syscall: undefined,
+                        path: undefined,
+                    };
+                }
+                return {
+                    code: match[1],
+                    message: text,
+                    syscall: match[3],
+                    path: match[4],
+                };
+            }
+
+            function nodeErrnoNumber(code) {
+                switch (code) {
+                    case 'EPERM': return -1;
+                    case 'ENOENT': return -2;
+                    case 'EIO': return -5;
+                    case 'EBADF': return -9;
+                    case 'EACCES': return -13;
+                    case 'EEXIST': return -17;
+                    case 'ENOTDIR': return -20;
+                    case 'EISDIR': return -21;
+                    case 'EINVAL': return -22;
+                    case 'ENFILE': return -23;
+                    case 'EMFILE': return -24;
+                    case 'ENOTEMPTY': return -66;
+                    default: return undefined;
+                }
+            }
+
+            function createNodeError(message) {
+                var parsed = parseNodeErrorString(message);
+                var error = new Error(parsed.message);
+                if (parsed.code) error.code = parsed.code;
+                var errno = parsed.code ? nodeErrnoNumber(parsed.code) : undefined;
+                if (typeof errno === 'number') error.errno = errno;
+                if (parsed.syscall) error.syscall = parsed.syscall;
+                if (parsed.path) error.path = parsed.path;
+                return error;
+            }
+
             function makeStatResult(res) {
-                if (res.error) throw new Error(res.error);
+                if (res.error) throw createNodeError(res.error);
                 var raw = res.value;
                 return {
                     isFile: function() { return raw.isFile; },
@@ -24,7 +72,7 @@
             }
 
             function checkResult(res) {
-                if (res.error) throw new Error(res.error);
+                if (res.error) throw createNodeError(res.error);
                 return res.value;
             }
 
@@ -65,12 +113,12 @@
 
             function writeBufferSync(path, buffer) {
                 var res = __fsWriteFileBytesSync(path, Buffer.from(buffer).toString('base64'));
-                if (res.error) throw new Error(res.error);
+                if (res.error) throw createNodeError(res.error);
             }
 
             function appendBufferSync(path, buffer) {
                 var res = __fsAppendFileBytesSync(path, Buffer.from(buffer).toString('base64'));
-                if (res.error) throw new Error(res.error);
+                if (res.error) throw createNodeError(res.error);
             }
 
             function normalizePath(value) {
@@ -130,7 +178,7 @@
                 if (!pending) return;
                 delete __fsAsyncPending[token];
                 if (payload && payload.error) {
-                    pending.reject(new Error(payload.error));
+                    pending.reject(createNodeError(payload.error));
                     return;
                 }
                 pending.resolve(payload ? payload.value : undefined);
@@ -340,7 +388,7 @@
                     path = normalizePath(path);
                     var recursive = typeof options === 'object' ? (options.recursive || false) : false;
                     var res = __fsMkdirSync(path, recursive);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 readdirSync: function(path, options) {
                     path = normalizePath(path);
@@ -368,18 +416,18 @@
                 unlinkSync: function(path) {
                     path = normalizePath(path);
                     var res = __fsUnlinkSync(path);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 rmdirSync: function(path) {
                     path = normalizePath(path);
                     var res = __fsRmdirSync(path);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 renameSync: function(oldPath, newPath) {
                     oldPath = normalizePath(oldPath);
                     newPath = normalizePath(newPath);
                     var res = __fsRenameSync(oldPath, newPath);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 realpathSync: function(path) {
                     path = normalizePath(path);
@@ -392,13 +440,13 @@
                 symlinkSync: function(target, path) {
                     path = normalizePath(path);
                     var res = __fsSymlinkSync(target, path);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 linkSync: function(existingPath, newPath) {
                     existingPath = normalizePath(existingPath);
                     newPath = normalizePath(newPath);
                     var res = __fsLinkSync(existingPath, newPath);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 mkdtempSync: function(prefix, options) {
                     prefix = normalizePath(prefix);
@@ -411,25 +459,25 @@
                 accessSync: function(path) {
                     path = normalizePath(path);
                     var res = __fsAccessSync(path);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 chmodSync: function(path, mode) {
                     path = normalizePath(path);
                     var res = __fsChmodSync(path, mode || 0);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 utimesSync: function(path, atime, mtime) {
                     path = normalizePath(path);
                     var mtimeMs = mtime instanceof Date ? mtime.getTime() : Number(mtime) * 1000;
                     var res = __fsUtimesSync(path, mtimeMs);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 rmSync: function(path, options) {
                     path = normalizePath(path);
                     var recursive = !!(options && options.recursive);
                     var force = !!(options && options.force);
                     var res = __fsRmSync(path, recursive, force);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 openSync: function(path, flags, mode) {
                     path = normalizePath(path);
@@ -490,7 +538,7 @@
                     path = normalizePath(path);
                     var targetLength = typeof length === 'number' ? length : 0;
                     var res = __fsTruncateSync(path, targetLength);
-                    if (res.error) throw new Error(res.error);
+                    if (res.error) throw createNodeError(res.error);
                 },
                 chownSync: function() {},
                 copyFileSync: function(src, dest) {

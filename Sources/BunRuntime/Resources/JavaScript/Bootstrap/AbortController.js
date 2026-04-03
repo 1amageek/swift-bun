@@ -1,17 +1,20 @@
 (function() {
-    if (typeof globalThis.AbortController !== 'undefined') return;
-
     function AbortSignal() {
         this.aborted = false;
         this.reason = undefined;
         this._listeners = [];
+        this.onabort = null;
     }
-    AbortSignal.prototype.addEventListener = function(type, fn) {
-        if (type === 'abort') this._listeners.push(fn);
+    AbortSignal.prototype.addEventListener = function(type, fn, options) {
+        if (type !== 'abort' || typeof fn !== 'function') return;
+        this._listeners.push({
+            fn: fn,
+            once: !!(options && options.once),
+        });
     };
     AbortSignal.prototype.removeEventListener = function(type, fn) {
         if (type === 'abort') {
-            this._listeners = this._listeners.filter(function(listener) { return listener !== fn; });
+            this._listeners = this._listeners.filter(function(listener) { return listener.fn !== fn; });
         }
     };
     AbortSignal.prototype.throwIfAborted = function() {
@@ -28,7 +31,7 @@
         setTimeout(function() {
             signal.aborted = true;
             signal.reason = new DOMException('signal timed out', 'TimeoutError');
-            signal._listeners.forEach(function(fn) { fn(); });
+            dispatchAbort(signal);
         }, ms);
         return signal;
     };
@@ -79,8 +82,19 @@
         if (this.signal.aborted) return;
         this.signal.aborted = true;
         this.signal.reason = reason || new DOMException('signal is aborted', 'AbortError');
-        this.signal._listeners.forEach(function(fn) { fn(); });
+        dispatchAbort(this.signal);
     };
+
+    function dispatchAbort(signal) {
+        var listeners = signal._listeners.slice();
+        signal._listeners = signal._listeners.filter(function(listener) { return listener.once !== true; });
+        for (var i = 0; i < listeners.length; i++) {
+            listeners[i].fn.call(signal, { type: 'abort', target: signal });
+        }
+        if (typeof signal.onabort === 'function') {
+            signal.onabort.call(signal, { type: 'abort', target: signal });
+        }
+    }
 
     globalThis.AbortSignal = AbortSignal;
     globalThis.AbortController = AbortController;

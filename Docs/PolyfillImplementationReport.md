@@ -62,10 +62,9 @@ Specification sources were fixed to:
 - `net.createServer`, `connect`, `createConnection`
 - `zlib.deflateSync`
 - `crypto.createPrivateKey`
-- `child_process` improvements on macOS:
-  - `execFileSync`
-  - `ChildProcess` class
-  - `spawn/exec/execFile` now return `instanceof ChildProcess`
+- `child_process` now exposes only a narrow compatibility surface:
+  - `ChildProcess` identity
+  - builtin native-command bridges for specific host capabilities
 
 ### Phase 4: Diagnostics and edge compatibility
 
@@ -87,12 +86,12 @@ Specification sources were fixed to:
 | `node:zlib` | stub | `deflateSync` |
 | `node:dns` | stub | `lookup` |
 | `node:v8` | no-op | heap stats shape |
-| `child_process` | mostly stub | macOS execution APIs + `ChildProcess` identity |
+| `child_process` | mostly stub | limited native-command bridges + `ChildProcess` identity |
 | URL mutation | setters did not fully recompute | setters keep `href` and `searchParams` in sync |
 
 ## Platform notes
 
-- `child_process` remains intentionally unsupported on iOS
+- `child_process` does not provide general subprocess execution on any platform; required host capabilities must be bridged natively
 - `node:net` and `http.createServer` are implemented for plain local TCP/HTTP use cases
 - `node:tls`, `node:http2`, `WebSocket`, `Worker`, and native addons remain unsupported
 - `crypto.getRandomValues` still uses a non-cryptographic fallback; security-sensitive code should use `require('node:crypto')` or `crypto.subtle`

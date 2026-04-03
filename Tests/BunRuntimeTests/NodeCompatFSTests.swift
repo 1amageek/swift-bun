@@ -38,6 +38,31 @@ struct NodeCompatFSTests {
         }
     }
 
+    @Test("fs.statSync exposes Node-style ENOENT fields")
+    func fsStatSyncENOENTFields() async throws {
+        let result = try await withLoadedProcess { process in
+            try await process.evaluate(js: """
+                (function() {
+                    try {
+                        require('node:fs').statSync('/nonexistent/path/stat-sync.txt');
+                        return 'unexpected-success';
+                    } catch (error) {
+                        return JSON.stringify({
+                            code: error.code,
+                            path: error.path,
+                            syscall: error.syscall,
+                            message: error.message
+                        });
+                    }
+                })()
+            """)
+        }
+
+        #expect(result.stringValue.contains(#""code":"ENOENT""#))
+        #expect(result.stringValue.contains(#""path":"/nonexistent/path/stat-sync.txt""#))
+        #expect(result.stringValue.contains(#""syscall":"stat""#))
+    }
+
     @Test("fs.writeFileSync and readFileSync roundtrip")
     func fsWriteReadRoundtrip() async throws {
         let tmpPath = NSTemporaryDirectory() + "swift-bun-test-\(UUID().uuidString).txt"
@@ -202,6 +227,29 @@ struct NodeCompatFSTests {
         #expect(lines.contains(where: { $0.contains("[bun:fs] start fs.readFile") }))
         #expect(lines.contains(where: { $0.contains("[bun:fs] complete fs.readFile") }))
         #expect(lines.contains(where: { $0.contains("hostCallback(fs.readFile:") }))
+    }
+
+    @Test("fs.promises.stat exposes Node-style ENOENT fields")
+    func fsPromisesStatENOENTFields() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                try {
+                    await require('node:fs').promises.stat('/nonexistent/path/stat-async.txt');
+                    return 'unexpected-success';
+                } catch (error) {
+                    return JSON.stringify({
+                        code: error.code,
+                        path: error.path,
+                        syscall: error.syscall,
+                        message: error.message
+                    });
+                }
+            })()
+        """)
+
+        #expect(result.stringValue.contains(#""code":"ENOENT""#))
+        #expect(result.stringValue.contains(#""path":"/nonexistent/path/stat-async.txt""#))
+        #expect(result.stringValue.contains(#""syscall":"stat""#))
     }
 
     @Test("fs.promises.readdir supports withFileTypes via native async bridge")

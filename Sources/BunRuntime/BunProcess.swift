@@ -2,6 +2,9 @@
 import Foundation
 import NIOCore
 import Synchronization
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// A JavaScript execution context backed by a single JS-dedicated executor.
 ///
@@ -20,6 +23,7 @@ public final class BunProcess: Sendable {
     private let arguments: [String]
     private let cwd: String?
     private let environment: [String: String]
+    private let removedEnvironmentKeys: Set<String>
 
     // MARK: - Runtime Components
 
@@ -29,6 +33,8 @@ public final class BunProcess: Sendable {
     private let scheduler: HostScheduler
     private let nativeRuntime: NativeRuntime
     private let fileSystemAsyncBridge: FileSystemAsyncBridge
+    private let builtinCommandBridge: BuiltinCommandBridge
+    private let zlibAsyncBridge: ZlibAsyncBridge
     private let socketRuntime: SocketRuntime
     private let httpServerRuntime: HTTPServerRuntime
 
@@ -56,12 +62,16 @@ public final class BunProcess: Sendable {
         bundle: URL? = nil,
         arguments: [String] = [],
         cwd: String? = nil,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        removedEnvironmentKeys: Set<String> = [],
+        nextTickBudgetPerTurn: Int = 64,
+        hostCallbackBudgetPerTurn: Int = 256
     ) {
         self.bundle = bundle
         self.arguments = arguments
         self.cwd = cwd
         self.environment = environment
+        self.removedEnvironmentKeys = removedEnvironmentKeys
 
         let (stdoutStream, stdoutCont) = AsyncStream<String>.makeStream()
         self.stdout = stdoutStream
@@ -80,6 +90,8 @@ public final class BunProcess: Sendable {
         let handleRegistry = RuntimeHandleRegistry()
         let scheduler = HostScheduler(
             executor: executor,
+            nextTickBudgetPerTurn: nextTickBudgetPerTurn,
+            hostCallbackBudgetPerTurn: hostCallbackBudgetPerTurn,
             onHostCallbackEnqueued: { source in
                 lifecycle.hostCallbackEnqueued(source: source)
             },
@@ -121,7 +133,73 @@ public final class BunProcess: Sendable {
                         ctx.exception = nil
                         logger("[bun:exception] fs.async.complete: \(message)")
                     }
+                    executor.preconditionInExecutor()
+                    if let visibleHandle = handleRegistry.removeFSOperation(token: token) {
+                        lifecycle.releaseVisibleHandle(visibleHandle)
+                    }
                 }
+            },
+            onOperationStarted: { token, source, _ in
+                executor.preconditionInExecutor()
+                let visibleHandle = lifecycle.acquireVisibleHandle(kind: source)
+                handleRegistry.insertFSOperation(token: token, visibleHandleToken: visibleHandle)
+            },
+            log: logger
+        )
+        let builtinCommandBridge = BuiltinCommandBridge(
+            completeOnJSThread: { requestID, payloadJSON in
+                let schedulerSource = "childProcess:\(requestID)"
+                scheduler.enqueueHostCallback(source: schedulerSource) {
+                    executor.preconditionInExecutor()
+                    if let visibleHandle = handleRegistry.removeBuiltinCommand(requestID: requestID) {
+                        lifecycle.releaseVisibleHandle(visibleHandle)
+                    }
+                    guard let ctx = executor.context else { return }
+                    guard let handler = ctx.objectForKeyedSubscript("__swiftBunChildProcessComplete"), !handler.isUndefined else {
+                        return
+                    }
+                    _ = handler.call(withArguments: [requestID, payloadJSON])
+                    if let exception = ctx.exception {
+                        let message = exception.toString() ?? "Unknown JS exception"
+                        ctx.exception = nil
+                        logger("[bun:exception] childProcess.complete: \(message)")
+                    }
+                }
+            },
+            onOperationStarted: { requestID, kind in
+                executor.preconditionInExecutor()
+                let visibleHandle = lifecycle.acquireVisibleHandle(kind: kind)
+                handleRegistry.insertBuiltinCommand(requestID: requestID, visibleHandleToken: visibleHandle)
+            }
+        )
+        let zlibAsyncBridge = ZlibAsyncBridge(
+            completeOnJSThread: { token, source, detail, payload in
+                let schedulerSource = "\(source):\(token)"
+                let dispatchUptimeMs = Int(ProcessInfo.processInfo.systemUptime * 1000)
+                logger("[bun:zlib] dispatch \(detail) token=\(token) t=\(dispatchUptimeMs)")
+                scheduler.enqueueHostCallback(source: schedulerSource) {
+                    let resolveUptimeMs = Int(ProcessInfo.processInfo.systemUptime * 1000)
+                    logger("[bun:zlib] resolve \(detail) token=\(token) t=\(resolveUptimeMs) wait=\(resolveUptimeMs - dispatchUptimeMs)")
+                    executor.preconditionInExecutor()
+                    if let visibleHandle = handleRegistry.removeZlibOperation(token: token) {
+                        lifecycle.releaseVisibleHandle(visibleHandle)
+                    }
+                    guard let ctx = executor.context else { return }
+                    guard let resolver = ctx.objectForKeyedSubscript("__resolveZlibAsyncToken"), !resolver.isUndefined else {
+                        return
+                    }
+                    _ = resolver.call(withArguments: [token, payload.jsValue])
+                    if let exception = ctx.exception {
+                        let message = exception.toString() ?? "Unknown JS exception"
+                        ctx.exception = nil
+                        logger("[bun:exception] zlib.async.complete: \(message)")
+                    }
+                }
+            },
+            onOperationStarted: { token, source, detail in
+                executor.preconditionInExecutor()
+                let visibleHandle = lifecycle.acquireVisibleHandle(kind: "\(source).\(detail)")
+                handleRegistry.insertZlibOperation(token: token, visibleHandleToken: visibleHandle)
             },
             log: logger
         )
@@ -160,6 +238,8 @@ public final class BunProcess: Sendable {
         self.scheduler = scheduler
         self.nativeRuntime = nativeRuntime
         self.fileSystemAsyncBridge = fileSystemAsyncBridge
+        self.builtinCommandBridge = builtinCommandBridge
+        self.zlibAsyncBridge = zlibAsyncBridge
         self.socketRuntime = socketRuntime
         self.httpServerRuntime = httpServerRuntime
 
@@ -491,6 +571,8 @@ public final class BunProcess: Sendable {
 
         let resolver = ModuleBootstrap(
             fileSystemAsyncBridge: fileSystemAsyncBridge,
+            builtinCommandBridge: builtinCommandBridge,
+            zlibAsyncBridge: zlibAsyncBridge,
             environment: runtimeEnvironment,
             cwd: cwd
         )
@@ -543,7 +625,7 @@ public final class BunProcess: Sendable {
     }
 
     private func mergedRuntimeEnvironment() -> [String: String] {
-        RuntimeEnvironment(overrides: environment).values
+        RuntimeEnvironment(overrides: environment, removing: removedEnvironmentKeys).values
     }
 
     private var isAcceptingPublicWork: Bool {
@@ -734,6 +816,21 @@ public final class BunProcess: Sendable {
             }
         }
 
+        let fsOperations = handleRegistry.drainFSOperations()
+        for token in fsOperations {
+            lifecycle.releaseVisibleHandle(token)
+        }
+
+        let builtinCommands = handleRegistry.drainBuiltinCommands()
+        for token in builtinCommands {
+            lifecycle.releaseVisibleHandle(token)
+        }
+
+        let zlibOperations = handleRegistry.drainZlibOperations()
+        for token in zlibOperations {
+            lifecycle.releaseVisibleHandle(token)
+        }
+
         if let stdinToken = handleRegistry.currentStdinVisibleHandleToken {
             lifecycle.releaseVisibleHandle(stdinToken)
             handleRegistry.setStdinVisibleHandleToken(nil)
@@ -874,6 +971,157 @@ public final class BunProcess: Sendable {
             return true
         }
         ctx.setObject(stderrWrite, forKeyedSubscript: "__nativeStderrWrite" as NSString)
+
+        let isATTYBlock: @convention(block) (Int32) -> Bool = { fd in
+            Self.isATTY(fileDescriptor: fd)
+        }
+        ctx.setObject(isATTYBlock, forKeyedSubscript: "__ttyIsATTY" as NSString)
+
+        let windowSizeBlock: @convention(block) (Int32) -> [Int] = { fd in
+            guard let size = Self.windowSize(fileDescriptor: fd) else {
+                return []
+            }
+            return [size.columns, size.rows]
+        }
+        ctx.setObject(windowSizeBlock, forKeyedSubscript: "__ttyGetWindowSize" as NSString)
+
+        let setRawModeBlock: @convention(block) (Int32, Bool) -> Bool = { fd, enabled in
+            Self.setRawMode(fileDescriptor: fd, enabled: enabled)
+        }
+        ctx.setObject(setRawModeBlock, forKeyedSubscript: "__ttySetRawMode" as NSString)
+
+        ctx.evaluateScript(
+            """
+            (function() {
+                function hasTTYBridge() {
+                    return typeof __ttyIsATTY === 'function';
+                }
+
+                function isTTY(fd) {
+                    return hasTTYBridge() ? !!__ttyIsATTY(fd) : false;
+                }
+
+                function getWindowSize(fd) {
+                    if (typeof __ttyGetWindowSize !== 'function') return null;
+                    var size = __ttyGetWindowSize(fd);
+                    return Array.isArray(size) && size.length === 2 ? size : null;
+                }
+
+                function applyReadStreamShape(stream, fd) {
+                    if (!stream) return;
+                    stream.fd = fd;
+                    stream.isTTY = isTTY(fd);
+                    if (typeof stream.isRaw !== 'boolean') {
+                        stream.isRaw = false;
+                    }
+                    stream.setRawMode = function(flag) {
+                        var enabled = !!flag;
+                        if (typeof __ttySetRawMode === 'function') {
+                            enabled = !!__ttySetRawMode(fd, enabled);
+                        }
+                        stream.isRaw = enabled;
+                        return stream;
+                    };
+                }
+
+                function applyWriteStreamShape(stream, fd) {
+                    if (!stream) return;
+                    stream.fd = fd;
+                    stream.isTTY = isTTY(fd);
+
+                    var refreshSize = function() {
+                        var size = getWindowSize(fd);
+                        if (size) {
+                            stream.columns = size[0];
+                            stream.rows = size[1];
+                        } else {
+                            stream.columns = 80;
+                            stream.rows = 24;
+                        }
+                        return [stream.columns, stream.rows];
+                    };
+
+                    refreshSize();
+                    stream._refreshSize = refreshSize;
+                    stream.getWindowSize = function() { return refreshSize(); };
+                    stream.getColorDepth = function() { return stream.isTTY ? 4 : 1; };
+                    stream.hasColors = function(count) {
+                        if (!stream.isTTY) return false;
+                        var minimum = typeof count === 'number' ? count : 2;
+                        return stream.getColorDepth() >= minimum;
+                    };
+                    stream.clearLine = function(dir, cb) { if (typeof cb === 'function') cb(null); return true; };
+                    stream.clearScreenDown = function(cb) { if (typeof cb === 'function') cb(null); return true; };
+                    stream.cursorTo = function(x, y, cb) { if (typeof cb === 'function') cb(null); return true; };
+                    stream.moveCursor = function(dx, dy, cb) { if (typeof cb === 'function') cb(null); return true; };
+                }
+
+                applyReadStreamShape(process.stdin, 0);
+                applyWriteStreamShape(process.stdout, 1);
+                applyWriteStreamShape(process.stderr, 2);
+            })();
+            """
+        )
+    }
+
+    private static func isATTY(fileDescriptor: Int32) -> Bool {
+        #if canImport(Darwin)
+        Darwin.isatty(fileDescriptor) == 1
+        #else
+        false
+        #endif
+    }
+
+    private static func windowSize(fileDescriptor: Int32) -> (columns: Int, rows: Int)? {
+        #if canImport(Darwin)
+        guard isATTY(fileDescriptor: fileDescriptor) else {
+            return nil
+        }
+
+        var size = winsize()
+        let result = ioctl(fileDescriptor, TIOCGWINSZ, &size)
+        guard result == 0, size.ws_col > 0, size.ws_row > 0 else {
+            return nil
+        }
+        return (Int(size.ws_col), Int(size.ws_row))
+        #else
+        nil
+        #endif
+    }
+
+    private static let ttyState = Mutex<[Int32: termios]>([:])
+
+    private static func setRawMode(fileDescriptor: Int32, enabled: Bool) -> Bool {
+        #if canImport(Darwin)
+        guard isATTY(fileDescriptor: fileDescriptor) else {
+            return false
+        }
+
+        var attributes = termios()
+        guard tcgetattr(fileDescriptor, &attributes) == 0 else {
+            return false
+        }
+
+        if enabled {
+            ttyState.withLock { state in
+                if state[fileDescriptor] == nil {
+                    state[fileDescriptor] = attributes
+                }
+            }
+            cfmakeraw(&attributes)
+            return tcsetattr(fileDescriptor, TCSAFLUSH, &attributes) == 0 ? true : false
+        }
+
+        let original = ttyState.withLock { state in
+            state.removeValue(forKey: fileDescriptor)
+        }
+        guard var original else {
+            return false
+        }
+        return tcsetattr(fileDescriptor, TCSAFLUSH, &original) == 0 ? false : true
+        #else
+        false
+        #endif
     }
 
     private func installProcessDiagnosticsBridge(in ctx: JSContext) {
@@ -1188,11 +1436,19 @@ public final class BunProcess: Sendable {
         let lookupAsyncBlock: @convention(block) (String, Int32, Int32) -> Void = { host, family, requestID in
             Task {
                 do {
-                    let result = try NodeStubs.lookupAddress(for: host, family: family == 0 ? nil : Int(family))
+                    let results = try NodeStubs.lookupAddresses(for: host, family: family == 0 ? nil : Int(family))
+                    guard let result = results.first else {
+                        throw NSError(
+                            domain: NSPOSIXErrorDomain,
+                            code: Int(EAI_NONAME),
+                            userInfo: [NSLocalizedDescriptionKey: "No usable address found for \(host)"]
+                        )
+                    }
                     dispatchEvent([
                         "requestID": Int(requestID),
                         "address": result.address,
                         "family": result.family,
+                        "addresses": results.map { ["address": $0.address, "family": $0.family] },
                     ])
                 } catch {
                     dispatchEvent([

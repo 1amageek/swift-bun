@@ -33,6 +33,9 @@ final class RuntimeHandleRegistry: Sendable {
     private nonisolated(unsafe) var nextIdentifier: Int32 = 1
     private nonisolated(unsafe) var timers: [Int32: TimerHandle] = [:]
     private nonisolated(unsafe) var fetches: [Int32: FetchHandle] = [:]
+    private nonisolated(unsafe) var fsOperations: [Int32: LifecycleController.VisibleHandleToken] = [:]
+    private nonisolated(unsafe) var builtinCommands: [Int32: LifecycleController.VisibleHandleToken] = [:]
+    private nonisolated(unsafe) var zlibOperations: [Int32: LifecycleController.VisibleHandleToken] = [:]
     private nonisolated(unsafe) var asyncWaits: [Int32: AsyncResultBox<JSResult>] = [:]
     private nonisolated(unsafe) var stdinRefed = false
     private nonisolated(unsafe) var stdinVisibleHandleToken: LifecycleController.VisibleHandleToken?
@@ -123,6 +126,48 @@ final class RuntimeHandleRegistry: Sendable {
         return values
     }
 
+    func insertFSOperation(token: Int32, visibleHandleToken: LifecycleController.VisibleHandleToken) {
+        fsOperations[token] = visibleHandleToken
+    }
+
+    func removeFSOperation(token: Int32) -> LifecycleController.VisibleHandleToken? {
+        fsOperations.removeValue(forKey: token)
+    }
+
+    func drainFSOperations() -> [LifecycleController.VisibleHandleToken] {
+        let values = Array(fsOperations.values)
+        fsOperations.removeAll()
+        return values
+    }
+
+    func insertBuiltinCommand(requestID: Int32, visibleHandleToken: LifecycleController.VisibleHandleToken) {
+        builtinCommands[requestID] = visibleHandleToken
+    }
+
+    func removeBuiltinCommand(requestID: Int32) -> LifecycleController.VisibleHandleToken? {
+        builtinCommands.removeValue(forKey: requestID)
+    }
+
+    func drainBuiltinCommands() -> [LifecycleController.VisibleHandleToken] {
+        let values = Array(builtinCommands.values)
+        builtinCommands.removeAll()
+        return values
+    }
+
+    func insertZlibOperation(token: Int32, visibleHandleToken: LifecycleController.VisibleHandleToken) {
+        zlibOperations[token] = visibleHandleToken
+    }
+
+    func removeZlibOperation(token: Int32) -> LifecycleController.VisibleHandleToken? {
+        zlibOperations.removeValue(forKey: token)
+    }
+
+    func drainZlibOperations() -> [LifecycleController.VisibleHandleToken] {
+        let values = Array(zlibOperations.values)
+        zlibOperations.removeAll()
+        return values
+    }
+
     func createAsyncWait(_ box: AsyncResultBox<JSResult>) -> Int32 {
         let identifier = makeIdentifier()
         asyncWaits[identifier] = box
@@ -166,6 +211,9 @@ final class RuntimeHandleRegistry: Sendable {
     func activeHandleLabels() -> [String] {
         var labels: [String] = Array(repeating: "Timeout", count: timers.count)
         labels.append(contentsOf: Array(repeating: "Fetch", count: fetches.count))
+        labels.append(contentsOf: Array(repeating: "FSRequest", count: fsOperations.count))
+        labels.append(contentsOf: Array(repeating: "ChildProcess", count: builtinCommands.count))
+        labels.append(contentsOf: Array(repeating: "ZlibRequest", count: zlibOperations.count))
         if stdinRefed {
             labels.append("ReadStream")
         }

@@ -88,6 +88,38 @@ struct NodeCompatProcessTests {
         #expect(payload["userHome"] as? String == customHome.path)
     }
 
+    @Test("runtime environment can remove inherited auth variables")
+    func runtimeEnvironmentRemovesInheritedAuthVariables() async throws {
+        let result = try await withLoadedProcess(
+            BunProcess(
+                environment: [
+                    "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+                    "ANTHROPIC_API_KEY": "override-should-not-win",
+                ],
+                removedEnvironmentKeys: [
+                    "ANTHROPIC_API_KEY",
+                    "ANTHROPIC_AUTH_TOKEN",
+                ]
+            )
+        ) { process in
+            try await process.evaluate(js: """
+                (function() {
+                    return JSON.stringify({
+                        apiKey: Object.prototype.hasOwnProperty.call(process.env, 'ANTHROPIC_API_KEY') ? process.env.ANTHROPIC_API_KEY : null,
+                        authToken: Object.prototype.hasOwnProperty.call(process.env, 'ANTHROPIC_AUTH_TOKEN') ? process.env.ANTHROPIC_AUTH_TOKEN : null,
+                        home: process.env.HOME
+                    });
+                })()
+            """)
+        }
+
+        let data = try #require(result.stringValue.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["apiKey"] is NSNull)
+        #expect(payload["authToken"] is NSNull)
+        #expect((payload["home"] as? String)?.isEmpty == false)
+    }
+
     // MARK: - Silent fallback fixes
 
     @Test("process.chdir throws")
