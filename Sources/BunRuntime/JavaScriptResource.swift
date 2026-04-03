@@ -66,6 +66,7 @@ enum JavaScriptResource: Sendable {
         case startupPromiseObserver = "StartupPromiseObserver"
         case asyncBridge = "AsyncBridge"
         case timerBridge = "TimerBridge"
+        case webSocketBridge = "WebSocketBridge"
         case patchTimerModuleReferences = "PatchTimerModuleReferences"
         case processExit = "ProcessExit"
     }

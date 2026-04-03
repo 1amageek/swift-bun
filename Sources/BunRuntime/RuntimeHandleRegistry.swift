@@ -9,6 +9,7 @@ final class RuntimeHandleRegistry: Sendable {
         var tcpServers = 0
         var tcpSockets = 0
         var httpServers = 0
+        var webSockets = 0
     }
 
     struct TimerHandle {
@@ -221,6 +222,7 @@ final class RuntimeHandleRegistry: Sendable {
         labels.append(contentsOf: Array(repeating: "TCPServer", count: network.tcpServers))
         labels.append(contentsOf: Array(repeating: "TCPSocket", count: network.tcpSockets))
         labels.append(contentsOf: Array(repeating: "HTTPServer", count: network.httpServers))
+        labels.append(contentsOf: Array(repeating: "WebSocket", count: network.webSockets))
         return labels
     }
 
@@ -246,5 +248,13 @@ final class RuntimeHandleRegistry: Sendable {
 
     func decrementHTTPServerCount() {
         networkHandles.withLock { $0.httpServers = max(0, $0.httpServers - 1) }
+    }
+
+    func incrementWebSocketCount() {
+        networkHandles.withLock { $0.webSockets += 1 }
+    }
+
+    func decrementWebSocketCount() {
+        networkHandles.withLock { $0.webSockets = max(0, $0.webSockets - 1) }
     }
 }

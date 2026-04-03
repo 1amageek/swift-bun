@@ -40,6 +40,22 @@ struct WebAPIPolyfillTests {
         }
     }
 
+    private func withWebSocketServer(
+        _ body: (LocalWebSocketTestServer) async throws -> Void
+    ) async throws {
+        let server = try await LocalWebSocketTestServer.start()
+        do {
+            try await body(server)
+            try await server.shutdown()
+        } catch {
+            do {
+                try await server.shutdown()
+            } catch {
+            }
+            throw error
+        }
+    }
+
     @Test("ReadableStream exists and is constructable")
     func readableStream() async throws {
         let result = try await evaluate("""
@@ -184,6 +200,236 @@ struct WebAPIPolyfillTests {
             typeof ch.port1.postMessage === 'function' && typeof ch.port2.postMessage === 'function';
         """)
         #expect(result.boolValue == true)
+    }
+
+    @Test("WebSocket opens and exchanges text messages")
+    func webSocketTextRoundTrip() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)');
+                        var didOpen = false;
+                        socket.onopen = function() {
+                            didOpen = socket.readyState === WebSocket.OPEN;
+                            socket.send('hello');
+                        };
+                        socket.onerror = function(event) {
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.onmessage = function(event) {
+                            resolve(JSON.stringify({
+                                constructable: socket instanceof WebSocket,
+                                didOpen: didOpen,
+                                data: event.data
+                            }));
+                            socket.close(1000, 'done');
+                        };
+                    });
+                })()
+                """)
+            }
+            #expect(result.stringValue == #"{"constructable":true,"didOpen":true,"data":"hello"}"#)
+        }
+    }
+
+    @Test("WebSocket receives binary ArrayBuffer when binaryType is arraybuffer")
+    func webSocketBinaryArrayBuffer() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)');
+                        socket.binaryType = 'arraybuffer';
+                        socket.onerror = function(event) {
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.onopen = function() {
+                            socket.send(new Uint8Array([1, 2, 3, 4]));
+                        };
+                        socket.onmessage = function(event) {
+                            var bytes = Array.from(new Uint8Array(event.data));
+                            resolve(JSON.stringify({
+                                isArrayBuffer: event.data instanceof ArrayBuffer,
+                                bytes: bytes
+                            }));
+                            socket.close(1000, 'done');
+                        };
+                    });
+                })()
+                """)
+            }
+            #expect(result.stringValue == #"{"isArrayBuffer":true,"bytes":[1,2,3,4]}"#)
+        }
+    }
+
+    @Test("WebSocket invokes onmessage and addEventListener listeners")
+    func webSocketMessageHandlers() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)');
+                        var propertyHits = 0;
+                        var listenerHits = 0;
+                        socket.onerror = function(event) {
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.onmessage = function() {
+                            propertyHits += 1;
+                        };
+                        socket.addEventListener('message', function() {
+                            listenerHits += 1;
+                            resolve(JSON.stringify({
+                                propertyHits: propertyHits,
+                                listenerHits: listenerHits
+                            }));
+                            socket.close(1000, 'done');
+                        });
+                        socket.onopen = function() {
+                            socket.send('echo');
+                        };
+                    });
+                })()
+                """)
+            }
+            #expect(result.stringValue == #"{"propertyHits":1,"listenerHits":1}"#)
+        }
+    }
+
+    @Test("WebSocket forwards headers and negotiates protocols with CLI-style options")
+    func webSocketCLIStyleOptions() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)', {
+                            protocols: ['mcp'],
+                            headers: { 'x-test-header': 'ws-header' },
+                            proxy: undefined,
+                            tls: undefined
+                        });
+                        socket.onerror = function(event) {
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.onopen = function() {
+                            socket.send('options');
+                        };
+                        socket.onmessage = function(event) {
+                            resolve(JSON.stringify({
+                                protocol: socket.protocol,
+                                data: event.data
+                            }));
+                            socket.close(1000, 'done');
+                        };
+                    });
+                })()
+                """)
+            }
+            let snapshot = server.handshakeSnapshot()
+            #expect(result.stringValue == #"{"protocol":"mcp","data":"options"}"#)
+            #expect(snapshot.headers["X-Test-Header"] == "ws-header")
+            #expect(snapshot.requestedProtocols == ["mcp"])
+            #expect(snapshot.negotiatedProtocol == "mcp")
+        }
+    }
+
+    @Test("WebSocket close exposes code and reason")
+    func webSocketCloseEvent() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)');
+                        socket.onerror = function(event) {
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.onopen = function() {
+                            socket.close(4001, 'client-close');
+                        };
+                        socket.onclose = function(event) {
+                            resolve(JSON.stringify({
+                                code: event.code,
+                                reason: event.reason,
+                                wasClean: event.wasClean
+                            }));
+                        };
+                    });
+                })()
+                """)
+            }
+            #expect(result.stringValue == #"{"code":4001,"reason":"client-close","wasClean":true}"#)
+        }
+    }
+
+    @Test("WebSocket connection failure emits error and close without hanging")
+    func webSocketFailureCloses() async throws {
+        let failedURL: String = try await {
+            let server = try await LocalWebSocketTestServer.start()
+            let url = server.baseURL
+            try await server.shutdown()
+            return url
+        }()
+
+        let result = try await withLoadedProcess { process in
+            try await process.evaluateAsync(js: """
+            (async function() {
+                return await new Promise(function(resolve, reject) {
+                    var events = [];
+                    var socket = new WebSocket('\(failedURL)');
+                    var timeout = setTimeout(function() {
+                        reject(new Error('timeout'));
+                    }, 1000);
+                    socket.onerror = function() {
+                        events.push('error');
+                    };
+                    socket.onclose = function(event) {
+                        clearTimeout(timeout);
+                        events.push('close:' + event.code + ':' + event.wasClean);
+                        resolve(events.join(','));
+                    };
+                });
+            })()
+            """)
+        }
+
+        #expect(result.stringValue == "error,close:1006:false")
+    }
+
+    @Test("WebSocket ping emits pong")
+    func webSocketPingPong() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)');
+                        var timeout = setTimeout(function() {
+                            reject(new Error('timeout'));
+                        }, 1000);
+                        socket.onerror = function(event) {
+                            clearTimeout(timeout);
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.addEventListener('pong', function() {
+                            clearTimeout(timeout);
+                            resolve('pong');
+                            socket.close(1000, 'done');
+                        });
+                        socket.onopen = function() {
+                            socket.ping();
+                        };
+                    });
+                })()
+                """)
+            }
+            #expect(result.stringValue == "pong")
+        }
     }
 
     @Test("structuredClone deep copies")

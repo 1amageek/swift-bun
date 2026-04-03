@@ -37,14 +37,21 @@ public final class BunProcess: Sendable {
     private let zlibAsyncBridge: ZlibAsyncBridge
     private let socketRuntime: SocketRuntime
     private let httpServerRuntime: HTTPServerRuntime
+    private let webSocketRuntime: WebSocketRuntime
 
     // MARK: - Process State
 
     private nonisolated(unsafe) var exitPromise: AsyncResultBox<Int32>?
     private nonisolated(unsafe) var runStartupBarrier: LifecycleController.BootBarrierToken?
     private nonisolated(unsafe) var startupPromiseVisibleHandle: LifecycleController.VisibleHandleToken?
+    private nonisolated(unsafe) var pendingStdinVisibleHandle: LifecycleController.VisibleHandleToken?
     private nonisolated(unsafe) var streamsFinished = false
     private let shutdownState = Mutex<ShutdownState>(.active)
+    private struct PendingStdinState: Sendable {
+        var queue: [Data?] = []
+        var drainScheduled = false
+    }
+    private let pendingStdinState = Mutex(PendingStdinState())
 
     // MARK: - Streams
 
@@ -231,6 +238,16 @@ public final class BunProcess: Sendable {
                 lifecycle.releaseVisibleHandle(token)
             }
         )
+        let webSocketRuntime = WebSocketRuntime(
+            onSocketOpened: {
+                handleRegistry.incrementWebSocketCount()
+                return lifecycle.acquireVisibleHandle(kind: "webSocket")
+            },
+            onSocketClosed: { token in
+                handleRegistry.decrementWebSocketCount()
+                lifecycle.releaseVisibleHandle(token)
+            }
+        )
 
         self.executor = executor
         self.lifecycle = lifecycle
@@ -242,6 +259,7 @@ public final class BunProcess: Sendable {
         self.zlibAsyncBridge = zlibAsyncBridge
         self.socketRuntime = socketRuntime
         self.httpServerRuntime = httpServerRuntime
+        self.webSocketRuntime = webSocketRuntime
 
         executor.execute {
             self.scheduler.setTurnCompletedHandler {
@@ -463,6 +481,7 @@ public final class BunProcess: Sendable {
 
                         self.exitPromise = promise
                         self.lifecycle.enterBooting(mode: .process)
+                        self.ensurePendingStdinVisibleHandleIfNeeded()
                         let setupBarrier = self.lifecycle.acquireBootBarrier(name: "context-setup")
                         self.runStartupBarrier = self.lifecycle.acquireBootBarrier(name: "startup-sequence")
                         try self.setupContext()
@@ -507,9 +526,11 @@ public final class BunProcess: Sendable {
         guard isAcceptingPublicWork else {
             return
         }
-        scheduler.enqueueHostCallback(source: "stdin") {
-            self.deliverStdin(data)
+        pendingStdinState.withLock { state in
+            state.queue.append(data)
         }
+        ensurePendingStdinVisibleHandleIfNeeded()
+        requestPendingStdinDrainIfReady()
     }
 
     public func terminate(exitCode: Int32 = 0) {
@@ -549,6 +570,7 @@ public final class BunProcess: Sendable {
         try await nativeRuntime.shutdown()
         try await socketRuntime.shutdown()
         try await httpServerRuntime.shutdown()
+        try await webSocketRuntime.shutdown()
         try await executor.shutdown()
         shutdownState.withLock { $0 = .shutDown }
     }
@@ -596,6 +618,8 @@ public final class BunProcess: Sendable {
         try throwPendingJavaScriptException(source: "setup:socketBridge")
         installHTTPServerBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:httpServerBridge")
+        try installWebSocketBridge(in: ctx)
+        try throwPendingJavaScriptException(source: "setup:webSocketBridge")
         try installProcessExitBridge(in: ctx)
         try throwPendingJavaScriptException(source: "setup:processExitBridge")
         installStdinBridge(in: ctx)
@@ -748,6 +772,7 @@ public final class BunProcess: Sendable {
         lifecycle.releaseBootBarrier(startupBarrier)
         runStartupBarrier = nil
         lifecycle.enterRunningIfBootComplete()
+        requestPendingStdinDrainIfReady()
     }
 
     private func requestExit(code: Int32) {
@@ -787,6 +812,10 @@ public final class BunProcess: Sendable {
 
         if executor.context != nil {
             deliverStdin(nil)
+        }
+        pendingStdinState.withLock { state in
+            state.queue.removeAll(keepingCapacity: false)
+            state.drainScheduled = false
         }
         executor.clearContext()
         if let promise = exitPromise {
@@ -838,6 +867,10 @@ public final class BunProcess: Sendable {
         if let startupToken = startupPromiseVisibleHandle {
             lifecycle.releaseVisibleHandle(startupToken)
             startupPromiseVisibleHandle = nil
+        }
+        if let pendingToken = pendingStdinVisibleHandle {
+            lifecycle.releaseVisibleHandle(pendingToken)
+            pendingStdinVisibleHandle = nil
         }
         _ = handleRegistry.setStdinRefed(false)
     }
@@ -1506,6 +1539,65 @@ public final class BunProcess: Sendable {
         ctx.setObject(respondBlock, forKeyedSubscript: "__httpRespond" as NSString)
     }
 
+    private func installWebSocketBridge(in ctx: JSContext) throws {
+        let dispatchEvent: @Sendable ([String: Any]) -> Void = { [self] payload in
+            self.scheduler.enqueueHostCallback(source: "websocket:event") {
+                guard let ctx = self.executor.context,
+                      let dispatcher = ctx.objectForKeyedSubscript("__swiftBunWebSocketDispatch"),
+                      !dispatcher.isUndefined else {
+                    return
+                }
+                _ = dispatcher.call(withArguments: [payload])
+                self.reportPendingJavaScriptException(source: "webSocketDispatch")
+            }
+        }
+
+        let connectBlock: @convention(block) (Int32, String, String, String) -> Void = { [webSocketRuntime] socketID, urlString, protocolsJSON, headersJSON in
+            let protocols = Self.decodeStringArrayJSON(protocolsJSON)
+            let headers = Self.decodeStringDictionaryJSON(headersJSON)
+            Task {
+                await webSocketRuntime.connect(
+                    socketID: socketID,
+                    urlString: urlString,
+                    protocols: protocols,
+                    headers: headers,
+                    callback: dispatchEvent
+                )
+            }
+        }
+        ctx.setObject(connectBlock, forKeyedSubscript: "__nativeWebSocketConnect" as NSString)
+
+        let sendTextBlock: @convention(block) (Int32, String) -> Void = { [webSocketRuntime] socketID, text in
+            Task {
+                await webSocketRuntime.sendText(socketID: socketID, text: text)
+            }
+        }
+        ctx.setObject(sendTextBlock, forKeyedSubscript: "__nativeWebSocketSendText" as NSString)
+
+        let sendBinaryBlock: @convention(block) (Int32, [UInt8]) -> Void = { [webSocketRuntime] socketID, bytes in
+            Task {
+                await webSocketRuntime.sendBinary(socketID: socketID, bytes: bytes)
+            }
+        }
+        ctx.setObject(sendBinaryBlock, forKeyedSubscript: "__nativeWebSocketSendBinary" as NSString)
+
+        let closeBlock: @convention(block) (Int32, Int32, String) -> Void = { [webSocketRuntime] socketID, code, reason in
+            Task {
+                await webSocketRuntime.close(socketID: socketID, code: code, reason: reason)
+            }
+        }
+        ctx.setObject(closeBlock, forKeyedSubscript: "__nativeWebSocketClose" as NSString)
+
+        let pingBlock: @convention(block) (Int32) -> Void = { [webSocketRuntime] socketID in
+            Task {
+                await webSocketRuntime.ping(socketID: socketID)
+            }
+        }
+        ctx.setObject(pingBlock, forKeyedSubscript: "__nativeWebSocketPing" as NSString)
+
+        try JavaScriptResource.evaluate(.runtime(.webSocketBridge), in: ctx)
+    }
+
     private func applyFetchEvent(_ event: NativeRuntime.FetchEvent) {
         executor.preconditionInExecutor()
 
@@ -1546,6 +1638,34 @@ public final class BunProcess: Sendable {
         }
     }
 
+    private static func decodeStringArrayJSON(_ json: String) -> [String] {
+        guard let data = json.data(using: .utf8) else {
+            return []
+        }
+        do {
+            let decoded = try JSONSerialization.jsonObject(with: data) as? [Any] ?? []
+            return decoded.map { String(describing: $0) }
+        } catch {
+            return []
+        }
+    }
+
+    private static func decodeStringDictionaryJSON(_ json: String) -> [String: String] {
+        guard let data = json.data(using: .utf8) else {
+            return [:]
+        }
+        do {
+            let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            var headers: [String: String] = [:]
+            for (key, value) in decoded {
+                headers[key] = String(describing: value)
+            }
+            return headers
+        } catch {
+            return [:]
+        }
+    }
+
     // MARK: - process.exit Bridge
 
     private func installProcessExitBridge(in ctx: JSContext) throws {
@@ -1566,6 +1686,7 @@ public final class BunProcess: Sendable {
                 let visibleHandle = self.lifecycle.acquireVisibleHandle(kind: "stdin")
                 self.handleRegistry.setStdinVisibleHandleToken(visibleHandle)
             }
+            self.requestPendingStdinDrainIfReady()
         }
         let stdinUnrefBlock: @convention(block) () -> Void = { [self] in
             if self.handleRegistry.setStdinRefed(false) {
@@ -1578,6 +1699,86 @@ public final class BunProcess: Sendable {
         }
         ctx.setObject(stdinRefBlock, forKeyedSubscript: "__stdinRef" as NSString)
         ctx.setObject(stdinUnrefBlock, forKeyedSubscript: "__stdinUnref" as NSString)
+    }
+
+    private func requestPendingStdinDrainIfReady() {
+        guard lifecycle.currentState == .running else {
+            return
+        }
+
+        let shouldSchedule = pendingStdinState.withLock { state in
+            guard state.queue.isEmpty == false, state.drainScheduled == false else {
+                return false
+            }
+            state.drainScheduled = true
+            return true
+        }
+        guard shouldSchedule else {
+            return
+        }
+        guard handleRegistry.isStdinRefed else {
+            pendingStdinState.withLock { $0.drainScheduled = false }
+            return
+        }
+
+        scheduler.enqueueHostCallback(source: "stdin") {
+            self.drainPendingStdin()
+        }
+    }
+
+    private func drainPendingStdin() {
+        executor.preconditionInExecutor()
+
+        while true {
+            let next = pendingStdinState.withLock { state -> Data?? in
+                if state.queue.isEmpty {
+                    state.drainScheduled = false
+                    return nil
+                }
+                return state.queue.removeFirst()
+            }
+
+            guard let next else {
+                releasePendingStdinVisibleHandleIfNeeded()
+                requestPendingStdinDrainIfReady()
+                return
+            }
+
+            deliverStdin(next)
+        }
+    }
+
+    private func ensurePendingStdinVisibleHandleIfNeeded() {
+        let hasPendingStdin = pendingStdinState.withLock { state in
+            state.queue.isEmpty == false
+        }
+        guard hasPendingStdin else {
+            return
+        }
+        guard pendingStdinVisibleHandle == nil else {
+            return
+        }
+
+        switch lifecycle.currentState {
+        case .booting, .running, .exitRequested:
+            pendingStdinVisibleHandle = lifecycle.acquireVisibleHandle(kind: "pendingStdin")
+        case .idle, .shuttingDown, .exited:
+            return
+        }
+    }
+
+    private func releasePendingStdinVisibleHandleIfNeeded() {
+        let hasPendingStdin = pendingStdinState.withLock { state in
+            state.queue.isEmpty == false
+        }
+        guard hasPendingStdin == false else {
+            return
+        }
+        guard let token = pendingStdinVisibleHandle else {
+            return
+        }
+        lifecycle.releaseVisibleHandle(token)
+        pendingStdinVisibleHandle = nil
     }
 
     private func deliverStdin(_ data: Data?) {
