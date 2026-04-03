@@ -189,7 +189,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:readline | ✅ Basic | createInterface, question, line events, async iterator |
 | node:tty | ✅ Basic | non-TTY ReadStream/WriteStream shape |
 | node:assert | ✅ Basic | ok/equality/deepEqual/throws/rejects/ifError |
-| node:child_process | ⚠️ Partial | macOS execution APIs, iOS unsupported |
+| node:child_process | ⚠️ Limited | No general subprocess execution. Native bridges may emulate specific commands. |
 | node:net | ✅ Basic | plain TCP `createServer`, `connect`, `createConnection` |
 | node:tls | ⚠️ Stub | Throws |
 | node:zlib | ⚠️ Partial | `deflateSync` |
@@ -208,7 +208,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 ### Known limitations
 
 - `process.exit()` throws a frozen sentinel object to unwind the JS stack. If JS code catches this, the exit may be suppressed.
-- `node:child_process` is intentionally unavailable on iOS. macOS supports the commonly used execution APIs only.
+- `node:child_process` does not provide general subprocess execution. Add a native bridge for any required host capability.
 - `node:net` is implemented for plain TCP. `node:tls` remains unsupported.
 - `crypto.getRandomValues` uses `Math.random()`, not cryptographically secure. CryptoKit-backed `node:crypto` provides secure alternatives via `require('crypto')`.
 - `Bun.serve()` is not supported.

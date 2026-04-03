@@ -219,11 +219,11 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | node:readline | ⚠️ Stub | Basic interface, no TTY |
 | node:tty | ⚠️ Stub | isatty returns false |
 | node:assert | ⚠️ Stub | Basic assert/ok/strictEqual/deepStrictEqual |
-| node:child_process | ⚠️ Stub | **Throws — not available on iOS** |
+| node:child_process | ⚠️ Limited | `BuiltinCommandBridge`: sync (`__cpRunSync`) and async (`__cpBuiltinStart`) paths. Keychain via `NativeKeychainBridge`, `rg --files` via native `FileManager` enumeration. No general subprocess. |
 | node:net | ⚠️ Stub | **Throws — TCP not implemented** |
 | node:tls | ⚠️ Stub | Throws |
-| node:zlib | ⚠️ Stub | Throws |
-| node:dns | ⚠️ Stub | Throws |
+| node:zlib | ✅ Partial | `deflateSync`/`inflateSync` via Apple `Compression` framework (RFC 1950 zlib). Streaming methods throw. |
+| node:dns | ✅ Partial | `lookup` via `getaddrinfo`. `resolve*` methods stubbed. |
 | node:http2 | ⚠️ Stub | Throws |
 | node:v8 | ⚠️ Stub | No-op |
 | node:inspector | ⚠️ Stub | No-op |
@@ -238,7 +238,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 ### Known limitations
 
 - `process.exit()` throws a frozen sentinel object to unwind the JS stack. If JS code catches this, the exit may be suppressed.
-- `node:child_process` is stubbed (throws) — subprocess execution is not available on iOS.
+- `node:child_process` does not provide general subprocess execution. `BuiltinCommandBridge` handles Keychain (`security`) and file listing (`rg --files`) natively. Async commands go through `__cpBuiltinStart` → `__swiftBunChildProcessComplete` with lifecycle-tracked visible handles.
 - `node:net` / `node:tls` are stubbed — raw TCP/TLS connections not implemented.
 - `process.chdir()` throws — working directory is fixed at BunProcess init.
 - `process.kill()` throws — not supported on iOS.
@@ -270,15 +270,39 @@ JS: setTimeout(fn, 100) → ref() → eventLoop.scheduleTask → callback → un
 
 Each pending timer/fetch/stdin listener holds a ref. When refCount drops to 0, the process exits naturally (like Node.js).
 
-### Fetch bridge (thread-safe)
+### Fetch bridge (streaming)
 
-`__nativeFetch` uses `URLSession.shared.dataTask`. The completion handler marshals back to the EventLoop thread via `eventLoop.execute {}` before touching any JSValue.
+`__nativeFetchStream` uses `URLSession.shared.bytes(for:)` for streaming. Response body is delivered to JS via `FetchChunkEmitter` which batches bytes into 8KB chunks (configurable via `fetchChunkSizeBytes`) with a 2ms flush delay. Headers are delivered immediately, body chunks arrive incrementally, and a `complete` event signals end-of-body. This supports SSE and streaming API responses.
+
+### BuiltinCommandBridge (child_process)
+
+Replaces general subprocess execution with a small set of native commands:
+- **Keychain**: `security find-generic-password` / `add-generic-password` / `delete-generic-password` → `NativeKeychainBridge` → `SecItemCopyMatching` / `SecItemAdd` / `SecItemDelete` (works on iOS)
+- **File listing**: `rg --files` → native `FileManager.enumerator` (async via `__cpBuiltinStart`)
+- Sync path: `__cpRunSync` → `BuiltinCommandBridge.runSync`
+- Async path: `__cpBuiltinStart` → `Task.detached` → `__swiftBunChildProcessComplete` callback
+
+### BunProcess configuration
+
+```swift
+BunProcess(
+    bundle: URL?,
+    arguments: [String],
+    cwd: String?,
+    environment: [String: String],
+    removedEnvironmentKeys: Set<String>,       // keys to strip from ProcessInfo.environment
+    nextTickBudgetPerTurn: Int,                 // default 64
+    hostCallbackBudgetPerTurn: Int              // default 256
+)
+```
 
 ### Native bridges pattern
 
 Modules needing system APIs use `@convention(block)` closures registered on JSContext:
 
-- **NodeFS**: `__fsReadFileSync`, `__fsStatSync`, `__fsLstatSync`, `__fsChmodSync` etc. → `FileManager` (stat resolves symlinks, lstat does not, chmod sets posixPermissions)
+- **NodeFS**: `__fsReadFileSync`, `__fsStatSync`, `__fsLstatSync`, `__fsChmodSync` etc. → `FileManager` (stat resolves symlinks, lstat does not, chmod sets posixPermissions). Async FS operations track lifecycle via `RuntimeHandleRegistry` visible handles.
 - **NodeCrypto**: `__cryptoSHA256([UInt8])`, `__cryptoSHA512([UInt8])` → `CryptoKit` (binary input), `__cryptoHMAC(String, [UInt8], [UInt8])` → `CryptoKit` HMAC, `__cryptoRandomBytes(Int)` → `SecRandomCopyBytes`
-- **NodeHTTP**: `__nativeFetch` → `URLSession` (EventLoop-safe)
+- **NodeHTTP**: `__nativeFetchStream` → `URLSession.bytes` (streaming)
 - **NodeOS**: `__osHostname` etc. → `ProcessInfo`
+- **Zlib**: `__zlibDeflateSync`, `__zlibInflateSync` → Apple `Compression` framework
+- **DNS**: `__dnsLookup` → `getaddrinfo`
