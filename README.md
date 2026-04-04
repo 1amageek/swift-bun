@@ -20,6 +20,21 @@ swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, e
 - Provide `bun install`, `bun test`, or other CLI features
 - Fully emulate Node/Bun package resolution features such as `exports`, `imports`, `.mjs`, `.cjs`, or native addons
 
+## Platform Notes
+
+The core runtime is mostly shared across iOS and macOS. `BunProcess`, the CommonJS loader, `fetch`, `fs`, `path`, `crypto`, `http`, `net`, and the client `WebSocket` bridge all use the same implementation model on both platforms.
+
+Important caveat: the implementation does not generally fork into separate "iOS version" and "macOS version" of each API. In most cases the code path is the same, and the observable difference comes from host capabilities.
+
+What is actually different today:
+
+- `node:child_process` never exposes general subprocess execution on either platform.
+- Intercepted `child_process` builtins such as keychain-style `security` commands and the `rg --files` bridge use the same `BuiltinCommandBridge` implementation on both iOS and macOS. README should not imply a macOS-only subprocess path here.
+- TTY APIs are exposed through the same Darwin-backed implementation on both platforms, but whether `isatty`, window sizing, and raw mode are meaningful depends on the host file descriptors actually being attached to a terminal. That is common in macOS CLI-style environments and uncommon in normal iOS app hosts.
+- `process.platform` and `node:os` report the Darwin family on both platforms; there is not a separate iOS-specific Node platform surface.
+
+When integrating `swift-bun` into an app, treat Web APIs and most pure JS/Node polyfills as portable across iOS and macOS, and treat terminal/process-adjacent features as host-dependent rather than platform-forked.
+
 ## Requirements
 
 - iOS 26.0+ / macOS 26.0+
