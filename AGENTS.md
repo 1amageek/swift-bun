@@ -81,9 +81,10 @@ BunProcess (final class, Sendable)
 │   ├── JSContext (all access pinned to this thread)
 │   ├── Web API polyfills (polyfills.bundle.js)
 │   ├── ModuleBootstrap polyfills (require, Node.js modules, Bun APIs)
-│   └── NIO-backed bridges:
+│   └── Host-backed bridges:
 │       ├── setTimeout/setInterval → eventLoop.scheduleTask
 │       ├── fetch (__nativeFetchStream) → URLSession streaming bridge + eventLoop.execute
+│       ├── globalThis.WebSocket → URLSessionWebSocketTask bridge
 │       ├── process.stdout.write → stdout AsyncStream
 │       ├── process.stdin → sendInput() from Swift
 │       ├── process.exit → resolveExit()
@@ -99,9 +100,9 @@ BunProcess (final class, Sendable)
 JSCore's `evaluateScript()` provides only ECMAScript language features (Promise, Symbol, BigInt, etc.). All platform APIs are polyfilled in three layers:
 
 ```
-Layer 0: polyfills.bundle.js    ← Web APIs (npm packages, esbuild bundled)
-Layer 1: ModuleBootstrap        ← Node.js globals + modules (Swift strings)
-Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
+Layer 0: polyfills.bundle.js + runtime scripts ← Web APIs (JS-owned semantics)
+Layer 1: ModuleBootstrap                        ← Node.js globals + modules (Swift strings)
+Layer 2: host bridges                           ← EventLoop-backed overrides (Swift closures)
 ```
 
 **Layer 0** is loaded first and provides Web APIs that both Layer 1 and the user's bundle may depend on.
@@ -112,7 +113,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 2. **Node.js globals** (ModuleBootstrap.installGlobals) — global, self, performance, process, console, TextEncoder, URL, atob, AbortController, DOMException
 3. **Node.js modules** (ModuleBootstrap.installModules) — path, buffer, url, util, os, fs, crypto, http, stream, timers, stubs
 4. **Bun APIs** — Bun.file, Bun.env, Bun.write, etc.
-5. **NIO bridges** — Timer override, Fetch override, process.exit, stdin, stdout/stderr, console → output stream
+5. **Host bridges and runtime scripts** — Timer override, Fetch override, WebSocket bridge, process.exit, stdin, stdout/stderr, console → output stream
 6. **Timer module patch** — Update `__nodeModules.timers` references to NIO-backed versions
 7. **require()** — Installed last, resolves built-ins first and then plain `node_modules` CommonJS packages
 8. **Configuration** — process.argv, process.cwd, process.env
@@ -122,7 +123,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 
 ## Polyfill coverage status
 
-### Web APIs (polyfills.bundle.js)
+### Web APIs (polyfills.bundle.js + runtime scripts)
 
 | API | Status | Implementation |
 |-----|--------|---------------|
@@ -135,7 +136,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 | Blob | ✅ Basic | Custom (text/arrayBuffer/stream/slice) |
 | File | ✅ Basic | Extends Blob with name/lastModified |
 | FormData | ✅ Full | Custom |
-| WebSocket | ⚠️ Stub | Class exists for instanceof/extends, no actual connection |
+| WebSocket | ✅ Basic | Runtime-installed client backed by `URLSessionWebSocketTask` |
 | Worker | ⚠️ Stub | Throws on instantiation |
 | MessageChannel / MessagePort | ✅ Basic | Functional postMessage |
 | XMLHttpRequest | ✅ Basic | Async-only adapter over fetch |
@@ -212,7 +213,7 @@ Layer 2: NIO bridges            ← EventLoop-backed overrides (Swift closures)
 - `node:net` is implemented for plain TCP. `node:tls` remains unsupported.
 - `crypto.getRandomValues` uses `Math.random()`, not cryptographically secure. CryptoKit-backed `node:crypto` provides secure alternatives via `require('crypto')`.
 - `Bun.serve()` is not supported.
-- `WebSocket` is a stub — class exists for type checks but cannot establish connections.
+- `WebSocket` is client-only. Text/binary messaging, headers, subprotocol negotiation, close events, and ping/pong are supported, but `proxy` and custom `tls` options are currently accepted and ignored, and there is no server-side WebSocket API.
 - `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
 - `node:zlib` currently exposes `deflateSync` only.
 - `node:dns` currently exposes `lookup` only.

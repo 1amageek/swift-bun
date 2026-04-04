@@ -1,6 +1,6 @@
 # Polyfill Implementation Report
 
-Date: 2026-04-02
+Date: 2026-04-04
 
 ## Summary
 
@@ -75,6 +75,27 @@ Specification sources were fixed to:
 - URL property setter synchronization for `href`, `search`, and `searchParams`
 - `performance.markResourceTiming`
 
+### Phase 5: Host-backed WebSocket client
+
+- `globalThis.WebSocket` now installs from a runtime bridge instead of a stub
+- the client transport is backed by `URLSessionWebSocketTask`
+- supported constructor shapes currently cover:
+  - `new WebSocket(url)`
+  - `new WebSocket(url, protocols)`
+  - `new WebSocket(url, options)`
+  - `new WebSocket(url, protocols, options)`
+- current option support includes:
+  - `protocols`
+  - `headers`
+  - accepted-but-ignored `proxy`
+  - accepted-but-ignored `tls`
+- supported events and behaviors include:
+  - `open`
+  - `message` for text and binary payloads
+  - `error`
+  - `close`
+  - `pong`
+
 ## Before / After
 
 | Area | Before | After |
@@ -87,13 +108,14 @@ Specification sources were fixed to:
 | `node:dns` | stub | `lookup` |
 | `node:v8` | no-op | heap stats shape |
 | `child_process` | mostly stub | limited native-command bridges + `ChildProcess` identity |
+| `WebSocket` | stub | client runtime backed by `URLSessionWebSocketTask` |
 | URL mutation | setters did not fully recompute | setters keep `href` and `searchParams` in sync |
 
 ## Platform notes
 
 - `child_process` does not provide general subprocess execution on any platform; required host capabilities must be bridged natively
 - `node:net` and `http.createServer` are implemented for plain local TCP/HTTP use cases
-- `node:tls`, `node:http2`, `WebSocket`, `Worker`, and native addons remain unsupported
+- `globalThis.WebSocket` is implemented for client connections; server-side WebSocket APIs, `node:tls`, `node:http2`, `Worker`, and native addons remain unsupported
 - `crypto.getRandomValues` still uses a non-cryptographic fallback; security-sensitive code should use `require('node:crypto')` or `crypto.subtle`
 
 ## Test coverage added
@@ -127,6 +149,7 @@ Focused execution covered:
 - EventTarget compatibility in `events`
 - `http.createServer`
 - `net` loopback
+- WebSocket open/message/close/error/ping coverage
 - `zlib.deflateSync`
 - `crypto.createPrivateKey`
 - `dns.lookup`
@@ -136,6 +159,7 @@ Focused execution covered:
 ## Remaining limitations
 
 - `crypto.subtle` is still a subset, not the full Web Crypto surface
+- `globalThis.WebSocket` is client-only; `proxy` and custom `tls` options are currently accepted and ignored
 - `node:zlib` currently exposes `deflateSync` only
 - `node:dns` currently exposes `lookup` only
 - `node:tls` remains unsupported

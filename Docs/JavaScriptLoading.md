@@ -30,6 +30,7 @@ Examples:
 - `node:path`
 - `node:buffer`
 - `Bun.file`
+- `Runtime/WebSocketBridge.js`
 - `Bun` shims with non-trivial logic
 
 Rules:
@@ -81,7 +82,7 @@ Meaning:
 - `Bootstrap/`: reusable startup scripts that install globals or shared runtime helpers
 - `BunAPI/`: `Bun.*` API implementations
 - `NodeCompat/`: `node:*` module implementations
-- `Runtime/`: runtime coordination scripts owned by `BunProcess`, such as async bridging or timer patch helpers
+- `Runtime/`: runtime coordination scripts owned by `BunProcess`, such as async bridging, timer patch helpers, or host-backed adapters like `WebSocketBridge`
 
 Do not place generated bundles in this tree.
 

@@ -8,18 +8,20 @@
 - Source of truth: `Fixtures/polyfills/index.js`
 - Generated bundle: `Sources/BunRuntime/Resources/polyfills.bundle.js`
 - Owns Web API surface and JS object identity
+- Some host-coupled Web APIs are installed later from runtime-owned JS helpers after native bridges exist
 - Owns:
   - `ReadableStream`, `WritableStream`, `TransformStream`
   - `fetch`, `Headers`, `Request`, `Response`
   - `TextDecoderStream`, `TextEncoderStream`
   - `queueMicrotask`
   - `process.stdin`, `process.stdout`, `process.stderr`
+  - `globalThis.WebSocket` JS object semantics
 
 Layer 0 defines JS semantics. It may call narrow native bridges such as `__nativeFetchStream`, `__nativeStdoutWrite`, `__stdinRef`, and `__stdinUnref`, but it does not own transport.
 
 Layer 0 prefers community JS polyfills when they are compatible with JavaScriptCore and the pre-`require()` bootstrap phase. Incompatible packages are replaced with local thin adapters. Current examples:
 - package-backed: `web-streams-polyfill`, `@ungap/structured-clone`, `js-yaml`, `picomatch`, `semver`
-- local thin adapters: `Blob`, `File`, `FormData`, `XMLHttpRequest`, stdio stream objects
+- local thin adapters: `Blob`, `File`, `FormData`, `XMLHttpRequest`, stdio stream objects, runtime-installed `WebSocketBridge`
 
 ### Layer 1: Node/Bun Module Surface
 - Source of truth: `ModuleBootstrap` and `NodeCompat/*`
@@ -50,6 +52,7 @@ Examples:
 - `node:stream` re-exports Layer 0 stream constructors and adds `stream/promises` / `stream/consumers`
 - `require()` resolves built-ins first, then installed CommonJS packages from plain `node_modules`
 - process-mode entry scripts are executed as the CommonJS main module
+- `globalThis.WebSocket` is installed from `Runtime/WebSocketBridge.js`, not from `ModuleBootstrap`
 
 ### Layer 2: Runtime Host Layer
 - Source of truth: Swift runtime components
@@ -58,7 +61,7 @@ Examples:
   - host callback scheduling
   - lifecycle and shutdown
   - timer, filesystem, network, stdin/stdout transport
-  - streaming fetch delivery, Web Crypto, DNS lookup, compression, TCP/HTTP server bridges
+  - streaming fetch delivery, WebSocket transport, Web Crypto, DNS lookup, compression, TCP/HTTP server bridges
 
 Layer 2 must not own JS API semantics such as `fetch`, `Headers`, `Request`, `Response`, or stream method behavior.
 
@@ -68,6 +71,7 @@ Layer 2 must not own JS API semantics such as `fetch`, `Headers`, `Request`, `Re
 - Layer 0 owns JS object creation for stdio streams.
 - Layer 1 owns module wiring only.
 - Layer 2 exposes only narrow `__native*` hooks into JS.
+- Host-backed globals that require bridge-first installation, such as `globalThis.WebSocket`, are installed by runtime JS helpers while Swift remains the source of truth for transport and lifecycle.
 - `ModuleBootstrap.installGlobals` must not recreate `process.stdin/stdout/stderr`, `queueMicrotask`, or `fetch`.
 - `NodeHTTP` must not redefine `fetch`, `Headers`, `Request`, or `Response`.
 - `NodeStream` must not provide an independent fallback stream implementation.
