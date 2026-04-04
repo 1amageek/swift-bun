@@ -8,16 +8,18 @@ struct WebSocketE2ETests {
     private func withWebSocketServer(
         _ body: (LocalWebSocketTestServer) async throws -> Void
     ) async throws {
-        let server = try await LocalWebSocketTestServer.start()
-        do {
-            try await body(server)
-            try await server.shutdown()
-        } catch {
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let server = try await LocalWebSocketTestServer.start()
             do {
+                try await body(server)
                 try await server.shutdown()
             } catch {
+                do {
+                    try await server.shutdown()
+                } catch {
+                }
+                throw error
             }
-            throw error
         }
     }
 
@@ -80,9 +82,9 @@ struct WebSocketE2ETests {
                 }
             }
 
-            let exitCode = try await process.run()
-            stdoutTask.cancel()
-            outputTask.cancel()
+            let exitCode = try await TestProcessSupport.run(process)
+            _ = await stdoutTask.result
+            _ = await outputTask.result
 
             #expect(exitCode == 0)
             #expect(stdout.values.contains(#"{"open":true,"data":"e2e-run"}"# + "\n"))
@@ -136,9 +138,9 @@ struct WebSocketE2ETests {
                 }
             }
 
-            let exitCode = try await process.run()
-            stdoutTask.cancel()
-            outputTask.cancel()
+            let exitCode = try await TestProcessSupport.run(process)
+            _ = await stdoutTask.result
+            _ = await outputTask.result
 
             let snapshot = server.handshakeSnapshot()
 

@@ -140,57 +140,124 @@
         return transform;
     }
 
+    function createPromiseMethod(syncOperation, asyncOperation) {
+        return function(input, options) {
+            void options;
+            if (typeof asyncOperation === 'function') {
+                var pending = asyncOperation(input);
+                if (pending && typeof pending.then === 'function') {
+                    return pending;
+                }
+            }
+            return new Promise(function(resolve, reject) {
+                queueMicrotask(function() {
+                    try {
+                        resolve(syncOperation(input));
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
+            });
+        };
+    }
+
+    function createTransformConstructor(factory) {
+        function ZlibTransform(options) {
+            return factory(options);
+        }
+        return ZlibTransform;
+    }
+
     var zlib = {
-        createGzip: function() {
+        createGzip: function(options) {
+            void options;
             return createBufferingTransform(zlib.gzipSync, function(input) {
                 return runAsync('compress', 'gzip', input);
             });
         },
-        createGunzip: function() {
+        createGunzip: function(options) {
+            void options;
             return createBufferingTransform(zlib.gunzipSync, function(input) {
                 return runAsync('uncompress', 'gzip', input);
             });
         },
-        createDeflate: function() {
+        createDeflate: function(options) {
+            void options;
             return createBufferingTransform(zlib.deflateSync, function(input) {
                 return runAsync('compress', 'zlib', input);
             });
         },
-        createInflate: function() {
+        createInflate: function(options) {
+            void options;
             return createBufferingTransform(zlib.inflateSync, function(input) {
                 return runAsync('uncompress', 'zlib', input);
             });
         },
-        createDeflateRaw: function() {
+        createDeflateRaw: function(options) {
+            void options;
             return createBufferingTransform(zlib.deflateRawSync, function(input) {
                 return runAsync('compress', 'raw', input);
             });
         },
-        createInflateRaw: function() {
+        createInflateRaw: function(options) {
+            void options;
             return createBufferingTransform(zlib.inflateRawSync, function(input) {
                 return runAsync('uncompress', 'raw', input);
             });
         },
-        gzipSync: function(input) {
+        createUnzip: function(options) {
+            void options;
+            return createBufferingTransform(zlib.unzipSync, function(input) {
+                return runAsync('uncompress', 'auto', input);
+            });
+        },
+        createBrotliCompress: function(options) {
+            void options;
+            return createBufferingTransform(zlib.brotliCompressSync, function(input) {
+                return runAsync('compress', 'brotli', input);
+            });
+        },
+        createBrotliDecompress: function(options) {
+            void options;
+            return createBufferingTransform(zlib.brotliDecompressSync, function(input) {
+                return runAsync('uncompress', 'brotli', input);
+            });
+        },
+        gzipSync: function(input, options) {
+            void options;
             return runCompress('gzip', input);
         },
-        gunzipSync: function(input) {
+        gunzipSync: function(input, options) {
+            void options;
             return runUncompress('gzip', input);
         },
-        inflateSync: function(input) {
+        inflateSync: function(input, options) {
+            void options;
             return runUncompress('zlib', input);
         },
-        deflateSync: function(input) {
+        deflateSync: function(input, options) {
+            void options;
             return runCompress('zlib', input);
         },
-        inflateRawSync: function(input) {
+        inflateRawSync: function(input, options) {
+            void options;
             return runUncompress('raw', input);
         },
-        deflateRawSync: function(input) {
+        deflateRawSync: function(input, options) {
+            void options;
             return runCompress('raw', input);
         },
-        unzipSync: function(input) {
+        unzipSync: function(input, options) {
+            void options;
             return runUncompress('auto', input);
+        },
+        brotliCompressSync: function(input, options) {
+            void options;
+            return runCompress('brotli', input);
+        },
+        brotliDecompressSync: function(input, options) {
+            void options;
+            return runUncompress('brotli', input);
         },
         gzip: function(input, options, callback) {
             var args = parseAsyncArgs(input, options, callback);
@@ -234,21 +301,79 @@
                 return runAsync('uncompress', 'auto', value);
             });
         },
+        brotliCompress: function(input, options, callback) {
+            var args = parseAsyncArgs(input, options, callback);
+            queueCallback(zlib.brotliCompressSync, args.input, args.callback, function(value) {
+                return runAsync('compress', 'brotli', value);
+            });
+        },
+        brotliDecompress: function(input, options, callback) {
+            var args = parseAsyncArgs(input, options, callback);
+            queueCallback(zlib.brotliDecompressSync, args.input, args.callback, function(value) {
+                return runAsync('uncompress', 'brotli', value);
+            });
+        },
         constants: {
+            Z_NO_COMPRESSION: 0,
+            Z_BEST_SPEED: 1,
+            Z_BEST_COMPRESSION: 9,
             Z_NO_FLUSH: 0,
             Z_PARTIAL_FLUSH: 1,
             Z_SYNC_FLUSH: 2,
             Z_FULL_FLUSH: 3,
             Z_FINISH: 4,
             Z_BLOCK: 5,
+            Z_TREES: 6,
             Z_DEFAULT_COMPRESSION: -1,
             Z_DEFAULT_STRATEGY: 0,
+            Z_FILTERED: 1,
+            Z_HUFFMAN_ONLY: 2,
+            Z_RLE: 3,
+            Z_FIXED: 4,
             Z_DEFLATED: 8,
             Z_DEFAULT_WINDOWBITS: 15,
             Z_MIN_WINDOWBITS: 8,
             Z_MAX_WINDOWBITS: 15,
+            BROTLI_OPERATION_PROCESS: 0,
+            BROTLI_OPERATION_FLUSH: 1,
+            BROTLI_OPERATION_FINISH: 2,
+            BROTLI_OPERATION_EMIT_METADATA: 3,
+            BROTLI_MODE_GENERIC: 0,
+            BROTLI_MODE_TEXT: 1,
+            BROTLI_MODE_FONT: 2,
+            BROTLI_DEFAULT_QUALITY: 11,
+            BROTLI_DEFAULT_WINDOW: 22,
+            BROTLI_MIN_INPUT_BLOCK_BITS: 16,
+            BROTLI_MAX_INPUT_BLOCK_BITS: 24,
+            BROTLI_PARAM_MODE: 0,
+            BROTLI_PARAM_QUALITY: 1,
+            BROTLI_PARAM_LGWIN: 2,
+            BROTLI_PARAM_LGBLOCK: 3,
+            BROTLI_PARAM_DISABLE_LITERAL_CONTEXT_MODELING: 4,
+            BROTLI_PARAM_SIZE_HINT: 5,
+            BROTLI_PARAM_LARGE_WINDOW: 6,
         },
     };
+    zlib.promises = {
+        gzip: createPromiseMethod(zlib.gzipSync, function(input) { return runAsync('compress', 'gzip', input); }),
+        gunzip: createPromiseMethod(zlib.gunzipSync, function(input) { return runAsync('uncompress', 'gzip', input); }),
+        deflate: createPromiseMethod(zlib.deflateSync, function(input) { return runAsync('compress', 'zlib', input); }),
+        inflate: createPromiseMethod(zlib.inflateSync, function(input) { return runAsync('uncompress', 'zlib', input); }),
+        deflateRaw: createPromiseMethod(zlib.deflateRawSync, function(input) { return runAsync('compress', 'raw', input); }),
+        inflateRaw: createPromiseMethod(zlib.inflateRawSync, function(input) { return runAsync('uncompress', 'raw', input); }),
+        unzip: createPromiseMethod(zlib.unzipSync, function(input) { return runAsync('uncompress', 'auto', input); }),
+        brotliCompress: createPromiseMethod(zlib.brotliCompressSync, function(input) { return runAsync('compress', 'brotli', input); }),
+        brotliDecompress: createPromiseMethod(zlib.brotliDecompressSync, function(input) { return runAsync('uncompress', 'brotli', input); }),
+    };
+    zlib.Gzip = createTransformConstructor(zlib.createGzip);
+    zlib.Gunzip = createTransformConstructor(zlib.createGunzip);
+    zlib.Deflate = createTransformConstructor(zlib.createDeflate);
+    zlib.Inflate = createTransformConstructor(zlib.createInflate);
+    zlib.DeflateRaw = createTransformConstructor(zlib.createDeflateRaw);
+    zlib.InflateRaw = createTransformConstructor(zlib.createInflateRaw);
+    zlib.Unzip = createTransformConstructor(zlib.createUnzip);
+    zlib.BrotliCompress = createTransformConstructor(zlib.createBrotliCompress);
+    zlib.BrotliDecompress = createTransformConstructor(zlib.createBrotliDecompress);
     zlib.default = zlib;
     __nodeModules.zlib = zlib;
 })();

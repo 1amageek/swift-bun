@@ -24,6 +24,7 @@ public final class BunProcess: Sendable {
     private let cwd: String?
     private let environment: [String: String]
     private let removedEnvironmentKeys: Set<String>
+    private let diagnosticsEnabled: Bool
 
     // MARK: - Runtime Components
 
@@ -45,13 +46,22 @@ public final class BunProcess: Sendable {
     private nonisolated(unsafe) var runStartupBarrier: LifecycleController.BootBarrierToken?
     private nonisolated(unsafe) var startupPromiseVisibleHandle: LifecycleController.VisibleHandleToken?
     private nonisolated(unsafe) var pendingStdinVisibleHandle: LifecycleController.VisibleHandleToken?
+    private nonisolated(unsafe) var stdinDeliveryGraceVisibleHandle: LifecycleController.VisibleHandleToken?
+    private nonisolated(unsafe) var postTurnCheckpointVisibleHandle: LifecycleController.VisibleHandleToken?
     private nonisolated(unsafe) var streamsFinished = false
     private let shutdownState = Mutex<ShutdownState>(.active)
     private struct PendingStdinState: Sendable {
         var queue: [Data?] = []
         var drainScheduled = false
+        var retryScheduled = false
+        var firstQueuedUptimeMs: Int?
+    }
+    private struct StdinDeliveryGraceState: Sendable {
+        var generation = 0
+        var scheduledGeneration: Int?
     }
     private let pendingStdinState = Mutex(PendingStdinState())
+    private let stdinDeliveryGraceState = Mutex(StdinDeliveryGraceState())
 
     // MARK: - Streams
 
@@ -71,6 +81,7 @@ public final class BunProcess: Sendable {
         cwd: String? = nil,
         environment: [String: String] = [:],
         removedEnvironmentKeys: Set<String> = [],
+        diagnosticsEnabled: Bool = false,
         nextTickBudgetPerTurn: Int = 64,
         hostCallbackBudgetPerTurn: Int = 256
     ) {
@@ -79,6 +90,7 @@ public final class BunProcess: Sendable {
         self.cwd = cwd
         self.environment = environment
         self.removedEnvironmentKeys = removedEnvironmentKeys
+        self.diagnosticsEnabled = diagnosticsEnabled
 
         let (stdoutStream, stdoutCont) = AsyncStream<String>.makeStream()
         self.stdout = stdoutStream
@@ -88,7 +100,10 @@ public final class BunProcess: Sendable {
         self.output = outputStream
         self.outputContinuation = outputCont
 
-        let logger: @Sendable (String) -> Void = { [outputCont] line in
+        let logger: @Sendable (String) -> Void = { [outputCont, diagnosticsEnabled] line in
+            guard diagnosticsEnabled else {
+                return
+            }
             outputCont.yield(line)
         }
 
@@ -259,8 +274,8 @@ public final class BunProcess: Sendable {
 
         executor.execute {
             self.scheduler.setTurnCompletedHandler {
-                self.evaluateExitCondition()
                 self.schedulePostTurnCheckpoint()
+                self.evaluateExitCondition()
             }
         }
     }
@@ -298,7 +313,9 @@ public final class BunProcess: Sendable {
                 guard self.isAcceptingPublicWork else {
                     throw BunRuntimeError.shutdownRequired
                 }
-                precondition(self.lifecycle.currentState == .idle, "BunProcess already started. Use a new instance.")
+                guard self.lifecycle.currentState == .idle else {
+                    throw BunRuntimeError.processAlreadyStarted
+                }
                 self.lifecycle.enterBooting(mode: .library)
                 let setupBarrier = self.lifecycle.acquireBootBarrier(name: "context-setup")
                 try self.setupContext()
@@ -470,11 +487,16 @@ public final class BunProcess: Sendable {
                         guard self.isAcceptingPublicWork else {
                             throw BunRuntimeError.shutdownRequired
                         }
-                        precondition(self.lifecycle.currentState == .idle, "BunProcess already started. Use a new instance.")
+                        guard self.lifecycle.currentState == .idle else {
+                            throw BunRuntimeError.processAlreadyStarted
+                        }
                         guard self.bundle != nil else {
                             throw BunRuntimeError.bundleNotFound(URL(fileURLWithPath: "<none>"))
                         }
 
+                        self.emitDiagnostic(
+                            "[bun:stdin] run begin queued=\(self.pendingStdinCount) state=\(String(describing: self.lifecycle.currentState))"
+                        )
                         self.exitPromise = promise
                         self.lifecycle.enterBooting(mode: .process)
                         self.ensurePendingStdinVisibleHandleIfNeeded()
@@ -523,8 +545,20 @@ public final class BunProcess: Sendable {
             return
         }
         pendingStdinState.withLock { state in
+            if state.firstQueuedUptimeMs == nil {
+                state.firstQueuedUptimeMs = Self.uptimeMilliseconds
+            }
             state.queue.append(data)
         }
+        let description: String
+        if let data {
+            description = "\(data.count) bytes"
+        } else {
+            description = "eof"
+        }
+        emitDiagnostic(
+            "[bun:stdin] enqueue payload=\(description) queued=\(pendingStdinCount) state=\(String(describing: lifecycle.currentState)) stdinRefed=\(handleRegistry.isStdinRefed)"
+        )
         ensurePendingStdinVisibleHandleIfNeeded()
         requestPendingStdinDrainIfReady()
     }
@@ -709,7 +743,16 @@ public final class BunProcess: Sendable {
         }
 
         startupPromiseVisibleHandle = lifecycle.acquireVisibleHandle(kind: "startupPromise")
-        try JavaScriptResource.evaluate(.runtime(.startupPromiseObserver), in: ctx)
+        guard
+            let fulfilled = ctx.objectForKeyedSubscript("__swiftStartupPromiseFulfilled"),
+            !fulfilled.isUndefined,
+            let rejected = ctx.objectForKeyedSubscript("__swiftStartupPromiseRejected"),
+            !rejected.isUndefined
+        else {
+            throw BunRuntimeError.javaScriptException("startup promise callbacks are not installed")
+        }
+
+        _ = startupPromise.invokeMethod("then", withArguments: [fulfilled, rejected])
         reportPendingJavaScriptException(source: "observeStartupPromiseIfPresent")
     }
 
@@ -745,8 +788,16 @@ public final class BunProcess: Sendable {
             return
         }
 
+        if postTurnCheckpointVisibleHandle == nil {
+            postTurnCheckpointVisibleHandle = lifecycle.acquireVisibleHandle(kind: "postTurnCheckpoint")
+        }
+
         _ = checkpoint.call(withArguments: [])
         reportPendingJavaScriptException(source: "schedulePostTurnCheckpoint")
+        if executor.context?.exception != nil, let token = postTurnCheckpointVisibleHandle {
+            lifecycle.releaseVisibleHandle(token)
+            postTurnCheckpointVisibleHandle = nil
+        }
     }
 
     private func completeRunStartup() {
@@ -806,7 +857,7 @@ public final class BunProcess: Sendable {
         cleanupActiveHandles(reason: reason)
         handleRegistry.failAllAsyncWaits(BunRuntimeError.shutdownRequired)
 
-        if executor.context != nil {
+        if executor.context != nil, shouldDeliverStdinEOFOnShutdown {
             deliverStdin(nil)
         }
         pendingStdinState.withLock { state in
@@ -867,6 +918,14 @@ public final class BunProcess: Sendable {
         if let pendingToken = pendingStdinVisibleHandle {
             lifecycle.releaseVisibleHandle(pendingToken)
             pendingStdinVisibleHandle = nil
+        }
+        if let graceToken = stdinDeliveryGraceVisibleHandle {
+            lifecycle.releaseVisibleHandle(graceToken)
+            stdinDeliveryGraceVisibleHandle = nil
+        }
+        if let checkpointToken = postTurnCheckpointVisibleHandle {
+            lifecycle.releaseVisibleHandle(checkpointToken)
+            postTurnCheckpointVisibleHandle = nil
         }
         _ = handleRegistry.setStdinRefed(false)
     }
@@ -980,22 +1039,30 @@ public final class BunProcess: Sendable {
     // MARK: - Console Bridge
 
     private func installConsoleBridge(in ctx: JSContext) {
-        let logBlock: @convention(block) (String, String) -> Void = { [outputContinuation] level, message in
+        let logBlock: @convention(block) (String, String) -> Void = { [self, outputContinuation] level, message in
+            self.markStdinConsumerActivity(reason: "console")
             outputContinuation.yield("[\(level)] \(message)")
         }
         ctx.setObject(logBlock, forKeyedSubscript: "__nativeLog" as NSString)
+
+        let activityBlock: @convention(block) () -> Void = { [self] in
+            self.markStdinConsumerActivity(reason: "js")
+        }
+        ctx.setObject(activityBlock, forKeyedSubscript: "__nativeProcessActivity" as NSString)
     }
 
     // MARK: - stdout/stderr Bridge
 
     private func installStdioBridges(in ctx: JSContext) {
-        let stdoutWrite: @convention(block) (String) -> Bool = { [stdoutContinuation] data in
+        let stdoutWrite: @convention(block) (String) -> Bool = { [self, stdoutContinuation] data in
+            self.markStdinConsumerActivity(reason: "stdout")
             stdoutContinuation.yield(data)
             return true
         }
         ctx.setObject(stdoutWrite, forKeyedSubscript: "__nativeStdoutWrite" as NSString)
 
-        let stderrWrite: @convention(block) (String) -> Bool = { [outputContinuation] data in
+        let stderrWrite: @convention(block) (String) -> Bool = { [self, outputContinuation] data in
+            self.markStdinConsumerActivity(reason: "stderr")
             outputContinuation.yield("[stderr] \(data)")
             return true
         }
@@ -1177,18 +1244,60 @@ public final class BunProcess: Sendable {
         }
         ctx.setObject(rejectBlock, forKeyedSubscript: "__swiftRejectAsyncResult" as NSString)
 
-        let startupSettledBlock: @convention(block) () -> Void = { [self] in
+        let observedCallbackSettledBlock: @convention(block) (String, Bool, JSValue?) -> Void = { [self, outputContinuation] source, succeeded, value in
             self.executor.preconditionInExecutor()
+            guard !succeeded else {
+                return
+            }
+
+            if let value, self.isProcessExitSentinel(value) {
+                return
+            }
+
+            let message: String
+            if let value, !value.isUndefined, !value.isNull {
+                message = value.objectForKeyedSubscript("message")?.toString() ?? value.toString() ?? "Unknown JS error"
+            } else {
+                message = "Unknown JS error"
+            }
+            outputContinuation.yield("[bun:exception] \(source): \(message)")
+        }
+        ctx.setObject(observedCallbackSettledBlock, forKeyedSubscript: "__swiftObservedCallbackSettled" as NSString)
+
+        let startupSettledBlock: @convention(block) (Bool, JSValue?) -> Void = { [self, outputContinuation] succeeded, reason in
+            self.executor.preconditionInExecutor()
+            let reasonText: String
+            if let reason, !reason.isUndefined, !reason.isNull {
+                reasonText = reason.toString() ?? "<unprintable>"
+            } else {
+                reasonText = "<none>"
+            }
+            if self.diagnosticsEnabled {
+                outputContinuation.yield("[bun:startup] settled success=\(succeeded) reason=\(reasonText)")
+            }
             if let token = self.startupPromiseVisibleHandle {
                 self.lifecycle.releaseVisibleHandle(token)
                 self.startupPromiseVisibleHandle = nil
             }
             self.evaluateExitCondition()
         }
-        ctx.setObject(startupSettledBlock, forKeyedSubscript: "__swiftStartupPromiseSettled" as NSString)
+
+        let startupFulfilledBlock: @convention(block) (JSValue?) -> Void = { value in
+            startupSettledBlock(true, value)
+        }
+        ctx.setObject(startupFulfilledBlock, forKeyedSubscript: "__swiftStartupPromiseFulfilled" as NSString)
+
+        let startupRejectedBlock: @convention(block) (JSValue?) -> Void = { value in
+            startupSettledBlock(false, value)
+        }
+        ctx.setObject(startupRejectedBlock, forKeyedSubscript: "__swiftStartupPromiseRejected" as NSString)
 
         let postTurnCheckpointBlock: @convention(block) () -> Void = { [self] in
             self.executor.preconditionInExecutor()
+            if let token = self.postTurnCheckpointVisibleHandle {
+                self.lifecycle.releaseVisibleHandle(token)
+                self.postTurnCheckpointVisibleHandle = nil
+            }
             self.evaluateExitCondition()
         }
         ctx.setObject(postTurnCheckpointBlock, forKeyedSubscript: "__swiftPostTurnCheckpoint" as NSString)
@@ -1307,7 +1416,14 @@ public final class BunProcess: Sendable {
             _ = handleRegistry.removeTimer(id: id)
         }
 
-        timer.callback.call(withArguments: timer.args)
+        let result = timer.callback.call(withArguments: timer.args)
+        if isThenable(result),
+           let ctx = executor.context,
+           let observer = ctx.objectForKeyedSubscript("__swiftBunObserveCallbackResult"),
+           !observer.isUndefined {
+            _ = observer.call(withArguments: [result as Any, timer.repeating ? "setInterval" : "setTimeout"])
+            reportPendingJavaScriptException(source: timer.repeating ? "setInterval-observer" : "setTimeout-observer")
+        }
         reportPendingJavaScriptException(source: timer.repeating ? "setInterval" : "setTimeout")
 
         if timer.repeating {
@@ -1685,6 +1801,8 @@ public final class BunProcess: Sendable {
                 let visibleHandle = self.lifecycle.acquireVisibleHandle(kind: "stdin")
                 self.handleRegistry.setStdinVisibleHandleToken(visibleHandle)
             }
+            self.releaseStdinDeliveryGraceHandleIfNeeded(reason: "stdin-refed")
+            self.emitDiagnostic("[bun:stdin] ref queued=\(self.pendingStdinCount)")
             self.requestPendingStdinDrainIfReady()
         }
         let stdinUnrefBlock: @convention(block) () -> Void = { [self] in
@@ -1695,6 +1813,7 @@ public final class BunProcess: Sendable {
                 }
                 self.evaluateExitCondition()
             }
+            self.emitDiagnostic("[bun:stdin] unref queued=\(self.pendingStdinCount)")
         }
         ctx.setObject(stdinRefBlock, forKeyedSubscript: "__stdinRef" as NSString)
         ctx.setObject(stdinUnrefBlock, forKeyedSubscript: "__stdinUnref" as NSString)
@@ -1702,24 +1821,32 @@ public final class BunProcess: Sendable {
 
     private func requestPendingStdinDrainIfReady() {
         guard lifecycle.currentState == .running else {
+            if pendingStdinCount > 0 {
+                emitDiagnostic(
+                    "[bun:stdin] drain deferred reason=runtime-not-running queued=\(pendingStdinCount) state=\(String(describing: lifecycle.currentState))"
+                )
+            }
             return
         }
+
+        // Deliver as soon as the runtime is running. `process.stdin` buffers
+        // data before listeners attach, and waiting for `stdin.ref()` can make
+        // short-lived one-shot CLIs exit before resumed input is delivered.
 
         let shouldSchedule = pendingStdinState.withLock { state in
             guard state.queue.isEmpty == false, state.drainScheduled == false else {
                 return false
             }
+            state.retryScheduled = false
             state.drainScheduled = true
             return true
         }
         guard shouldSchedule else {
             return
         }
-        guard handleRegistry.isStdinRefed else {
-            pendingStdinState.withLock { $0.drainScheduled = false }
-            return
-        }
-
+        emitDiagnostic(
+            "[bun:stdin] schedule drain queued=\(pendingStdinCount) stdinRefed=\(handleRegistry.isStdinRefed)"
+        )
         scheduler.enqueueHostCallback(source: "stdin") {
             self.drainPendingStdin()
         }
@@ -1732,12 +1859,15 @@ public final class BunProcess: Sendable {
             let next = pendingStdinState.withLock { state -> Data?? in
                 if state.queue.isEmpty {
                     state.drainScheduled = false
+                    state.retryScheduled = false
+                    state.firstQueuedUptimeMs = nil
                     return nil
                 }
                 return state.queue.removeFirst()
             }
 
             guard let next else {
+                self.emitDiagnostic("[bun:stdin] drain complete queued=0")
                 releasePendingStdinVisibleHandleIfNeeded()
                 requestPendingStdinDrainIfReady()
                 return
@@ -1783,14 +1913,119 @@ public final class BunProcess: Sendable {
     private func deliverStdin(_ data: Data?) {
         executor.preconditionInExecutor()
         guard let ctx = executor.context else { return }
-        guard let deliver = ctx.objectForKeyedSubscript("__deliverStdinData"), !deliver.isUndefined else { return }
+        guard let deliver = ctx.objectForKeyedSubscript("__deliverStdinData"), !deliver.isUndefined else {
+            emitDiagnostic("[bun:stdin] deliver skipped reason=missing-bridge")
+            return
+        }
 
         if let data {
+            ensureStdinDeliveryGraceHandleIfNeeded()
+            scheduleStdinDeliveryGraceReleaseIfNeeded()
             let string = String(data: data, encoding: .utf8) ?? ""
+            emitDiagnostic(
+                "[bun:stdin] deliver bytes=\(data.count) remaining=\(pendingStdinCount) stdinRefed=\(handleRegistry.isStdinRefed)"
+            )
             _ = deliver.call(withArguments: [string])
         } else {
+            releaseStdinDeliveryGraceHandleIfNeeded(reason: "stdin-eof")
+            emitDiagnostic("[bun:stdin] deliver eof remaining=\(pendingStdinCount)")
             _ = deliver.call(withArguments: [NSNull()])
         }
         reportPendingJavaScriptException(source: "deliverStdin")
+    }
+
+    private var pendingStdinCount: Int {
+        pendingStdinState.withLock { $0.queue.count }
+    }
+
+    private var shouldDeliverStdinEOFOnShutdown: Bool {
+        pendingStdinCount > 0
+            || handleRegistry.isStdinRefed
+            || handleRegistry.currentStdinVisibleHandleToken != nil
+    }
+
+    private func emitDiagnostic(_ line: String) {
+        guard diagnosticsEnabled else {
+            return
+        }
+        outputContinuation.yield(line)
+    }
+
+    private func ensureStdinDeliveryGraceHandleIfNeeded() {
+        guard stdinDeliveryGraceVisibleHandle == nil else {
+            return
+        }
+        switch lifecycle.currentState {
+        case .booting, .running, .exitRequested:
+            stdinDeliveryGraceVisibleHandle = lifecycle.acquireVisibleHandle(kind: "stdinDeliveryGrace")
+            emitDiagnostic("[bun:stdin] grace acquired")
+        case .idle, .shuttingDown, .exited:
+            return
+        }
+    }
+
+    private func releaseStdinDeliveryGraceHandleIfNeeded(reason: String) {
+        stdinDeliveryGraceState.withLock { state in
+            state.generation += 1
+            state.scheduledGeneration = nil
+        }
+        guard let token = stdinDeliveryGraceVisibleHandle else {
+            return
+        }
+        lifecycle.releaseVisibleHandle(token)
+        stdinDeliveryGraceVisibleHandle = nil
+        emitDiagnostic("[bun:stdin] grace released reason=\(reason)")
+        if lifecycle.currentState == .running {
+            evaluateExitCondition()
+        }
+    }
+
+    private func scheduleStdinDeliveryGraceReleaseIfNeeded() {
+        let generation = stdinDeliveryGraceState.withLock { state -> Int in
+            state.generation += 1
+            state.scheduledGeneration = state.generation
+            return state.generation
+        }
+        emitDiagnostic("[bun:stdin] grace scheduled generation=\(generation)")
+        Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(10))
+            } catch {
+                return
+            }
+            guard let self else {
+                return
+            }
+            let shouldRelease = self.stdinDeliveryGraceState.withLock { state in
+                state.scheduledGeneration == generation
+            }
+            guard shouldRelease else {
+                return
+            }
+            guard self.handleRegistry.isStdinRefed == false else {
+                return
+            }
+            _ = self.executor.execute {
+                guard self.lifecycle.currentState == .running else {
+                    return
+                }
+                guard self.handleRegistry.isStdinRefed == false else {
+                    return
+                }
+                self.releaseStdinDeliveryGraceHandleIfNeeded(reason: "timeout")
+            }
+        }
+    }
+
+    private func markStdinConsumerActivity(reason: String) {
+        guard stdinDeliveryGraceVisibleHandle != nil else {
+            return
+        }
+        emitDiagnostic("[bun:stdin] consumer activity reason=\(reason)")
+        releaseStdinDeliveryGraceHandleIfNeeded(reason: "activity-\(reason)")
+    }
+
+    private static var uptimeMilliseconds: Int {
+        Int(ProcessInfo.processInfo.systemUptime * 1000)
     }
 }

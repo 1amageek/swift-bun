@@ -6,6 +6,14 @@ globalThis.__swiftBunAwaitResult = function(value, token) {
     });
 };
 
+globalThis.__swiftBunObserveCallbackResult = function(value, source) {
+    Promise.resolve(value).then(function() {
+        __swiftObservedCallbackSettled(source, true, null);
+    }, function(error) {
+        __swiftObservedCallbackSettled(source, false, error);
+    });
+};
+
 globalThis.__swiftBunSchedulePostTurnCheckpoint = function() {
     if (globalThis.__swiftBunPostTurnCheckpointPending) return;
     globalThis.__swiftBunPostTurnCheckpointPending = true;

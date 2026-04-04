@@ -359,60 +359,106 @@ struct CLIJSTest {
         )
     }
 
+    private func prepareManagedClaudeStandHome(
+        baseURL: String
+    ) throws -> (root: URL, home: URL, workspace: URL, environment: [String: String]) {
+        let root = try makeTempDirectory(prefix: "swift-bun-claudestand-home")
+        let managedHome = root
+            .appendingPathComponent("Library/Application Support/ClaudeStand/claude-home", isDirectory: true)
+        let workspace = managedHome
+            .appendingPathComponent("Library/Application Support/DynaNote/Workspace", isDirectory: true)
+        let claudeDirectory = managedHome.appendingPathComponent(".claude", isDirectory: true)
+        let cacheDirectory = claudeDirectory.appendingPathComponent("cache", isDirectory: true)
+        let diagnosticsFile = claudeDirectory.appendingPathComponent("diagnostics.ndjson")
+
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: claudeDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+
+        let settingsURL = claudeDirectory.appendingPathComponent("settings.json")
+        let installedPluginsURL = claudeDirectory.appendingPathComponent("installed_plugins.json")
+        try """
+        {
+          "enabledPlugins": {}
+        }
+        """.write(to: settingsURL, atomically: true, encoding: .utf8)
+        try """
+        {
+          "version": 2,
+          "plugins": {}
+        }
+        """.write(to: installedPluginsURL, atomically: true, encoding: .utf8)
+
+        return (
+            root: root,
+            home: managedHome,
+            workspace: workspace,
+            environment: [
+                "HOME": managedHome.path,
+                "ANTHROPIC_API_KEY": "sk-ant-test-key",
+                "ANTHROPIC_BASE_URL": baseURL,
+                "CLAUDE_CODE_DIAGNOSTICS_FILE": diagnosticsFile.path,
+            ]
+        )
+    }
+
     private func runCLIProcess(
         environment: [String: String],
         cwd: String,
         initWaitSeconds: Double,
-        responseWaitSeconds: Double
+        responseWaitSeconds: Double,
+        message: String = #"{"type":"user","session_id":"","message":{"role":"user","content":"What is 2+2? Answer in one word."},"parent_tool_use_id":null}"# + "\n"
     ) async throws -> CLIRunObservation {
-        let process = BunProcess(
-            bundle: URL(fileURLWithPath: cliPath()),
-            arguments: ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--debug"],
-            cwd: cwd,
-            environment: environment
-        )
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let process = BunProcess(
+                bundle: URL(fileURLWithPath: cliPath()),
+                arguments: ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--debug"],
+                cwd: cwd,
+                environment: environment,
+                diagnosticsEnabled: true
+            )
 
-        let logs = LogCollector()
-        let stdoutLogs = LogCollector()
-        let outputTask = Task { [logs] in
-            for await line in process.output {
-                logs.append(line)
+            let logs = LogCollector()
+            let stdoutLogs = LogCollector()
+            let outputTask = Task { [logs] in
+                for await line in process.output {
+                    logs.append(line)
+                }
             }
-        }
-        let stdoutTask = Task { [stdoutLogs] in
-            for await line in process.stdout {
-                stdoutLogs.append(line)
+            let stdoutTask = Task { [stdoutLogs] in
+                for await line in process.stdout {
+                    stdoutLogs.append(line)
+                }
             }
+            let runTask = Task { try await TestProcessSupport.run(process) }
+
+            try await Task.sleep(for: .seconds(initWaitSeconds))
+            process.sendInput(message.data(using: .utf8)!)
+            try await Task.sleep(for: .seconds(responseWaitSeconds))
+
+            process.terminate(exitCode: 0)
+            let exitCode = Int(try await runTask.value)
+            _ = await outputTask.result
+            _ = await stdoutTask.result
+
+            let diagnosticsLines: [String]
+            if let diagnosticsPath = environment["CLAUDE_CODE_DIAGNOSTICS_FILE"],
+               FileManager.default.fileExists(atPath: diagnosticsPath) {
+                let diagnostics = try String(contentsOfFile: diagnosticsPath, encoding: .utf8)
+                diagnosticsLines = diagnostics
+                    .split(separator: "\n", omittingEmptySubsequences: true)
+                    .map(String.init)
+            } else {
+                diagnosticsLines = []
+            }
+
+            return CLIRunObservation(
+                exitCode: exitCode,
+                output: logs.values,
+                stdout: stdoutLogs.values,
+                diagnosticsLines: diagnosticsLines
+            )
         }
-        let runTask = Task { try await process.run() }
-
-        try await Task.sleep(for: .seconds(initWaitSeconds))
-        let message = #"{"type":"user","session_id":"","message":{"role":"user","content":"What is 2+2? Answer in one word."},"parent_tool_use_id":null}"# + "\n"
-        process.sendInput(message.data(using: .utf8)!)
-        try await Task.sleep(for: .seconds(responseWaitSeconds))
-
-        process.terminate(exitCode: 0)
-        let exitCode = Int(try await runTask.value)
-        outputTask.cancel()
-        stdoutTask.cancel()
-
-        let diagnosticsLines: [String]
-        if let diagnosticsPath = environment["CLAUDE_CODE_DIAGNOSTICS_FILE"],
-           FileManager.default.fileExists(atPath: diagnosticsPath) {
-            let diagnostics = try String(contentsOfFile: diagnosticsPath, encoding: .utf8)
-            diagnosticsLines = diagnostics
-                .split(separator: "\n", omittingEmptySubsequences: true)
-                .map(String.init)
-        } else {
-            diagnosticsLines = []
-        }
-
-        return CLIRunObservation(
-            exitCode: exitCode,
-            output: logs.values,
-            stdout: stdoutLogs.values,
-            diagnosticsLines: diagnosticsLines
-        )
     }
 
     private func printObservation(_ observation: CLIRunObservation, label: String) {
@@ -675,20 +721,21 @@ struct CLIJSTest {
             let touchedRealClaudeHome = (observation.output + observation.diagnosticsLines).contains {
                 $0.contains(realClaudeHome)
             }
-            let touchedIsolatedClaudeHome = observation.fsLogs.contains {
-                $0.contains(isolated.home.path + "/.claude")
-            }
             let loadedSettings = observation.diagnosticsLines.contains {
                 $0.contains("\"event\":\"settings_load_completed\"")
             }
             let completedGitRootProbe = observation.diagnosticsLines.contains {
                 $0.contains("\"event\":\"find_git_root_completed\"")
             }
+            let wroteDiagnosticsInIsolatedHome = observation.diagnosticsLines.isEmpty == false
+                && isolated.environment["CLAUDE_CODE_DIAGNOSTICS_FILE"].map {
+                    $0.hasPrefix(isolated.home.path + "/.claude/")
+                } == true
 
             #expect(observation.exitCode == 0)
             #expect(loadedSettings, "cli.js did not complete settings loading under isolated HOME")
             #expect(completedGitRootProbe, "cli.js did not complete git root probing under isolated HOME")
-            #expect(touchedIsolatedClaudeHome, "cli.js did not touch the isolated .claude home")
+            #expect(wroteDiagnosticsInIsolatedHome, "cli.js did not use the isolated .claude diagnostics path")
             #expect(!touchedRealClaudeHome, "cli.js still touched the real ~/.claude under isolated HOME")
         } catch {
             removeDirectoryIfPresent(isolated.home)
@@ -749,6 +796,78 @@ struct CLIJSTest {
         }
 
         removeDirectoryIfPresent(isolated.home)
+        try await server.shutdown()
+    }
+
+    @Test(.tags(.slow)) func cliJSImmediateStdinPromptReachesStreamInit() async throws {
+        let path = cliPath()
+        guard FileManager.default.fileExists(atPath: path) else { return }
+
+        let server = try await LocalHTTPTestServer.start()
+        let isolated = try prepareIsolatedClaudeHome(baseURL: server.baseURL)
+
+        do {
+            let observation = try await runCLIProcess(
+                environment: isolated.environment,
+                cwd: isolated.workspace.path,
+                initWaitSeconds: 0,
+                responseWaitSeconds: 10
+            )
+            printObservation(observation, label: "isolated HOME immediate stdin")
+
+            let sawSystemInit = observation.stdout.contains {
+                $0.contains("\"type\":\"system\"") && $0.contains("\"subtype\":\"init\"")
+            }
+            let reachedMessageLoop = observation.markerSummary.contains {
+                $0.0 == "cli_message_loop_started" && $0.1
+            }
+            let deliveredStdin = observation.stdinLogs.contains { $0.contains("deliver bytes=") }
+
+            #expect(deliveredStdin, "stdin payload was not delivered to cli.js")
+            #expect(
+                sawSystemInit || reachedMessageLoop,
+                "cli.js did not reach the stream/message-loop initialization path"
+            )
+        } catch {
+            removeDirectoryIfPresent(isolated.home)
+            try await server.shutdown()
+            throw error
+        }
+
+        removeDirectoryIfPresent(isolated.home)
+        try await server.shutdown()
+    }
+
+    @Test(.tags(.slow)) func cliJSManagedClaudeStandHomeReturnsResponse() async throws {
+        let path = cliPath()
+        guard FileManager.default.fileExists(atPath: path) else { return }
+
+        let server = try await LocalHTTPTestServer.start()
+        let managed = try prepareManagedClaudeStandHome(baseURL: server.baseURL)
+
+        do {
+            let observation = try await runCLIProcess(
+                environment: managed.environment,
+                cwd: managed.workspace.path,
+                initWaitSeconds: 8,
+                responseWaitSeconds: 12
+            )
+            printObservation(observation, label: "managed ClaudeStand home")
+
+            let sawResult = observation.stdout.contains {
+                $0.contains(#""type":"result""#) && $0.contains(#""subtype":"success""#)
+            }
+            let deliveredStdin = observation.stdinLogs.contains { $0.contains("deliver bytes=") }
+
+            #expect(deliveredStdin, "stdin payload was not delivered under managed ClaudeStand home")
+            #expect(sawResult, "cli.js did not produce a successful result under managed ClaudeStand home")
+        } catch {
+            removeDirectoryIfPresent(managed.root)
+            try await server.shutdown()
+            throw error
+        }
+
+        removeDirectoryIfPresent(managed.root)
         try await server.shutdown()
     }
 

@@ -22,16 +22,18 @@ func tempBundle(_ js: String) throws -> URL {
 func withLocalHTTPServer(
     _ body: (String) async throws -> Void
 ) async throws {
-    let server = try await LocalHTTPTestServer.start()
-    do {
-        try await body(server.baseURL)
-        try await server.shutdown()
-    } catch {
+    try await TestProcessSupport.withExclusiveRuntimeAccess {
+        let server = try await LocalHTTPTestServer.start()
         do {
+            try await body(server.baseURL)
             try await server.shutdown()
         } catch {
+            do {
+                try await server.shutdown()
+            } catch {
+            }
+            throw error
         }
-        throw error
     }
 }
 
@@ -91,19 +93,19 @@ struct BunProcessLifecycleTests {
         let url = try tempBundle("process.exit(42);")
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        #expect(try await p.run() == 42)
+        #expect(try await TestProcessSupport.run(p) == 42)
     }
 
     @Test func exitZero() async throws {
         let url = try tempBundle("process.exit();")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func naturalExit() async throws {
         let url = try tempBundle("setTimeout(function() {}, 10);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func startupPromiseKeepsAsyncBundleAlive() async throws {
@@ -121,7 +123,48 @@ struct BunProcessLifecycleTests {
             } catch {
             }
         }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
+    }
+
+    @Test func startupPromiseKeepsAsyncBundleAliveAcrossPurePromiseMicrotask() async throws {
+        let url = try tempBundle("""
+            globalThis.__swiftBunStartupPromise = (async function vsY() {
+                await Promise.resolve().then(function() {
+                    return 42;
+                });
+                process.stdout.write("startup-after-await\\n");
+                process.exit(0);
+            })();
+        """)
+        defer {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+            }
+        }
+
+        let process = BunProcess(bundle: url, diagnosticsEnabled: true)
+        let stdoutTask = Task { () -> [String] in
+            var lines: [String] = []
+            for await line in process.stdout {
+                lines.append(line)
+            }
+            return lines
+        }
+        let outputTask = Task { () -> [String] in
+            var lines: [String] = []
+            for await line in process.output {
+                lines.append(line)
+            }
+            return lines
+        }
+
+        let exitCode = try await TestProcessSupport.run(process)
+        let stdout = await stdoutTask.value
+        _ = await outputTask.value
+
+        #expect(exitCode == 0)
+        #expect(stdout.contains("startup-after-await\n"))
     }
 
     @Test func startupPromiseKeepsProcessAliveThroughHeavySynchronousContinuation() async throws {
@@ -145,7 +188,7 @@ struct BunProcessLifecycleTests {
             } catch {
             }
         }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test("startup promise keeps process alive through recursive async fs warmup")
@@ -180,7 +223,7 @@ struct BunProcessLifecycleTests {
             removeIfPresent(fixture.root)
         }
 
-        let process = BunProcess(bundle: url)
+        let process = BunProcess(bundle: url, diagnosticsEnabled: true)
         let stdoutTask = Task { () -> [String] in
             var lines: [String] = []
             for await line in process.stdout {
@@ -196,7 +239,7 @@ struct BunProcessLifecycleTests {
             return lines
         }
 
-        let exitCode = try await process.run()
+        let exitCode = try await TestProcessSupport.run(process)
         let stdout = await stdoutTask.value
         let output = await outputTask.value
 
@@ -277,7 +320,7 @@ struct BunProcessLifecycleTests {
             removeIfPresent(fixture.root)
         }
 
-        let process = BunProcess(bundle: url)
+        let process = BunProcess(bundle: url, diagnosticsEnabled: true)
         let stdoutTask = Task { () -> [String] in
             var lines: [String] = []
             for await line in process.stdout {
@@ -293,7 +336,7 @@ struct BunProcessLifecycleTests {
             return lines
         }
 
-        let exitCode = try await process.run()
+        let exitCode = try await TestProcessSupport.run(process)
         let stdout = await stdoutTask.value
         let output = await outputTask.value
 
@@ -307,7 +350,7 @@ struct BunProcessLifecycleTests {
         let url = try tempBundle("setInterval(function() {}, 1000);")
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.terminate(exitCode: 7)
         #expect(try await task.value == 7)
@@ -316,13 +359,13 @@ struct BunProcessLifecycleTests {
     @Test func envVars() async throws {
         let url = try tempBundle("process.exit(process.env.K === 'V' ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url, environment: ["K": "V"]).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url, environment: ["K": "V"])) == 0)
     }
 
     @Test func bundleNotFound() async throws {
         let p = BunProcess(bundle: URL(fileURLWithPath: "/nonexistent.js"))
         await #expect(throws: BunRuntimeError.self) {
-            try await p.run()
+            try await TestProcessSupport.run(p)
         }
     }
 
@@ -330,14 +373,14 @@ struct BunProcessLifecycleTests {
         let url = try tempBundle("throw new Error('boom');")
         defer { try? FileManager.default.removeItem(at: url) }
         await #expect(throws: BunRuntimeError.self) {
-            try await BunProcess(bundle: url).run()
+            try await TestProcessSupport.run(BunProcess(bundle: url))
         }
     }
 
     @Test func runWithoutBundle() async throws {
         let p = BunProcess()
         await #expect(throws: BunRuntimeError.self) {
-            try await p.run()
+            try await TestProcessSupport.run(p)
         }
     }
 }
@@ -404,40 +447,46 @@ struct BunProcessLibraryModeTests {
     }
 
     @Test func shutdownFinishesStreams() async throws {
-        let process = BunProcess()
-        try await process.load()
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let process = BunProcess()
+            try await process.load()
 
-        let stdoutTask = Task {
-            for await _ in process.stdout {
+            let stdoutTask = Task {
+                for await _ in process.stdout {
+                }
+                return true
             }
-            return true
-        }
-        let outputTask = Task {
-            for await _ in process.output {
+            let outputTask = Task {
+                for await _ in process.output {
+                }
+                return true
             }
-            return true
+
+            try await process.shutdown()
+
+            #expect(await stdoutTask.value == true)
+            #expect(await outputTask.value == true)
         }
-
-        try await process.shutdown()
-
-        #expect(await stdoutTask.value == true)
-        #expect(await outputTask.value == true)
     }
 
     @Test func shutdownIsIdempotent() async throws {
-        let process = BunProcess()
-        try await process.load()
-        try await process.shutdown()
-        try await process.shutdown()
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let process = BunProcess()
+            try await process.load()
+            try await process.shutdown()
+            try await process.shutdown()
+        }
     }
 
     @Test func evaluateAfterShutdownThrowsShutdownRequired() async throws {
-        let process = BunProcess()
-        try await process.load()
-        try await process.shutdown()
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let process = BunProcess()
+            try await process.load()
+            try await process.shutdown()
 
-        await #expect(throws: BunRuntimeError.self) {
-            try await process.evaluate(js: "1 + 1")
+            await #expect(throws: BunRuntimeError.self) {
+                try await process.evaluate(js: "1 + 1")
+            }
         }
     }
 
@@ -445,13 +494,15 @@ struct BunProcessLibraryModeTests {
         let url = try tempBundle("setInterval(function() {}, 1000);")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let process = BunProcess(bundle: url)
-        let runTask = Task { try await process.run() }
-        try await Task.sleep(for: .milliseconds(50))
-        try await process.shutdown()
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let process = BunProcess(bundle: url)
+            let runTask = Task { try await TestProcessSupport.run(process) }
+            try await Task.sleep(for: .milliseconds(50))
+            try await process.shutdown()
 
-        await #expect(throws: BunRuntimeError.self) {
-            try await runTask.value
+            await #expect(throws: BunRuntimeError.self) {
+                try await runTask.value
+            }
         }
     }
 
@@ -459,24 +510,26 @@ struct BunProcessLibraryModeTests {
         let url = try tempBundle("throw new Error('boom');")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let process = BunProcess(bundle: url)
-        let stdoutTask = Task {
-            for await _ in process.stdout {
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let process = BunProcess(bundle: url)
+            let stdoutTask = Task {
+                for await _ in process.stdout {
+                }
+                return true
             }
-            return true
-        }
-        let outputTask = Task {
-            for await _ in process.output {
+            let outputTask = Task {
+                for await _ in process.output {
+                }
+                return true
             }
-            return true
-        }
 
-        await #expect(throws: BunRuntimeError.self) {
-            try await process.load()
-        }
+            await #expect(throws: BunRuntimeError.self) {
+                try await process.load()
+            }
 
-        #expect(await stdoutTask.value == true)
-        #expect(await outputTask.value == true)
+            #expect(await stdoutTask.value == true)
+            #expect(await outputTask.value == true)
+        }
     }
 
     @Test func runFailureShutsDownStreams() async throws {
@@ -493,7 +546,7 @@ struct BunProcessLibraryModeTests {
         }
 
         await #expect(throws: BunRuntimeError.self) {
-            try await process.run()
+            try await TestProcessSupport.run(process)
         }
 
         #expect(await stdoutTask.value == true)

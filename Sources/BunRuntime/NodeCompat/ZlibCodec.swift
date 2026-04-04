@@ -1,12 +1,14 @@
 import Foundation
+import Compression
 import zlib
 
 struct ZlibCodec {
-    enum Format: Sendable, CustomStringConvertible {
+    enum Format: Sendable, CustomStringConvertible, Equatable {
         case zlib
         case gzip
         case raw
         case auto
+        case brotli
 
         init?(name: String) {
             switch name {
@@ -14,6 +16,7 @@ struct ZlibCodec {
             case "gzip": self = .gzip
             case "raw": self = .raw
             case "auto": self = .auto
+            case "brotli": self = .brotli
             default: return nil
             }
         }
@@ -28,6 +31,8 @@ struct ZlibCodec {
                 return -MAX_WBITS
             case .auto:
                 return MAX_WBITS + 32
+            case .brotli:
+                return MAX_WBITS
             }
         }
 
@@ -37,6 +42,7 @@ struct ZlibCodec {
             case .gzip: return "gzip"
             case .raw: return "raw"
             case .auto: return "auto"
+            case .brotli: return "brotli"
             }
         }
     }
@@ -53,6 +59,10 @@ struct ZlibCodec {
     }
 
     static func compress(_ data: Data, format: Format) throws -> Data {
+        if format == .brotli {
+            return try processCompressionStream(data, operation: COMPRESSION_STREAM_ENCODE, algorithm: COMPRESSION_BROTLI)
+        }
+
         var stream = z_stream()
         let status = deflateInit2_(
             &stream,
@@ -73,6 +83,10 @@ struct ZlibCodec {
     }
 
     static func decompress(_ data: Data, format: Format) throws -> Data {
+        if format == .brotli {
+            return try processCompressionStream(data, operation: COMPRESSION_STREAM_DECODE, algorithm: COMPRESSION_BROTLI)
+        }
+
         var stream = z_stream()
         let status = inflateInit2_(
             &stream,
@@ -184,5 +198,94 @@ struct ZlibCodec {
             code: Int(code),
             userInfo: [NSLocalizedDescriptionKey: "\(operation) failed: \(message)"]
         )
+    }
+
+    private static func processCompressionStream(
+        _ input: Data,
+        operation: compression_stream_operation,
+        algorithm: compression_algorithm
+    ) throws -> Data {
+        let placeholder = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+        defer { placeholder.deallocate() }
+        var stream = compression_stream(
+            dst_ptr: placeholder,
+            dst_size: 0,
+            src_ptr: UnsafePointer(placeholder),
+            src_size: 0,
+            state: nil
+        )
+        let initStatus = compression_stream_init(&stream, operation, algorithm)
+        guard initStatus != COMPRESSION_STATUS_ERROR else {
+            throw NSError(
+                domain: "swift-bun.zlib",
+                code: Int(COMPRESSION_STATUS_ERROR.rawValue),
+                userInfo: [NSLocalizedDescriptionKey: "compression_stream_init failed for \(algorithmName(algorithm))"]
+            )
+        }
+        defer { compression_stream_destroy(&stream) }
+
+        let dstBufferSize = max(4_096, input.count * 2 + 256)
+        let dstBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: dstBufferSize)
+        defer { dstBuffer.deallocate() }
+
+        var output = Data()
+        try input.withUnsafeBytes { sourceBuffer in
+            stream.src_ptr = sourceBuffer.bindMemory(to: UInt8.self).baseAddress ?? UnsafePointer(placeholder)
+            stream.src_size = sourceBuffer.count
+
+            while true {
+                stream.dst_ptr = dstBuffer
+                stream.dst_size = dstBufferSize
+
+                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                let produced = dstBufferSize - stream.dst_size
+                if produced > 0 {
+                    output.append(dstBuffer, count: produced)
+                }
+
+                switch status {
+                case COMPRESSION_STATUS_OK:
+                    continue
+                case COMPRESSION_STATUS_END:
+                    return
+                default:
+                    throw NSError(
+                        domain: "swift-bun.zlib",
+                        code: Int(COMPRESSION_STATUS_ERROR.rawValue),
+                        userInfo: [NSLocalizedDescriptionKey: "\(compressionOperationName(operation)) failed for \(algorithmName(algorithm))"]
+                    )
+                }
+            }
+        }
+
+        return output
+    }
+
+    private static func compressionOperationName(_ operation: compression_stream_operation) -> String {
+        switch operation {
+        case COMPRESSION_STREAM_ENCODE:
+            return "encode"
+        case COMPRESSION_STREAM_DECODE:
+            return "decode"
+        default:
+            return "compression"
+        }
+    }
+
+    private static func algorithmName(_ algorithm: compression_algorithm) -> String {
+        switch algorithm {
+        case COMPRESSION_BROTLI:
+            return "brotli"
+        case COMPRESSION_ZLIB:
+            return "zlib"
+        case COMPRESSION_LZ4:
+            return "lz4"
+        case COMPRESSION_LZFSE:
+            return "lzfse"
+        case COMPRESSION_LZMA:
+            return "lzma"
+        default:
+            return "compression"
+        }
     }
 }

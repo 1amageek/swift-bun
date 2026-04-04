@@ -11,7 +11,7 @@ struct BunProcessTimerTests {
     private func runWithTimeout(bundle: URL, seconds: Double = 3) async throws -> Int32 {
         try await withThrowingTaskGroup(of: Int32.self) { group in
             group.addTask {
-                try await BunProcess(bundle: bundle).run()
+                try await TestProcessSupport.run(BunProcess(bundle: bundle))
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(seconds))
@@ -27,7 +27,7 @@ struct BunProcessTimerTests {
     @Test func setTimeout() async throws {
         let url = try tempBundle("setTimeout(function() { process.exit(0); }, 10);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func setTimeoutArgs() async throws {
@@ -37,7 +37,7 @@ struct BunProcessTimerTests {
             }, 10, 10, 20);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func clearTimeout() async throws {
@@ -47,7 +47,7 @@ struct BunProcessTimerTests {
             setTimeout(function() { process.exit(0); }, 50);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func nestedTimeout() async throws {
@@ -59,7 +59,7 @@ struct BunProcessTimerTests {
             }, 5);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func setInterval() async throws {
@@ -70,13 +70,13 @@ struct BunProcessTimerTests {
             }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func setImmediate() async throws {
         let url = try tempBundle("setImmediate(function() { process.exit(0); });")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func timeoutHandleUnref() async throws {
@@ -91,7 +91,7 @@ struct BunProcessTimerTests {
             );
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func requireTimers() async throws {
@@ -100,7 +100,7 @@ struct BunProcessTimerTests {
             t.setTimeout(function() { process.exit(0); }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func timersPromises() async throws {
@@ -109,7 +109,7 @@ struct BunProcessTimerTests {
                 .then(function() { process.exit(0); });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func timersPromisesRefFalseDoesNotKeepProcessAlive() async throws {
@@ -135,7 +135,7 @@ struct BunProcessTimerTests {
             })();
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func invalidSetIntervalIsIgnoredWithoutScheduling() async throws {

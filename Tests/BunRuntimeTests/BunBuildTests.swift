@@ -5,7 +5,7 @@ import TestHeartbeat
 
 /// Tests that bundles built with `bun build --target=node --format=esm` work.
 /// Bun outputs ESM static imports — BunRuntime must transform them to CJS.
-@Suite("Bun Build Integration", .heartbeat)
+@Suite("Bun Build Integration", .serialized, .heartbeat)
 struct BunBuildTests {
 
     private func bundleURL() throws -> URL {

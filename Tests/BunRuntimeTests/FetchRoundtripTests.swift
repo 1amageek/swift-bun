@@ -351,9 +351,9 @@ struct FetchRoundtripTests {
             }
         }
 
-        let exitCode = try await process.run()
-        stdoutTask.cancel()
-        outputTask.cancel()
+        let exitCode = try await TestProcessSupport.run(process)
+        _ = await stdoutTask.result
+        _ = await outputTask.result
 
         let payload = stdout.joined
         guard !payload.isEmpty else {
@@ -377,16 +377,18 @@ struct FetchRoundtripTests {
     private func withServer(
         _ body: (String) async throws -> Void
     ) async throws {
-        let server = try await LocalHTTPTestServer.start()
-        do {
-            try await body(server.baseURL)
-            try await server.shutdown()
-        } catch {
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let server = try await LocalHTTPTestServer.start()
             do {
+                try await body(server.baseURL)
                 try await server.shutdown()
             } catch {
+                do {
+                    try await server.shutdown()
+                } catch {
+                }
+                throw error
             }
-            throw error
         }
     }
 

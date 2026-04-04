@@ -210,7 +210,7 @@ struct PackageLoadingTests {
 
         let entryURL = projectURL.appendingPathComponent("entry.js")
         let process = BunProcess(bundle: entryURL, cwd: alternateCWD.path)
-        #expect(try await process.run() == 0)
+        #expect(try await TestProcessSupport.run(process) == 0)
     }
 
     @Test("process mode entry script gets CommonJS globals")
@@ -245,6 +245,6 @@ struct PackageLoadingTests {
 
         let entryURL = projectURL.appendingPathComponent("entry.js")
         let process = BunProcess(bundle: entryURL, cwd: alternateCWD.path)
-        #expect(try await process.run() == 0)
+        #expect(try await TestProcessSupport.run(process) == 0)
     }
 }

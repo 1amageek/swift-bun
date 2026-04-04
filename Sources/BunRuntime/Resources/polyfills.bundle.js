@@ -9095,12 +9095,21 @@ var __swiftBunYAMLPackage;
   var listenerRefed = false;
   var iteratorRefs = 0;
   var resumeRefed = false;
+  var suppressAutoResume = false;
+  var suppressResumeRef = false;
+  function debugLog(message) {
+    if (typeof globalThis.__nativeLog === "function") {
+      globalThis.__nativeLog("bun:stdin.js", message);
+    }
+  }
   function nativeRef() {
+    debugLog("__stdinRef()");
     if (typeof globalThis.__stdinRef === "function") {
       globalThis.__stdinRef();
     }
   }
   function nativeUnref() {
+    debugLog("__stdinUnref()");
     if (typeof globalThis.__stdinUnref === "function") {
       globalThis.__stdinUnref();
     }
@@ -9138,14 +9147,18 @@ var __swiftBunYAMLPackage;
   if (typeof stdin.resume === "function") {
     var origResume = stdin.resume;
     stdin.resume = function() {
-      resumeRefed = true;
-      syncRefState();
+      debugLog("stdin.resume()");
+      if (!suppressResumeRef) {
+        resumeRefed = true;
+        syncRefState();
+      }
       return origResume.call(stdin);
     };
   }
   if (typeof stdin.pause === "function") {
     var origPause = stdin.pause;
     stdin.pause = function() {
+      debugLog("stdin.pause()");
       resumeRefed = false;
       syncRefState();
       return origPause.call(stdin);
@@ -9156,7 +9169,16 @@ var __swiftBunYAMLPackage;
     stdin.on = function(event, fn) {
       var result = origOn.call(stdin, event, fn);
       if (event === "data" || event === "readable") {
+        debugLog("stdin.on(" + event + ")");
         refreshListenerRef();
+        if (!suppressAutoResume && event === "data" && typeof stdin.resume === "function") {
+          suppressResumeRef = true;
+          try {
+            stdin.resume();
+          } finally {
+            suppressResumeRef = false;
+          }
+        }
       }
       return result;
     };
@@ -9167,7 +9189,16 @@ var __swiftBunYAMLPackage;
     stdin.once = function(event, fn) {
       var result = origOnce.call(stdin, event, fn);
       if (event === "data" || event === "readable") {
+        debugLog("stdin.once(" + event + ")");
         refreshListenerRef();
+        if (!suppressAutoResume && event === "data" && typeof stdin.resume === "function") {
+          suppressResumeRef = true;
+          try {
+            stdin.resume();
+          } finally {
+            suppressResumeRef = false;
+          }
+        }
       }
       return result;
     };
@@ -9177,7 +9208,16 @@ var __swiftBunYAMLPackage;
     stdin.prependListener = function(event, fn) {
       var result = origPrependListener.call(stdin, event, fn);
       if (event === "data" || event === "readable") {
+        debugLog("stdin.prependListener(" + event + ")");
         refreshListenerRef();
+        if (!suppressAutoResume && event === "data" && typeof stdin.resume === "function") {
+          suppressResumeRef = true;
+          try {
+            stdin.resume();
+          } finally {
+            suppressResumeRef = false;
+          }
+        }
       }
       return result;
     };
@@ -9187,7 +9227,16 @@ var __swiftBunYAMLPackage;
     stdin.prependOnceListener = function(event, fn) {
       var result = origPrependOnceListener.call(stdin, event, fn);
       if (event === "data" || event === "readable") {
+        debugLog("stdin.prependOnceListener(" + event + ")");
         refreshListenerRef();
+        if (!suppressAutoResume && event === "data" && typeof stdin.resume === "function") {
+          suppressResumeRef = true;
+          try {
+            stdin.resume();
+          } finally {
+            suppressResumeRef = false;
+          }
+        }
       }
       return result;
     };
@@ -9219,27 +9268,55 @@ var __swiftBunYAMLPackage;
   }
   if (typeof stdin.on === "function") {
     stdin.on("end", function() {
+      debugLog("stdin.end");
       listenerRefed = false;
       iteratorRefs = 0;
       resumeRefed = false;
       syncRefState();
     });
   }
-  var origIterator = stdin[Symbol.asyncIterator];
-  if (origIterator) {
-    stdin[Symbol.asyncIterator] = function() {
+  var ReadableCtor = globalThis.__readableStream && globalThis.__readableStream.Readable;
+  var readableProto = ReadableCtor && ReadableCtor.prototype;
+  var origIterator = readableProto && readableProto[Symbol.asyncIterator];
+  if (origIterator && !origIterator.__stdinKeepAliveWrapped) {
+    var wrappedIterator = function() {
+      var stream = this;
+      var isStdinLike = stream === stdin || stream === globalThis.process.stdin || stream.fd === 0;
+      if (!isStdinLike) {
+        return origIterator.call(stream);
+      }
+      debugLog("Readable[Symbol.asyncIterator](stdin-like)");
       iteratorRefs += 1;
       syncRefState();
-      var iterator = origIterator.call(stdin);
+      var iterator;
+      suppressAutoResume = true;
+      try {
+        iterator = origIterator.call(stream);
+      } finally {
+        suppressAutoResume = false;
+      }
       var released = false;
+      var loggedNext = false;
       function releaseOnce() {
         if (released) return;
         released = true;
+        debugLog("Readable iterator release(stdin-like)");
         releaseIteratorRef();
       }
       return {
         next: function() {
-          return Promise.resolve(iterator.next.apply(iterator, arguments)).then(
+          if (!loggedNext) {
+            loggedNext = true;
+            debugLog("Readable iterator.next(stdin-like)");
+          }
+          var nextResult;
+          suppressResumeRef = true;
+          try {
+            nextResult = iterator.next.apply(iterator, arguments);
+          } finally {
+            suppressResumeRef = false;
+          }
+          return Promise.resolve(nextResult).then(
             function(result) {
               if (result && result.done) releaseOnce();
               return result;
@@ -9269,6 +9346,8 @@ var __swiftBunYAMLPackage;
         }
       };
     };
+    wrappedIterator.__stdinKeepAliveWrapped = true;
+    readableProto[Symbol.asyncIterator] = wrappedIterator;
   }
 })();
 (function() {
@@ -9556,10 +9635,6 @@ if (typeof globalThis.queueMicrotask === "undefined") {
     init = init || {};
     if (typeof input === "string") {
       this.url = input;
-    } else if (input && typeof input.href === "string") {
-      this.url = input.href;
-    } else if (input && typeof input.toString === "function" && input.toString() !== "[object Object]") {
-      this.url = input.toString();
     } else {
       this.url = input.url;
       init = Object.assign({}, input, init);
@@ -10193,6 +10268,49 @@ if (typeof globalThis.XMLHttpRequest === "undefined") {
 var dispatchXMLHttpRequestEvent2;
 var cloneHeaderMap2;
 if (typeof globalThis.crypto === "undefined") {
+  let subtleToUint8Array = function(value) {
+    if (value instanceof Uint8Array) return value;
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    return new Uint8Array(value || []);
+  }, subtleNormalizeAlgorithm = function(algorithm) {
+    if (typeof algorithm === "string") return { name: algorithm };
+    if (!algorithm || typeof algorithm !== "object") return algorithm;
+    var normalized = {};
+    for (var key in algorithm) {
+      if (Object.prototype.hasOwnProperty.call(algorithm, key)) {
+        normalized[key] = algorithm[key];
+      }
+    }
+    if (algorithm.iv != null) {
+      normalized.iv = Array.from(subtleToUint8Array(algorithm.iv));
+    }
+    if (algorithm.additionalData != null) {
+      normalized.additionalData = Array.from(subtleToUint8Array(algorithm.additionalData));
+    }
+    if (algorithm.salt != null) {
+      normalized.salt = Array.from(subtleToUint8Array(algorithm.salt));
+    }
+    if (algorithm.info != null) {
+      normalized.info = Array.from(subtleToUint8Array(algorithm.info));
+    }
+    if (algorithm.hash != null) {
+      normalized.hash = typeof algorithm.hash === "string" ? { name: algorithm.hash } : algorithm.hash;
+    }
+    return normalized;
+  }, subtleAttachCryptoKey = function(key, fallbackAlgorithm) {
+    key.usages = key.usages || [];
+    key.algorithm = key.algorithm || fallbackAlgorithm;
+    key.extractable = !!key.extractable;
+    key[Symbol.toStringTag] = "CryptoKey";
+    return key;
+  }, subtleExportPayloadAsUint8Array = function(format, payload) {
+    if (format === "jwk") {
+      return new TextEncoder().encode(JSON.stringify(payload));
+    }
+    return subtleToUint8Array(payload);
+  };
+  subtleToUint8Array2 = subtleToUint8Array, subtleNormalizeAlgorithm2 = subtleNormalizeAlgorithm, subtleAttachCryptoKey2 = subtleAttachCryptoKey, subtleExportPayloadAsUint8Array2 = subtleExportPayloadAsUint8Array;
   globalThis.crypto = {
     getRandomValues: function(arr) {
       if (typeof globalThis.__cryptoRandomBytes === "function") {
@@ -10247,18 +10365,81 @@ if (typeof globalThis.crypto === "undefined") {
         var imported = globalThis.__subtleImportKey(
           format,
           Array.from(payload),
-          JSON.stringify(algorithm),
+          JSON.stringify(subtleNormalizeAlgorithm(algorithm)),
           !!extractable,
           JSON.stringify(keyUsages || [])
         );
         if (imported && imported.error) {
           return Promise.reject(new DOMException(imported.error, "NotSupportedError"));
         }
-        imported.usages = imported.usages || [];
-        imported.algorithm = imported.algorithm || algorithm;
-        imported.extractable = !!imported.extractable;
-        imported[Symbol.toStringTag] = "CryptoKey";
-        return Promise.resolve(imported);
+        return Promise.resolve(subtleAttachCryptoKey(imported, algorithm));
+      },
+      exportKey: function(format, key) {
+        if (typeof globalThis.__subtleExportKey !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        if (!key || !key.extractable) {
+          return Promise.reject(new DOMException("Key is not extractable", "InvalidAccessError"));
+        }
+        var exported = globalThis.__subtleExportKey(format, key.token);
+        if (exported && exported.error) {
+          return Promise.reject(new DOMException(exported.error, "NotSupportedError"));
+        }
+        if (exported && exported.jwk) {
+          return Promise.resolve(exported.jwk);
+        }
+        var bytes = new Uint8Array(exported && exported.bytes || []);
+        return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      },
+      generateKey: function(algorithm, extractable, keyUsages) {
+        if (typeof globalThis.__subtleGenerateKey !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var generated = globalThis.__subtleGenerateKey(
+          JSON.stringify(algorithm),
+          !!extractable,
+          JSON.stringify(keyUsages || [])
+        );
+        if (generated && generated.error) {
+          return Promise.reject(new DOMException(generated.error, "NotSupportedError"));
+        }
+        return Promise.resolve(subtleAttachCryptoKey(generated, algorithm));
+      },
+      deriveBits: function(algorithm, baseKey, length) {
+        if (typeof globalThis.__subtleDeriveBits !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var result = globalThis.__subtleDeriveBits(
+          JSON.stringify(subtleNormalizeAlgorithm(algorithm)),
+          baseKey.token,
+          length | 0
+        );
+        if (result && result.error) {
+          return Promise.reject(new DOMException(result.error, "OperationError"));
+        }
+        var bytes = new Uint8Array(result && result.bytes || []);
+        return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      },
+      deriveKey: function(algorithm, baseKey, derivedKeyAlgorithm, extractable, keyUsages) {
+        var normalized = subtleNormalizeAlgorithm(derivedKeyAlgorithm);
+        var length = normalized && normalized.length;
+        if (normalized && normalized.name === "HMAC" && (!length || length <= 0)) {
+          var hash = normalized.hash && normalized.hash.name;
+          if (hash === "SHA-1" || hash === "SHA-256") length = 512;
+          else if (hash === "SHA-384" || hash === "SHA-512") length = 1024;
+        }
+        if (!length || length % 8 !== 0) {
+          return Promise.reject(new DOMException("Derived key algorithm must provide a bit length", "OperationError"));
+        }
+        return this.deriveBits(algorithm, baseKey, length).then(function(bits) {
+          return globalThis.crypto.subtle.importKey(
+            "raw",
+            bits,
+            derivedKeyAlgorithm,
+            extractable,
+            keyUsages
+          );
+        });
       },
       sign: function(algorithm, key, data) {
         if (typeof globalThis.__subtleSign !== "function") {
@@ -10267,7 +10448,7 @@ if (typeof globalThis.crypto === "undefined") {
         var result = globalThis.__subtleSign(
           JSON.stringify(algorithm),
           key.token,
-          Array.from(data instanceof Uint8Array ? data : new Uint8Array(data))
+          Array.from(subtleToUint8Array(data))
         );
         if (result && result.error) {
           return Promise.reject(new DOMException(result.error, "OperationError"));
@@ -10282,23 +10463,81 @@ if (typeof globalThis.crypto === "undefined") {
         var result = globalThis.__subtleVerify(
           JSON.stringify(algorithm),
           key.token,
-          Array.from(signature instanceof Uint8Array ? signature : new Uint8Array(signature)),
-          Array.from(data instanceof Uint8Array ? data : new Uint8Array(data))
+          Array.from(subtleToUint8Array(signature)),
+          Array.from(subtleToUint8Array(data))
         );
         if (result && result.error) {
           return Promise.reject(new DOMException(result.error, "OperationError"));
         }
         return Promise.resolve(!!result.verified);
       },
-      encrypt: function() {
-        return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+      encrypt: function(algorithm, key, data) {
+        if (typeof globalThis.__subtleEncrypt !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var result = globalThis.__subtleEncrypt(
+          JSON.stringify(subtleNormalizeAlgorithm(algorithm)),
+          key.token,
+          Array.from(subtleToUint8Array(data))
+        );
+        if (result && result.error) {
+          return Promise.reject(new DOMException(result.error, "OperationError"));
+        }
+        var encrypted = new Uint8Array(result.bytes || []);
+        return Promise.resolve(encrypted.buffer.slice(encrypted.byteOffset, encrypted.byteOffset + encrypted.byteLength));
       },
-      decrypt: function() {
-        return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+      decrypt: function(algorithm, key, data) {
+        if (typeof globalThis.__subtleDecrypt !== "function") {
+          return Promise.reject(new Error("crypto.subtle is not supported in swift-bun"));
+        }
+        var result = globalThis.__subtleDecrypt(
+          JSON.stringify(subtleNormalizeAlgorithm(algorithm)),
+          key.token,
+          Array.from(subtleToUint8Array(data))
+        );
+        if (result && result.error) {
+          return Promise.reject(new DOMException(result.error, "OperationError"));
+        }
+        var decrypted = new Uint8Array(result.bytes || []);
+        return Promise.resolve(decrypted.buffer.slice(decrypted.byteOffset, decrypted.byteOffset + decrypted.byteLength));
+      },
+      wrapKey: function(format, key, wrappingKey, wrapAlgorithm) {
+        return this.exportKey(format, key).then(function(exported) {
+          return globalThis.crypto.subtle.encrypt(
+            wrapAlgorithm,
+            wrappingKey,
+            subtleExportPayloadAsUint8Array(format, exported)
+          );
+        });
+      },
+      unwrapKey: function(format, wrappedKey, unwrappingKey, unwrapAlgorithm, unwrappedKeyAlgorithm, extractable, keyUsages) {
+        return this.decrypt(unwrapAlgorithm, unwrappingKey, wrappedKey).then(function(decrypted) {
+          if (format === "jwk") {
+            var text = new TextDecoder().decode(decrypted);
+            return globalThis.crypto.subtle.importKey(
+              format,
+              JSON.parse(text),
+              unwrappedKeyAlgorithm,
+              extractable,
+              keyUsages
+            );
+          }
+          return globalThis.crypto.subtle.importKey(
+            format,
+            decrypted,
+            unwrappedKeyAlgorithm,
+            extractable,
+            keyUsages
+          );
+        });
       }
     }
   };
 }
+var subtleToUint8Array2;
+var subtleNormalizeAlgorithm2;
+var subtleAttachCryptoKey2;
+var subtleExportPayloadAsUint8Array2;
 if (typeof globalThis.structuredClone === "undefined") {
   let cloneBlobLike = function(value) {
     if (typeof File === "function" && value instanceof File) {

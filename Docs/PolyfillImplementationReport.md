@@ -30,11 +30,23 @@ Specification sources were fixed to:
 - `crypto.subtle` now implements:
   - `digest`
   - `importKey`
+  - `exportKey`
+  - `generateKey`
   - `sign`
   - `verify`
+  - `encrypt`
+  - `decrypt`
+  - `deriveBits`
+  - `deriveKey`
+  - `wrapKey`
+  - `unwrapKey`
 - supported subtle algorithms currently cover the common JWT/OAuth paths:
+  - `SHA-1`
   - `SHA-256`, `SHA-384`, `SHA-512`
   - `HMAC`
+  - `AES-GCM`
+  - `PBKDF2`
+  - `HKDF`
   - `RSASSA-PKCS1-v1_5`
   - `RSA-PSS`
   - `ECDSA`
@@ -60,7 +72,7 @@ Specification sources were fixed to:
 
 - `http.createServer`
 - `net.createServer`, `connect`, `createConnection`
-- `zlib.deflateSync`
+- `zlib` sync, callback, promise, and transform APIs for gzip/deflate/inflate/raw/unzip/brotli
 - `crypto.createPrivateKey`
 - `child_process` now exposes only a narrow compatibility surface:
   - `ChildProcess` identity
@@ -102,10 +114,10 @@ Specification sources were fixed to:
 | Area | Before | After |
 |------|--------|-------|
 | `fetch` | buffered response only | streaming `Response.body` |
-| `crypto.subtle` | reject/stub behavior | functional digest/import/sign/verify subset |
+| `crypto.subtle` | reject/stub behavior | digest/import/export/generate/sign/verify/encrypt/decrypt/derive/wrap subset |
 | `node:net` | stub | plain TCP client/server |
 | `node:http.createServer` | missing | minimal server implementation |
-| `node:zlib` | stub | `deflateSync` |
+| `node:zlib` | stub | gzip/deflate/inflate/raw/unzip/brotli sync + callback + promise + transform APIs |
 | `node:dns` | stub | `lookup` |
 | `node:v8` | no-op | heap stats shape |
 | `child_process` | mostly stub | limited native-command bridges + `ChildProcess` identity |
@@ -128,6 +140,7 @@ Focused tests were added or expanded in:
 - `Tests/BunRuntimeTests/FetchRoundtripTests.swift`
 - `Tests/BunRuntimeTests/TextCodecEdgeCaseTests.swift`
 - `Tests/BunRuntimeTests/CryptoEdgeCaseTests.swift`
+- `Tests/BunRuntimeTests/CryptoZlibE2ETests.swift`
 - `Tests/BunRuntimeTests/NodeCompatFSTests.swift`
 - `Tests/BunRuntimeTests/AsyncLocalStorageTests.swift`
 - `Tests/BunRuntimeTests/NodeCompatBasicTests.swift`
@@ -143,6 +156,7 @@ Focused execution covered:
 - `pipeThrough(new TextDecoderStream())`
 - `AbortSignal.any()`
 - JWT-relevant HMAC and key import paths
+- PBKDF2/HKDF derive and wrap/unwrap paths
 - `fs.watchFile`
 - callback `fs.rm`
 - `AsyncResource.*`
@@ -153,7 +167,7 @@ Focused execution covered:
 - `net` loopback
 - WebSocket open/message/close/error/ping coverage
 - WebSocket `run()`-mode end-to-end coverage, including CLI-style options and natural exit
-- `zlib.deflateSync`
+- `zlib` sync/callback/promise/transform coverage, including Brotli
 - `crypto.createPrivateKey`
 - `dns.lookup`
 - URL setters
@@ -163,7 +177,6 @@ Focused execution covered:
 
 - `crypto.subtle` is still a subset, not the full Web Crypto surface
 - `globalThis.WebSocket` is client-only; `proxy` and custom `tls` options are currently accepted and ignored
-- `node:zlib` currently exposes `deflateSync` only
 - `node:dns` currently exposes `lookup` only
 - `node:tls` remains unsupported
 - `node:http.createServer` is intentionally minimal and not a full Node server implementation

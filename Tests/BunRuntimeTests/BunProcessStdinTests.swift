@@ -17,7 +17,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("hello".data(using: .utf8)!)
         #expect(try await task.value == 0)
@@ -35,7 +35,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("line1\nline2".data(using: .utf8)!)
         #expect(try await task.value == 0)
@@ -49,7 +49,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput(nil)
         #expect(try await task.value == 0)
@@ -66,7 +66,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
 
         // Process should still be alive after 200ms (waiting for stdin)
         try await Task.sleep(for: .milliseconds(200))
@@ -88,11 +88,29 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("a".data(using: .utf8)!)
         try await Task.sleep(for: .milliseconds(10))
         p.sendInput("b".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinAsyncIteratorUnrefsAfterEOF() async throws {
+        let url = try tempBundle("""
+            (async function() {
+                for await (const _ of process.stdin) {
+                }
+                // Iterator completed on EOF. No explicit exit here:
+                // stdin keep-alive must be released so the process can exit naturally.
+            })();
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput(nil)
         #expect(try await task.value == 0)
     }
 
@@ -112,7 +130,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("hello".data(using: .utf8)!)
         try await Task.sleep(for: .milliseconds(10))
@@ -131,7 +149,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput("test".data(using: .utf8)!)
         #expect(try await task.value == 0)
@@ -147,7 +165,7 @@ struct BunProcessStdinTests {
             }, 50);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdinListenerCount() async throws {
@@ -162,7 +180,7 @@ struct BunProcessStdinTests {
             process.exit(c === 2 && c2 === 1 ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdinSetRawMode() async throws {
@@ -172,7 +190,7 @@ struct BunProcessStdinTests {
             process.exit(result === process.stdin ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdinKeepsProcessAlive() async throws {
@@ -186,7 +204,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
 
         // Wait 200ms -- if process exited already, task.value would be available
         try await Task.sleep(for: .milliseconds(200))
@@ -200,7 +218,9 @@ struct BunProcessStdinTests {
         let url = try tempBundle("""
             setTimeout(async function() {
                 for await (const chunk of process.stdin) {
-                    process.exit(chunk === 'go' ? 0 : 1);
+                    setTimeout(function() {
+                        process.exit(chunk === 'go' ? 0 : 1);
+                    }, 0);
                     return;
                 }
                 process.exit(1);
@@ -208,10 +228,132 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
 
         try await Task.sleep(for: .milliseconds(20))
         p.sendInput("go".data(using: .utf8)!)
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinBufferedUntilRuntimeIsRunning() async throws {
+        let url = try tempBundle("""
+            var received = false;
+            process.stdin.on('data', function(chunk) {
+                received = true;
+                setTimeout(function() {
+                    process.exit(chunk === 'boot-sequence' ? 0 : 1);
+                }, 0);
+            });
+            setTimeout(function() {
+                if (!received) process.exit(2);
+            }, 300);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        p.sendInput("boot-sequence".data(using: .utf8)!)
+
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinBufferedUntilListenerAttachesAfterAsyncStartup() async throws {
+        let url = try tempBundle("""
+            var received = false;
+            setTimeout(function() {
+                process.stdin.on('data', function(chunk) {
+                    received = true;
+                    setTimeout(function() {
+                        process.exit(chunk === 'delayed-attach' ? 0 : 1);
+                    }, 0);
+                });
+            }, 50);
+            setTimeout(function() {
+                if (!received) process.exit(2);
+            }, 300);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        p.sendInput("delayed-attach".data(using: .utf8)!)
+
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinCanBeBufferedBeforeAnyRefAndReadLater() async throws {
+        let url = try tempBundle("""
+            setTimeout(function() {
+                var chunk = process.stdin.read();
+                setTimeout(function() {
+                    process.exit(chunk === 'prefetched' ? 0 : 1);
+                }, 0);
+            }, 50);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        p.sendInput("prefetched".data(using: .utf8)!)
+
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinBufferedUntilImportedProcessListenerAttaches() async throws {
+        let url = try tempBundle("""
+            import nodeProcess from 'node:process';
+
+            var received = false;
+            setTimeout(function() {
+                nodeProcess.stdin.on('data', function(chunk) {
+                    received = true;
+                    setTimeout(function() {
+                        process.exit(chunk === 'imported-process' ? 0 : 1);
+                    }, 0);
+                });
+            }, 50);
+            setTimeout(function() {
+                if (!received) process.exit(2);
+            }, 300);
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        p.sendInput("imported-process".data(using: .utf8)!)
+
+        #expect(try await task.value == 0)
+    }
+
+    @Test func stdinBufferedUntilWrappedAsyncReaderConsumesDuringStartupPromise() async throws {
+        let url = try tempBundle("""
+            class WrappedReader {
+                constructor(input) {
+                    this.input = input;
+                }
+
+                async *read() {
+                    for await (const chunk of this.input) {
+                        yield chunk;
+                    }
+                }
+            }
+
+            globalThis.__swiftBunStartupPromise = (async function() {
+                var reader = new WrappedReader(process.stdin);
+                for await (const chunk of reader.read()) {
+                    process.exit(chunk === 'wrapped-startup' ? 0 : 1);
+                    return;
+                }
+                process.exit(2);
+            })();
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        p.sendInput("wrapped-startup".data(using: .utf8)!)
+
         #expect(try await task.value == 0)
     }
 
@@ -221,7 +363,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
 
         try await Task.sleep(for: .milliseconds(200))
 
@@ -237,7 +379,7 @@ struct BunProcessStdinTests {
             }, 20);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdinUnrefOnEndWithListener() async throws {
@@ -247,7 +389,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput(nil)
         #expect(try await task.value == 0)
@@ -261,7 +403,7 @@ struct BunProcessStdinTests {
         """)
         defer { try? FileManager.default.removeItem(at: url) }
         let p = BunProcess(bundle: url)
-        let task = Task { try await p.run() }
+        let task = Task { try await TestProcessSupport.run(p) }
         try await Task.sleep(for: .milliseconds(50))
         p.sendInput(nil)
         #expect(try await task.value == 0)
@@ -277,6 +419,6 @@ struct BunProcessStdinTests {
             // No active handles -> exit naturally
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 }

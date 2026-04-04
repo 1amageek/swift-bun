@@ -2,6 +2,8 @@
 
 A Swift package that runs Bun-built JavaScript bundles natively on iOS and macOS via JavaScriptCore.
 
+Status: `0.1.0` is intended as an experimental compatibility release. The runtime is already useful for a real subset of Bun/Node workloads, but it does not claim full Bun or Node parity.
+
 ## Overview
 
 swift-bun provides a Node.js/Bun compatibility layer on top of JavaScriptCore, enabling JavaScript code bundled with Bun (or esbuild) to execute on Apple platforms without embedding a full Node.js runtime.
@@ -47,7 +49,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-bun.git", branch: "main"),
+    .package(url: "https://github.com/1amageek/swift-bun.git", from: "0.1.0"),
 ],
 targets: [
     .target(
@@ -205,7 +207,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | Symbol.dispose / asyncDispose | ✅ Full | |
 | WebSocket | ✅ Basic | Runtime-installed client backed by `URLSessionWebSocketTask`; `run()`-mode E2E covered |
 | Worker | ⚠️ Stub | Throws |
-| crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `sign`, `verify` for common algorithms |
+| crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `exportKey`, `generateKey`, `sign`, `verify`, `encrypt`, `decrypt`, `deriveBits`, `deriveKey`, `wrapKey`, `unwrapKey` for HMAC, AES-GCM, PBKDF2, HKDF, and imported RSA/ECDSA signing keys |
 
 ### Node.js Modules (Layer 1)
 
@@ -226,7 +228,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | `node:child_process` | ⚠️ Limited | No general subprocess support. Native bridges may emulate specific commands. |
 | `node:net` | ✅ Basic | Plain TCP `createServer`, `connect`, `createConnection` |
 | `node:tls` | ⚠️ Stub | TLS not implemented |
-| `node:zlib` | ⚠️ Partial | `deflateSync` |
+| `node:zlib` | ⚠️ Partial | gzip/deflate/inflate/raw/unzip/brotli sync + callback + promise + transform APIs |
 | `node:dns` | ⚠️ Basic | `lookup` |
 | `node:v8` | ⚠️ Basic | `getHeapSpaceStatistics` shape |
 
@@ -251,11 +253,11 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 ## Current Limitations
 
 - `crypto.getRandomValues` still uses a non-cryptographic fallback. Use `require('node:crypto')` or `crypto.subtle` for security-sensitive work.
-- `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
+- `crypto.subtle` now covers `digest`, `importKey`, `exportKey`, `generateKey`, `sign`, `verify`, `encrypt`, `decrypt`, `deriveBits`, `deriveKey`, `wrapKey`, and `unwrapKey` for HMAC, AES-GCM, PBKDF2, HKDF, and imported RSA/ECDSA signing keys. It still does not cover the full Web Crypto surface.
 - `globalThis.WebSocket` is client-only. Text/binary messaging, headers, subprotocol negotiation, close events, ping/pong, and process-mode keep-alive are supported, but `proxy` and custom `tls` options are currently accepted and ignored.
 - server-side WebSocket APIs, `node:tls`, `node:http2`, `Worker`, and native addons remain unsupported.
 - `node:child_process` does not provide general subprocess execution. Use native bridges for specific host capabilities instead.
-- `node:zlib` currently exposes `deflateSync` only.
+- `node:zlib` currently covers gzip/deflate/inflate/raw/unzip/brotli sync APIs, callback APIs, promise APIs, and transform constructors. It is still a compatibility subset rather than full Node zlib parity.
 - `node:dns` currently exposes `lookup` only.
 - `http.createServer` and `node:net` are intentionally minimal and focused on local server/client use cases.
 

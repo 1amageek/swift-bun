@@ -14,7 +14,7 @@ struct BunProcessAsyncTests {
             });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func promiseWithTimeout() async throws {
@@ -26,7 +26,7 @@ struct BunProcessAsyncTests {
             });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func asyncAwait() async throws {
@@ -39,7 +39,7 @@ struct BunProcessAsyncTests {
             })();
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func naturalExitWaitsForPromiseContinuationAfterTimer() async throws {
@@ -61,8 +61,8 @@ struct BunProcessAsyncTests {
             }
         }
 
-        #expect(try await process.run() == 0)
-        collect.cancel()
+        #expect(try await TestProcessSupport.run(process) == 0)
+        _ = await collect.result
         #expect(lines.values.contains("after-await\n"))
     }
 
@@ -73,7 +73,7 @@ struct BunProcessAsyncTests {
             setTimeout(function() { process.exit(called ? 0 : 1); }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func nextTickWithoutTimer() async throws {
@@ -81,7 +81,7 @@ struct BunProcessAsyncTests {
             process.nextTick(function() { process.exit(0); });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func microtask() async throws {
@@ -91,7 +91,7 @@ struct BunProcessAsyncTests {
             setTimeout(function() { process.exit(called ? 0 : 1); }, 10);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func microtaskWithoutTimer() async throws {
@@ -99,7 +99,7 @@ struct BunProcessAsyncTests {
             queueMicrotask(function() { process.exit(0); });
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func schedulerOrdering() async throws {
@@ -129,8 +129,8 @@ struct BunProcessAsyncTests {
             }
         }
 
-        _ = try await process.run()
-        collect.cancel()
+        _ = try await TestProcessSupport.run(process)
+        _ = await collect.result
         #expect(lines.values.joined() == #"["sync","nextTick","microtask","timer"]"#)
     }
 
@@ -158,7 +158,7 @@ struct BunProcessAsyncTests {
             }
         }
 
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func nextTickStormDoesNotStarveFetch() async throws {
@@ -196,7 +196,7 @@ struct BunProcessAsyncTests {
                 }
             }
 
-            #expect(try await BunProcess(bundle: url).run() == 0)
+            #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
         }
     }
 
@@ -234,7 +234,7 @@ struct BunProcessAsyncTests {
             }
         }
 
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func hostCallbackBudgetIsConfigurable() async throws {
@@ -258,7 +258,11 @@ struct BunProcessAsyncTests {
         }
 
         func runAndCollectBudgetLogs(hostBudget: Int) async throws -> [String] {
-            let process = BunProcess(bundle: url, hostCallbackBudgetPerTurn: hostBudget)
+            let process = BunProcess(
+                bundle: url,
+                diagnosticsEnabled: true,
+                hostCallbackBudgetPerTurn: hostBudget
+            )
             let outputTask = Task { () -> [String] in
                 var lines: [String] = []
                 for await line in process.output {
@@ -267,7 +271,7 @@ struct BunProcessAsyncTests {
                 return lines
             }
 
-            let exitCode = try await process.run()
+            let exitCode = try await TestProcessSupport.run(process)
             let output = await outputTask.value
             #expect(exitCode == 0)
             return output

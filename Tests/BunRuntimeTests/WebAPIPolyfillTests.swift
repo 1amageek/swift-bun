@@ -6,6 +6,11 @@ import TestHeartbeat
 
 @Suite("Web API Polyfills", .serialized, .heartbeat)
 struct WebAPIPolyfillTests {
+    private static let rsaPrivateKeyPKCS8Base64 = "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC7Yqh4V4VB/yDoHcc08pNdZUY0hM1SmgjbW7ruOxi5y0Xptm87pjqIr2TysL4NB1rBwHNKxuHQGaxxYsjsWwdqwVKFMxMwKscqAtUnSaY85Hwg9QIY0HRCySlpgcPLVqSYGZA+G4s70LK37Z7Zcvg/TvfR2uRQdLxKIfuWijkkcH6vW6hBM2fQxfN+uj4DgLki51B5V8jsiPe4+6FwGEiV5lSBXjmhoEfuUhDERhzwd1ah02MdNNuZxbnpwNLnUk0mNRR41QkZuVtrIsF2NqkDHKYhR9uB8zClEukhgoAVTrOKmv+uCN/SUyYsQo9hYeGUZPfM4enH/oHpOXOHl4vjAgMBAAECggEAE4mAyTNO2IeyNaFNMM8N4FH71OP3yGH5BG32+nm85To1at2zkUOOnMu0ub0Fw7P9mW/oVWaRCrJykUvcaRBAoLfRU8P0fzQmmdG7yaHbLEQiUQlak53AUWpJ4A9Ai8XX2Wfo6yDSDoV+7MBgrIlZKrigDAhHf7/8FbqfUZ3NwWevZ0kAXe/kga0FU44WMZzatFJzuC+jKntJTiBFYOxanX9Yn/QkOtHQONRjj5uWQMKVkTE8eDirqkhQ0tz85ds8UlTQgldWA+xdhCcXFA5OKnHuQJEOe5jmHVjANNhyIkdmYpgXqWwZwGHg+gO8ZNGtW7MgnIK9OGxxkFxwmSQ+WQKBgQDufXIk0vDo61IPqoFTqxs3hgnIVJ10w579g5Lp1/qCDRm2c9s7sHtjb3VEmPpl5Z5pLVl++1OarmBQyjhRJBTV07G+EomSk4p3XXcLDusGlTmUDmyYLCHyZChR2HIYwTn9p2ZovojlyGYZjD7jqGexKkUltMrN5vKJDOXdYMp/JwKBgQDJJKv4ljm2UtTZlFQf5PbcDBgDdIP0GDACBf5yY3zXli0CyRvheEeVdQ+pI6W2NIPLVSAGUirW7p5twx0QxfhWCC1JKySZId/cNCmMsv+SXbLKC/0hN6S+yaHQD3SfuVRWzQuq/2TiAWXS5SYC2I7Onbuzr5Yp4o7Wsx1WoE6C5QKBgBdn+GvkyAAUGFmxQkAT6vfoD825gDqVeGUpJKIOsGdTIdLmS/3vtCxuI/Q3j1uwzXtFGCN+RxZHRuym7CAKioDx5d/hsd7Q3CYa5jQPosFio+QEBmRo8Gv5qHtf4tLLJAXhCAv/py/mGx8mxIVTYdnhbCfnNoA+yk7pFSZE+ZrBAoGANJC/3IQt6ub0tzPbVEZ6+QC0GdsOTPExQqYcW/qB+rlFZA/4mFDdrEJeaF5nhRluQ+ooJ1670VWk05yE8Qg7oQgcBZ4fv2Ep5ps/LITu42pXOhQt/8tR44ZAImaXnNJLJzAI15RM4f9pg9bcuyurDnYMQqYlgSazG4rNpQDZ470CgYBONO3eWCahVCfitgmwNR54yK2t4Mcf+1MUBUxJpiEIgUgEoutPfdUsy9ux/R+nLGTsRoCNwUN1fHE1wS+EMNctbDyl4BaAC9+FYg6tyZGlHqjDqNx7ml+lpIku8ZYcjNQNC4DxMkhEM+qn20Cx9VsYkMDZupqbkH7X/4BFMGGCGw=="
+    private static let rsaPublicKeySPKIBase64 = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu2KoeFeFQf8g6B3HNPKTXWVGNITNUpoI21u67jsYuctF6bZvO6Y6iK9k8rC+DQdawcBzSsbh0BmscWLI7FsHasFShTMTMCrHKgLVJ0mmPOR8IPUCGNB0QskpaYHDy1akmBmQPhuLO9Cyt+2e2XL4P0730drkUHS8SiH7loo5JHB+r1uoQTNn0MXzfro+A4C5IudQeVfI7Ij3uPuhcBhIleZUgV45oaBH7lIQxEYc8HdWodNjHTTbmcW56cDS51JNJjUUeNUJGblbayLBdjapAxymIUfbgfMwpRLpIYKAFU6zipr/rgjf0lMmLEKPYWHhlGT3zOHpx/6B6Tlzh5eL4wIDAQAB"
+    private static let ecPrivateKeyPKCS8Base64 = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgx9oBUvN2MVeS4/hdh/2jzHDn7FwyjHslml2aD4MEWfyhRANCAAQgOqGThTM+LHkwFHJ6JRoAf9V91oEOYonwzmvgp0/ZYU5z5/GDnmIMn/JGYApnBW+VYUSuvHnKvvGP2lN/J8Bx"
+    private static let ecPublicKeySPKIBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIDqhk4UzPix5MBRyeiUaAH/VfdaBDmKJ8M5r4KdP2WFOc+fxg55iDJ/yRmAKZwVvlWFErrx5yr7xj9pTfyfAcQ=="
+
     private func evaluate(_ js: String) async throws -> JSResult {
         try await TestProcessSupport.withLoadedProcess { process in
             try await process.evaluate(js: js)
@@ -27,32 +32,36 @@ struct WebAPIPolyfillTests {
     private func withServer(
         _ body: (String) async throws -> Void
     ) async throws {
-        let server = try await LocalHTTPTestServer.start()
-        do {
-            try await body(server.baseURL)
-            try await server.shutdown()
-        } catch {
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let server = try await LocalHTTPTestServer.start()
             do {
+                try await body(server.baseURL)
                 try await server.shutdown()
             } catch {
+                do {
+                    try await server.shutdown()
+                } catch {
+                }
+                throw error
             }
-            throw error
         }
     }
 
     private func withWebSocketServer(
         _ body: (LocalWebSocketTestServer) async throws -> Void
     ) async throws {
-        let server = try await LocalWebSocketTestServer.start()
-        do {
-            try await body(server)
-            try await server.shutdown()
-        } catch {
+        try await TestProcessSupport.withExclusiveRuntimeAccess {
+            let server = try await LocalWebSocketTestServer.start()
             do {
+                try await body(server)
                 try await server.shutdown()
             } catch {
+                do {
+                    try await server.shutdown()
+                } catch {
+                }
+                throw error
             }
-            throw error
         }
     }
 
@@ -721,6 +730,26 @@ struct WebAPIPolyfillTests {
         #expect(result.stringValue == "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81")
     }
 
+    @Test("crypto.subtle.digest supports SHA-1 SHA-384 and SHA-512")
+    func cryptoSubtleDigestAlgorithmMatrix() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                async function hex(name) {
+                    var buffer = await crypto.subtle.digest(name, new TextEncoder().encode('digest-matrix'));
+                    return Array.from(new Uint8Array(buffer)).map(function(byte) {
+                        return ('0' + byte.toString(16)).slice(-2);
+                    }).join('');
+                }
+                return JSON.stringify({
+                    sha1: await hex('SHA-1'),
+                    sha384: await hex('SHA-384'),
+                    sha512: await hex('SHA-512')
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"sha1":"4bdcb52b4d97d4d90faf0bbcd389da9b4faa80de","sha384":"76b7ab95488b12f1e90ac40373d03aec36fa1ffe6401511426aa974bfcb3140dfb2aa8c2ec4bab2ac21b758a4cdfca38","sha512":"bd4e36ff790c73c424efac3d97f5a270206de968a386ed46678fd42ecc3580d8eeac961230e5f640327a02cac8ad91744eed275b1539159fea824bef2cf43393"}"#)
+    }
+
     @Test("crypto.subtle imports HMAC key and signs/verifies")
     func cryptoSubtleHMAC() async throws {
         let result = try await evaluateAsync("""
@@ -745,6 +774,449 @@ struct WebAPIPolyfillTests {
             })()
         """)
         #expect(result.stringValue == #"{"type":"secret","algorithm":"HMAC","usages":"sign,verify","verified":true,"signatureLength":32}"#)
+    }
+
+    @Test("crypto.subtle generates and exports HMAC keys")
+    func cryptoSubtleGenerateAndExportHMAC() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var key = await crypto.subtle.generateKey(
+                    { name: 'HMAC', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign', 'verify']
+                );
+                var raw = await crypto.subtle.exportKey('raw', key);
+                var jwk = await crypto.subtle.exportKey('jwk', key);
+                return JSON.stringify({
+                    type: key.type,
+                    length: key.algorithm.length,
+                    rawLength: new Uint8Array(raw).length,
+                    alg: jwk.alg,
+                    kty: jwk.kty
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"type":"secret","length":512,"rawLength":64,"alg":"HS256","kty":"oct"}"#)
+    }
+
+    @Test("crypto.subtle imports HMAC JWK and verify returns false for mismatched data")
+    func cryptoSubtleHMACJWKAndMismatchVerify() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var key = await crypto.subtle.importKey(
+                    'jwk',
+                    {
+                        kty: 'oct',
+                        k: 'c2VjcmV0LWp3ay1rZXk',
+                        alg: 'HS256',
+                        ext: true
+                    },
+                    { name: 'HMAC', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign', 'verify']
+                );
+                var data = new TextEncoder().encode('signed');
+                var other = new TextEncoder().encode('tampered');
+                var signature = await crypto.subtle.sign({ name: 'HMAC' }, key, data);
+                var same = await crypto.subtle.verify({ name: 'HMAC' }, key, signature, data);
+                var mismatch = await crypto.subtle.verify({ name: 'HMAC' }, key, signature, other);
+                return JSON.stringify({
+                    same: same,
+                    mismatch: mismatch,
+                    rawLength: new Uint8Array(await crypto.subtle.exportKey('raw', key)).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"same":true,"mismatch":false,"rawLength":14}"#)
+    }
+
+    @Test("crypto.subtle encrypts and decrypts with AES-GCM")
+    func cryptoSubtleAESGCMEncryptDecrypt() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var key = await crypto.subtle.generateKey(
+                    { name: 'AES-GCM', length: 256 },
+                    true,
+                    ['encrypt', 'decrypt']
+                );
+                var iv = new Uint8Array(12);
+                crypto.getRandomValues(iv);
+                var aad = new Uint8Array([9, 8, 7, 6]);
+                var plaintext = new TextEncoder().encode('hello aes-gcm');
+                var ciphertext = await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: iv, additionalData: aad, tagLength: 128 },
+                    key,
+                    plaintext
+                );
+                var decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: iv, additionalData: aad, tagLength: 128 },
+                    key,
+                    ciphertext
+                );
+                var raw = await crypto.subtle.exportKey('raw', key);
+                return JSON.stringify({
+                    decrypted: new TextDecoder().decode(decrypted),
+                    ciphertextLength: new Uint8Array(ciphertext).length,
+                    rawLength: new Uint8Array(raw).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"decrypted":"hello aes-gcm","ciphertextLength":29,"rawLength":32}"#)
+    }
+
+    @Test("crypto.subtle exportKey rejects non-extractable keys")
+    func cryptoSubtleExportRejectsNonExtractableKey() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var key = await crypto.subtle.importKey(
+                    'raw',
+                    new TextEncoder().encode('secret-key'),
+                    { name: 'HMAC', hash: { name: 'SHA-256' } },
+                    false,
+                    ['sign', 'verify']
+                );
+                try {
+                    await crypto.subtle.exportKey('raw', key);
+                    return 'missing';
+                } catch (error) {
+                    return JSON.stringify({
+                        name: error && error.name,
+                        message: error && error.message
+                    });
+                }
+            })()
+        """)
+        #expect(result.stringValue == #"{"name":"InvalidAccessError","message":"Key is not extractable"}"#)
+    }
+
+    @Test("crypto.subtle decrypt rejects tampered AES-GCM payloads")
+    func cryptoSubtleAESGCMRejectsTampering() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var key = await crypto.subtle.generateKey(
+                    { name: 'AES-GCM', length: 128 },
+                    true,
+                    ['encrypt', 'decrypt']
+                );
+                var iv = new Uint8Array(12);
+                crypto.getRandomValues(iv);
+                var aad = new Uint8Array([1, 2, 3]);
+                var ciphertext = await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: iv, additionalData: aad, tagLength: 128 },
+                    key,
+                    new TextEncoder().encode('tamper check')
+                );
+                try {
+                    await crypto.subtle.decrypt(
+                        { name: 'AES-GCM', iv: iv, additionalData: new Uint8Array([1, 2, 4]), tagLength: 128 },
+                        key,
+                        ciphertext
+                    );
+                    return 'missing';
+                } catch (error) {
+                    return JSON.stringify({
+                        name: error && error.name,
+                        hasMessage: !!(error && error.message)
+                    });
+                }
+            })()
+        """)
+        #expect(result.stringValue == #"{"name":"OperationError","hasMessage":true}"#)
+    }
+
+    @Test("crypto.subtle supports AES-GCM JWK import and export")
+    func cryptoSubtleAESGCMJWKImportExport() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var generated = await crypto.subtle.generateKey(
+                    { name: 'AES-GCM', length: 192 },
+                    true,
+                    ['encrypt', 'decrypt']
+                );
+                var jwk = await crypto.subtle.exportKey('jwk', generated);
+                var imported = await crypto.subtle.importKey(
+                    'jwk',
+                    jwk,
+                    { name: 'AES-GCM' },
+                    true,
+                    ['encrypt', 'decrypt']
+                );
+                var raw = await crypto.subtle.exportKey('raw', imported);
+                return JSON.stringify({
+                    alg: jwk.alg,
+                    importedLength: imported.algorithm.length,
+                    rawLength: new Uint8Array(raw).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"alg":"A192GCM","importedLength":192,"rawLength":24}"#)
+    }
+
+    @Test("crypto.subtle deriveBits supports PBKDF2 and HKDF")
+    func cryptoSubtleDeriveBits() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                function hex(buffer) {
+                    return Array.from(new Uint8Array(buffer)).map(function(byte) {
+                        return ('0' + byte.toString(16)).slice(-2);
+                    }).join('');
+                }
+
+                var pbkdf2Key = await crypto.subtle.importKey(
+                    'raw',
+                    new TextEncoder().encode('password'),
+                    'PBKDF2',
+                    false,
+                    ['deriveBits']
+                );
+                var pbkdf2Bits = await crypto.subtle.deriveBits(
+                    {
+                        name: 'PBKDF2',
+                        hash: 'SHA-256',
+                        salt: new TextEncoder().encode('salt'),
+                        iterations: 1000
+                    },
+                    pbkdf2Key,
+                    256
+                );
+
+                var hkdfKey = await crypto.subtle.importKey(
+                    'raw',
+                    new TextEncoder().encode('hkdf-key'),
+                    'HKDF',
+                    false,
+                    ['deriveBits']
+                );
+                var hkdfBits = await crypto.subtle.deriveBits(
+                    {
+                        name: 'HKDF',
+                        hash: 'SHA-256',
+                        salt: new TextEncoder().encode('hkdf-salt'),
+                        info: new TextEncoder().encode('hkdf-info')
+                    },
+                    hkdfKey,
+                    256
+                );
+
+                return JSON.stringify({
+                    pbkdf2: hex(pbkdf2Bits),
+                    hkdf: hex(hkdfBits)
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"pbkdf2":"632c2812e46d4604102ba7618e9d6d7d2f8128f6266b4a03264d2a0460b7dcb3","hkdf":"ea1e78703b853d8d8e08a3a196b0e8a8b812e5a1a039ad5661bef1f14d4042fc"}"#)
+    }
+
+    @Test("crypto.subtle deriveKey and wrap/unwrap roundtrip work")
+    func cryptoSubtleDeriveKeyAndWrapUnwrap() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var baseKey = await crypto.subtle.importKey(
+                    'raw',
+                    new TextEncoder().encode('password'),
+                    'PBKDF2',
+                    false,
+                    ['deriveKey']
+                );
+                var wrappingKey = await crypto.subtle.deriveKey(
+                    {
+                        name: 'PBKDF2',
+                        hash: 'SHA-256',
+                        salt: new TextEncoder().encode('salt'),
+                        iterations: 500
+                    },
+                    baseKey,
+                    { name: 'AES-GCM', length: 128 },
+                    true,
+                    ['wrapKey', 'unwrapKey', 'encrypt', 'decrypt']
+                );
+
+                var wrappedTarget = await crypto.subtle.generateKey(
+                    { name: 'HMAC', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign', 'verify']
+                );
+                var iv = new Uint8Array(12);
+                crypto.getRandomValues(iv);
+
+                var wrapped = await crypto.subtle.wrapKey(
+                    'raw',
+                    wrappedTarget,
+                    wrappingKey,
+                    { name: 'AES-GCM', iv: iv, tagLength: 128 }
+                );
+
+                var unwrapped = await crypto.subtle.unwrapKey(
+                    'raw',
+                    wrapped,
+                    wrappingKey,
+                    { name: 'AES-GCM', iv: iv, tagLength: 128 },
+                    { name: 'HMAC', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign', 'verify']
+                );
+
+                var data = new TextEncoder().encode('wrapped-hmac');
+                var signature = await crypto.subtle.sign({ name: 'HMAC' }, unwrapped, data);
+                var verified = await crypto.subtle.verify({ name: 'HMAC' }, unwrapped, signature, data);
+
+                return JSON.stringify({
+                    wrappedLength: new Uint8Array(wrapped).length,
+                    verified: verified,
+                    unwrapType: unwrapped.type
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""verified":true"#))
+        #expect(result.stringValue.contains(#""unwrapType":"secret""#))
+    }
+
+    @Test("crypto.subtle imports RSA keys for PKCS1v1_5 signing and verification")
+    func cryptoSubtleRSAPKCS1SignVerify() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var privateKey = await crypto.subtle.importKey(
+                    'pkcs8',
+                    Uint8Array.from(Buffer.from('\(Self.rsaPrivateKeyPKCS8Base64)', 'base64')),
+                    { name: 'RSASSA-PKCS1-V1_5', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign']
+                );
+                var publicKey = await crypto.subtle.importKey(
+                    'spki',
+                    Uint8Array.from(Buffer.from('\(Self.rsaPublicKeySPKIBase64)', 'base64')),
+                    { name: 'RSASSA-PKCS1-V1_5', hash: { name: 'SHA-256' } },
+                    true,
+                    ['verify']
+                );
+                var data = new TextEncoder().encode('rsa-pkcs1');
+                var signature = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-V1_5', hash: { name: 'SHA-256' } }, privateKey, data);
+                var verified = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-V1_5', hash: { name: 'SHA-256' } }, publicKey, signature, data);
+                var exportedPublic = await crypto.subtle.exportKey('spki', publicKey);
+                return JSON.stringify({
+                    verified: verified,
+                    signatureLength: new Uint8Array(signature).length,
+                    exportedLength: new Uint8Array(exportedPublic).length
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""verified":true"#))
+        #expect(result.stringValue.contains(#""signatureLength":256"#))
+        #expect(result.stringValue.contains(#""exportedLength":294"#))
+    }
+
+    @Test("crypto.subtle imports RSA keys for PSS signing and verification")
+    func cryptoSubtleRSAPSSSignVerify() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var privateKey = await crypto.subtle.importKey(
+                    'pkcs8',
+                    Uint8Array.from(Buffer.from('\(Self.rsaPrivateKeyPKCS8Base64)', 'base64')),
+                    { name: 'RSA-PSS', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign']
+                );
+                var publicKey = await crypto.subtle.importKey(
+                    'spki',
+                    Uint8Array.from(Buffer.from('\(Self.rsaPublicKeySPKIBase64)', 'base64')),
+                    { name: 'RSA-PSS', hash: { name: 'SHA-256' } },
+                    true,
+                    ['verify']
+                );
+                var data = new TextEncoder().encode('rsa-pss');
+                var signature = await crypto.subtle.sign({ name: 'RSA-PSS', hash: { name: 'SHA-256' }, saltLength: 32 }, privateKey, data);
+                var verified = await crypto.subtle.verify({ name: 'RSA-PSS', hash: { name: 'SHA-256' }, saltLength: 32 }, publicKey, signature, data);
+                return JSON.stringify({
+                    verified: verified,
+                    signatureLength: new Uint8Array(signature).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"verified":true,"signatureLength":256}"#)
+    }
+
+    @Test("crypto.subtle imports ECDSA keys for signing and verification")
+    func cryptoSubtleECDSASignVerify() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var privateKey = await crypto.subtle.importKey(
+                    'pkcs8',
+                    Uint8Array.from(Buffer.from('\(Self.ecPrivateKeyPKCS8Base64)', 'base64')),
+                    { name: 'ECDSA', namedCurve: 'P-256' },
+                    true,
+                    ['sign']
+                );
+                var publicKey = await crypto.subtle.importKey(
+                    'spki',
+                    Uint8Array.from(Buffer.from('\(Self.ecPublicKeySPKIBase64)', 'base64')),
+                    { name: 'ECDSA', namedCurve: 'P-256' },
+                    true,
+                    ['verify']
+                );
+                var data = new TextEncoder().encode('ecdsa-p256');
+                var signature = await crypto.subtle.sign({ name: 'ECDSA', hash: { name: 'SHA-256' } }, privateKey, data);
+                var verified = await crypto.subtle.verify({ name: 'ECDSA', hash: { name: 'SHA-256' } }, publicKey, signature, data);
+                var exported = await crypto.subtle.exportKey('spki', publicKey);
+                return JSON.stringify({
+                    verified: verified,
+                    signatureLength: new Uint8Array(signature).length > 0,
+                    exportedLength: new Uint8Array(exported).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"verified":true,"signatureLength":true,"exportedLength":91}"#)
+    }
+
+    @Test("crypto.subtle rejects exporting asymmetric keys in a different format")
+    func cryptoSubtleAsymmetricExportRejectsDifferentFormat() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var privateKey = await crypto.subtle.importKey(
+                    'pkcs8',
+                    Uint8Array.from(Buffer.from('\(Self.rsaPrivateKeyPKCS8Base64)', 'base64')),
+                    { name: 'RSASSA-PKCS1-V1_5', hash: { name: 'SHA-256' } },
+                    true,
+                    ['sign']
+                );
+                try {
+                    await crypto.subtle.exportKey('spki', privateKey);
+                    return 'missing';
+                } catch (error) {
+                    return JSON.stringify({
+                        name: error && error.name,
+                        message: error && error.message
+                    });
+                }
+            })()
+        """)
+        #expect(result.stringValue == #"{"name":"NotSupportedError","message":"Key was imported as pkcs8 and cannot be exported as spki"}"#)
+    }
+
+    @Test("crypto.subtle rejects unsupported algorithms and API misuse")
+    func cryptoSubtleRejectsUnsupportedUsage() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var errors = [];
+                try {
+                    await crypto.subtle.generateKey({ name: 'AES-GCM', length: 64 }, true, ['encrypt']);
+                } catch (error) {
+                    errors.push(error.name);
+                }
+                try {
+                    await crypto.subtle.deriveBits({ name: 'PBKDF2' }, {}, 128);
+                } catch (error) {
+                    errors.push(error.message);
+                }
+                var aesKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, true, ['encrypt', 'decrypt']);
+                try {
+                    await crypto.subtle.sign({ name: 'HMAC' }, aesKey, new Uint8Array([1]));
+                } catch (error) {
+                    errors.push(error.name);
+                }
+                return JSON.stringify(errors);
+            })()
+        """)
+        #expect(result.stringValue == #"["NotSupportedError","Unknown key","OperationError"]"#)
     }
 }
 

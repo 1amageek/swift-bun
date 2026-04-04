@@ -11,6 +11,19 @@ swift build
 # Run all tests (with timeout)
 swift test
 
+# Run a bounded test and kill stale helpers on timeout
+scripts/swift-test-timeout.sh 30 --filter "BunProcess"
+
+# Repeat a suite under hang guard
+scripts/swift-test-hang-guard.sh --repeats 3 --timeout 30 --build-timeout 120 -- \
+  --filter "BunProcessAsyncTests"
+
+# Run the 0.1.0 release verification lane
+scripts/release-check-0.1.0.sh
+
+# Check for sync shutdown in deinit before broad runs
+scripts/check-sync-shutdown-in-deinit.sh Sources Tests
+
 # Run a specific test suite
 swift test --filter "BunProcess"
 
@@ -19,6 +32,14 @@ swift test --filter "setTimeout"
 ```
 
 Network roundtrip tests (`FetchRoundtripTests`) hit `httpbin.org` and require internet access.
+
+### Hang-resistant runtime tests
+
+`BunProcess`-backed tests are not safe to parallelize purely with `.serialized`, because Swift Testing only serializes within a suite. Cross-suite runtime tests must go through `TestProcessSupport` helpers so they share the same `RuntimeTestGate`.
+
+- Use `TestProcessSupport.withLoadedProcess(...)` for library-mode tests.
+- Use `TestProcessSupport.run(...)` for `BunProcess.run()` in tests.
+- Wrap local HTTP/WebSocket server helpers in `TestProcessSupport.withExclusiveRuntimeAccess(...)` when they participate in the same test flow as `BunProcess`.
 WebSocket tests use a local NIO-based server and do not require internet access.
 
 ### Test bundle regeneration
@@ -145,7 +166,7 @@ Layer 2: host bridges                           ← EventLoop-backed overrides (
 | TextDecoderStream / TextEncoderStream | ✅ Full | UTF-8 streaming codecs |
 | crypto.getRandomValues | ✅ Basic | Math.random (not cryptographically secure) |
 | crypto.randomUUID | ✅ Full | UUID v4 |
-| crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `sign`, `verify` |
+| crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `exportKey`, `generateKey`, `sign`, `verify`, `encrypt`, `decrypt`, `deriveBits`, `deriveKey`, `wrapKey`, `unwrapKey` |
 | structuredClone | ✅ Basic | @ungap/structured-clone with Blob/File wrapper |
 | navigator | ✅ Stub | userAgent, platform |
 | Symbol.dispose / asyncDispose | ✅ Full | Symbol.for polyfill |
@@ -194,7 +215,7 @@ Layer 2: host bridges                           ← EventLoop-backed overrides (
 | node:child_process | ⚠️ Limited | No general subprocess execution. Native bridges may emulate specific commands. |
 | node:net | ✅ Basic | plain TCP `createServer`, `connect`, `createConnection` |
 | node:tls | ⚠️ Stub | Throws |
-| node:zlib | ⚠️ Partial | `deflateSync` |
+| node:zlib | ⚠️ Partial | gzip/deflate/inflate/raw/unzip/brotli sync + callback + promise + transform APIs |
 | node:dns | ⚠️ Basic | `lookup` |
 | node:http2 | ⚠️ Stub | Throws |
 | node:v8 | ⚠️ Basic | `getHeapSpaceStatistics` shape |
@@ -215,8 +236,8 @@ Layer 2: host bridges                           ← EventLoop-backed overrides (
 - `crypto.getRandomValues` uses `Math.random()`, not cryptographically secure. CryptoKit-backed `node:crypto` provides secure alternatives via `require('crypto')`.
 - `Bun.serve()` is not supported.
 - `WebSocket` is client-only. Text/binary messaging, headers, subprotocol negotiation, close events, ping/pong, and process-mode keep-alive are supported, but `proxy` and custom `tls` options are currently accepted and ignored, and there is no server-side WebSocket API.
-- `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
-- `node:zlib` currently exposes `deflateSync` only.
+- `crypto.subtle` currently implements `digest`, `importKey`, `exportKey`, `generateKey`, `sign`, `verify`, `encrypt`, `decrypt`, `deriveBits`, `deriveKey`, `wrapKey`, and `unwrapKey` for HMAC, AES-GCM, PBKDF2, HKDF, and imported asymmetric signing keys. It is still a subset of the Web Crypto surface.
+- `node:zlib` currently covers gzip/deflate/inflate/raw/unzip/brotli sync APIs, callback APIs, promise APIs, and transform constructors. It remains a compatibility subset rather than full Node parity.
 - `node:dns` currently exposes `lookup` only.
 - `http.createServer` is intentionally minimal and targeted at local callback/server workflows.
 

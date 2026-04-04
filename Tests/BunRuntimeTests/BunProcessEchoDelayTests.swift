@@ -34,7 +34,7 @@ struct BunProcessEchoDelayTests {
 
         // Run in background
         let runTask = Task {
-            try await bp.run()
+            try await TestProcessSupport.run(bp)
         }
 
         // Wait for JS to initialize
@@ -58,8 +58,8 @@ struct BunProcessEchoDelayTests {
         let exitCode = try await runTask.value
         #expect(exitCode == 0)
 
-        stdoutTask.cancel()
-        diagTask.cancel()
+        _ = await stdoutTask.result
+        _ = await diagTask.result
     }
 
     @Test(.tags(.slow), .timeLimit(.minutes(1)))
@@ -71,9 +71,13 @@ struct BunProcessEchoDelayTests {
         let bp = BunProcess(bundle: url)
         let collected = LinesCollector()
 
-        Task { for await line in bp.stdout { collected.append(line) } }
+        let stdoutTask = Task {
+            for await line in bp.stdout {
+                collected.append(line)
+            }
+        }
 
-        let runTask = Task { try await bp.run() }
+        let runTask = Task { try await TestProcessSupport.run(bp) }
 
         try await Task.sleep(for: .milliseconds(500))
 
@@ -89,6 +93,7 @@ struct BunProcessEchoDelayTests {
 
         bp.sendInput(nil)
         let exitCode = try await runTask.value
+        _ = await stdoutTask.result
         #expect(exitCode == 0)
     }
 }

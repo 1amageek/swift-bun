@@ -14,4 +14,5 @@ public enum BunRuntimeError: Error, Sendable {
     case contextNotReady
     case asyncResultRequiresAsyncAPI
     case shutdownRequired
+    case processAlreadyStarted
 }

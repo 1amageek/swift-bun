@@ -21,8 +21,8 @@ struct BunProcessStdioTests {
         let collect = Task { [lines] in
             for await line in p.stdout { lines.append(line) }
         }
-        _ = try await p.run()
-        collect.cancel()
+        _ = try await TestProcessSupport.run(p)
+        _ = await collect.result
         #expect(lines.values.contains("line1\n"))
         #expect(lines.values.contains("line2\n"))
     }
@@ -39,8 +39,9 @@ struct BunProcessStdioTests {
         let outputLines = LinesCollector()
         let c1 = Task { [stdoutLines] in for await l in p.stdout { stdoutLines.append(l) } }
         let c2 = Task { [outputLines] in for await l in p.output { outputLines.append(l) } }
-        _ = try await p.run()
-        c1.cancel(); c2.cancel()
+        _ = try await TestProcessSupport.run(p)
+        _ = await c1.result
+        _ = await c2.result
 
         #expect(stdoutLines.values.contains("DATA\n"))
         #expect(!stdoutLines.values.contains { $0.contains("debug") })
@@ -58,8 +59,8 @@ struct BunProcessStdioTests {
         let p = BunProcess(bundle: url)
         let lines = LinesCollector()
         let collect = Task { [lines] in for await l in p.output { lines.append(l) } }
-        _ = try await p.run()
-        collect.cancel()
+        _ = try await TestProcessSupport.run(p)
+        _ = await collect.result
         #expect(lines.values.contains("[log] hello"))
         #expect(lines.values.contains("[error] bad"))
     }
@@ -69,7 +70,7 @@ struct BunProcessStdioTests {
     @Test func processGetuid() async throws {
         let url = try tempBundle("process.exit(typeof process.getuid() === 'number' ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func processExitCode() async throws {
@@ -79,7 +80,7 @@ struct BunProcessStdioTests {
             process.exit(process.exitCode === 42 ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func processExitCodeDefaultsToUndefined() async throws {
@@ -87,13 +88,13 @@ struct BunProcessStdioTests {
             process.exit(process.exitCode === undefined ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func processReport() async throws {
         let url = try tempBundle("process.exit(typeof process.report === 'object' ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdinIsReadableNotWritable() async throws {
@@ -105,13 +106,13 @@ struct BunProcessStdioTests {
             process.exit(ok ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdoutWritable() async throws {
         let url = try tempBundle("process.exit(process.stdout.writable === true ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdoutRemoveListener() async throws {
@@ -120,7 +121,7 @@ struct BunProcessStdioTests {
             process.exit(result === process.stdout ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stderrIsWritable() async throws {
@@ -131,25 +132,25 @@ struct BunProcessStdioTests {
             process.exit(ok ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stderrFd() async throws {
         let url = try tempBundle("process.exit(process.stderr.fd === 2 ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdoutFd() async throws {
         let url = try tempBundle("process.exit(process.stdout.fd === 1 ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func stdinFd() async throws {
         let url = try tempBundle("process.exit(process.stdin.fd === 0 ? 0 : 1);")
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     // MARK: - argv and cwd
@@ -162,7 +163,7 @@ struct BunProcessStdioTests {
             process.exit(ok ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url, arguments: ["-p", "--verbose"]).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url, arguments: ["-p", "--verbose"])) == 0)
     }
 
     @Test func processArgvBundlePath() async throws {
@@ -170,7 +171,7 @@ struct BunProcessStdioTests {
             process.exit(process.argv[1].endsWith('.js') ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url).run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url)) == 0)
     }
 
     @Test func processCwd() async throws {
@@ -178,6 +179,6 @@ struct BunProcessStdioTests {
             process.exit(process.cwd() === '/tmp/test' ? 0 : 1);
         """)
         defer { try? FileManager.default.removeItem(at: url) }
-        #expect(try await BunProcess(bundle: url, cwd: "/tmp/test").run() == 0)
+        #expect(try await TestProcessSupport.run(BunProcess(bundle: url, cwd: "/tmp/test")) == 0)
     }
 }

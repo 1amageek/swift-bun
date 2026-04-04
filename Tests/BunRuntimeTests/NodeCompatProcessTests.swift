@@ -149,13 +149,12 @@ struct NodeCompatProcessTests {
     @Test("console group count and table emit formatted output")
     func consoleExtras() async throws {
         let collector = NodeCompatLogCollector()
-        let lines = try await withLoadedProcess { process in
+        let outputTask = try await withLoadedProcess { process in
             let outputTask = Task { [collector] in
                 for await line in process.output {
                     collector.append(line)
                 }
             }
-            defer { outputTask.cancel() }
 
             _ = try await process.evaluate(js: """
                 console.group('outer');
@@ -167,8 +166,10 @@ struct NodeCompatProcessTests {
             """)
 
             try await Task.sleep(nanoseconds: 50_000_000)
-            return collector.values
+            return outputTask
         }
+        _ = await outputTask.result
+        let lines = collector.values
 
         #expect(lines.contains(where: { $0.contains("[log] outer") }))
         #expect(lines.contains(where: { $0.contains("[log]   hits: 1") }))
@@ -260,13 +261,12 @@ struct NodeCompatProcessTests {
     @Test("process._rawDebug and _getActiveHandles are exposed")
     func processDiagnostics() async throws {
         let collector = NodeCompatLogCollector()
-        let payload = try await withLoadedProcess { process in
+        let result = try await withLoadedProcess { process in
             let outputTask = Task { [collector] in
                 for await line in process.output {
                     collector.append(line)
                 }
             }
-            defer { outputTask.cancel() }
 
             let result = try await process.evaluate(js: """
                 (function() {
@@ -278,8 +278,10 @@ struct NodeCompatProcessTests {
                 })()
             """)
             try await Task.sleep(nanoseconds: 50_000_000)
-            return result.stringValue
+            return (result.stringValue, outputTask)
         }
+        _ = await result.1.result
+        let payload = result.0
 
         #expect(payload.contains(#""send":false"#))
         #expect(collector.values.contains(where: { $0.contains("[stderr] diagnostic line") }))

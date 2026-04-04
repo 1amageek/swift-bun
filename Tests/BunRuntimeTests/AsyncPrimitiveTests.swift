@@ -25,9 +25,14 @@ struct AsyncPrimitiveTests {
 
         let bp = BunProcess(bundle: url)
         let lines = Lines()
-        Task { for await line in bp.stdout { lines.append(line.trimmingCharacters(in: .newlines)) } }
+        let collect = Task {
+            for await line in bp.stdout {
+                lines.append(line.trimmingCharacters(in: .newlines))
+            }
+        }
 
-        let code = try await bp.run()
+        let code = try await TestProcessSupport.run(bp)
+        _ = await collect.result
         try await Task.sleep(for: .milliseconds(100))
 
         print("[nexttick-only] stdout: \(lines.values)")
@@ -47,9 +52,14 @@ struct AsyncPrimitiveTests {
 
         let bp = BunProcess(bundle: url)
         let lines = Lines()
-        Task { for await line in bp.stdout { lines.append(line.trimmingCharacters(in: .newlines)) } }
+        let collect = Task {
+            for await line in bp.stdout {
+                lines.append(line.trimmingCharacters(in: .newlines))
+            }
+        }
 
-        let code = try await bp.run()
+        let code = try await TestProcessSupport.run(bp)
+        _ = await collect.result
         try await Task.sleep(for: .milliseconds(100))
 
         print("[settimeout-await] stdout: \(lines.values)")
@@ -69,9 +79,14 @@ struct AsyncPrimitiveTests {
 
         let bp = BunProcess(bundle: url)
         let lines = Lines()
-        Task { for await line in bp.stdout { lines.append(line.trimmingCharacters(in: .newlines)) } }
+        let collect = Task {
+            for await line in bp.stdout {
+                lines.append(line.trimmingCharacters(in: .newlines))
+            }
+        }
 
-        let code = try await bp.run()
+        let code = try await TestProcessSupport.run(bp)
+        _ = await collect.result
         try await Task.sleep(for: .milliseconds(100))
 
         print("[fetch-await] stdout: \(lines.values)")
@@ -90,9 +105,14 @@ struct AsyncPrimitiveTests {
 
         let bp = BunProcess(bundle: url)
         let lines = Lines()
-        Task { for await line in bp.stdout { lines.append(line.trimmingCharacters(in: .newlines)) } }
+        let collect = Task {
+            for await line in bp.stdout {
+                lines.append(line.trimmingCharacters(in: .newlines))
+            }
+        }
 
-        let code = try await bp.run()
+        let code = try await TestProcessSupport.run(bp)
+        _ = await collect.result
         try await Task.sleep(for: .milliseconds(100))
 
         print("[nexttick-await] stdout: \(lines.values)")
@@ -112,9 +132,14 @@ struct AsyncPrimitiveTests {
 
         let bp = BunProcess(bundle: url)
         let lines = Lines()
-        Task { for await line in bp.stdout { lines.append(line.trimmingCharacters(in: .newlines)) } }
+        let collect = Task {
+            for await line in bp.stdout {
+                lines.append(line.trimmingCharacters(in: .newlines))
+            }
+        }
 
-        let code = try await bp.run()
+        let code = try await TestProcessSupport.run(bp)
+        _ = await collect.result
         try await Task.sleep(for: .milliseconds(100))
 
         let failures = lines.values.filter { $0.hasPrefix("FAIL:") }

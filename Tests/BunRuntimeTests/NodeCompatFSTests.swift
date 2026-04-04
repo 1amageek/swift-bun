@@ -205,13 +205,12 @@ struct NodeCompatFSTests {
         try "native async".write(toFile: tmpPath, atomically: true, encoding: .utf8)
 
         let collector = NodeCompatLogCollector()
-        let lines = try await withLoadedProcess { process in
+        let outputTask = try await withLoadedProcess(BunProcess(diagnosticsEnabled: true)) { process in
             let outputTask = Task { [collector] in
                 for await line in process.output {
                     collector.append(line)
                 }
             }
-            defer { outputTask.cancel() }
 
             let result = try await process.evaluateAsync(js: """
                 (async function() {
@@ -221,8 +220,10 @@ struct NodeCompatFSTests {
             """)
 
             #expect(result.stringValue == "native async")
-            return collector.values
+            return outputTask
         }
+        _ = await outputTask.result
+        let lines = collector.values
 
         #expect(lines.contains(where: { $0.contains("[bun:fs] start fs.readFile") }))
         #expect(lines.contains(where: { $0.contains("[bun:fs] complete fs.readFile") }))

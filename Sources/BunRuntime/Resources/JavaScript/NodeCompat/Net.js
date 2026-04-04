@@ -10,6 +10,157 @@
     var servers = Object.create(null);
     var sockets = Object.create(null);
 
+    function stripIPv6Brackets(input) {
+        if (typeof input !== 'string') return '';
+        if (input.charAt(0) === '[' && input.charAt(input.length - 1) === ']') {
+            return input.slice(1, -1);
+        }
+        return input;
+    }
+
+    function parseIPv4(input) {
+        if (typeof input !== 'string') return null;
+        var parts = input.split('.');
+        if (parts.length !== 4) return null;
+        var bytes = [];
+        for (var index = 0; index < parts.length; index += 1) {
+            if (!/^\d+$/.test(parts[index])) return null;
+            var value = Number(parts[index]);
+            if (!Number.isInteger(value) || value < 0 || value > 255) return null;
+            bytes.push(value);
+        }
+        return bytes;
+    }
+
+    function parseIPv6(input) {
+        if (typeof input !== 'string') return null;
+        var value = stripIPv6Brackets(input).toLowerCase();
+        var zoneIndex = value.indexOf('%');
+        if (zoneIndex !== -1) value = value.slice(0, zoneIndex);
+        if (!value) return null;
+
+        var halves = value.split('::');
+        if (halves.length > 2) return null;
+
+        function parseSection(section) {
+            if (!section) return [];
+            var rawParts = section.split(':');
+            var result = [];
+            for (var idx = 0; idx < rawParts.length; idx += 1) {
+                var part = rawParts[idx];
+                if (!part) return null;
+                if (part.indexOf('.') !== -1) {
+                    if (idx !== rawParts.length - 1) return null;
+                    var ipv4 = parseIPv4(part);
+                    if (!ipv4) return null;
+                    result.push((ipv4[0] << 8) | ipv4[1]);
+                    result.push((ipv4[2] << 8) | ipv4[3]);
+                    continue;
+                }
+                if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+                result.push(parseInt(part, 16));
+            }
+            return result;
+        }
+
+        var head = parseSection(halves[0]);
+        if (!head) return null;
+        var tail = halves.length === 2 ? parseSection(halves[1]) : [];
+        if (!tail) return null;
+
+        var missing = 8 - (head.length + tail.length);
+        if (halves.length === 1) {
+            if (missing !== 0) return null;
+        } else if (missing < 1) {
+            return null;
+        }
+
+        var words = head.slice();
+        for (var fill = 0; fill < missing; fill += 1) words.push(0);
+        for (var tailIndex = 0; tailIndex < tail.length; tailIndex += 1) words.push(tail[tailIndex]);
+        if (words.length !== 8) return null;
+
+        var bytes = [];
+        for (var wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+            bytes.push((words[wordIndex] >> 8) & 0xff);
+            bytes.push(words[wordIndex] & 0xff);
+        }
+        return bytes;
+    }
+
+    function normalizeIPFamily(type) {
+        if (type === 4 || type === 'ipv4' || type === 'IPv4') return 'ipv4';
+        if (type === 6 || type === 'ipv6' || type === 'IPv6') return 'ipv6';
+        return null;
+    }
+
+    function parseIPAddress(input, explicitFamily) {
+        var family = normalizeIPFamily(explicitFamily);
+        var value = stripIPv6Brackets(String(input || ''));
+        if (!family || family === 'ipv4') {
+            var ipv4 = parseIPv4(value);
+            if (ipv4) return { family: 'ipv4', bytes: ipv4 };
+            if (family === 'ipv4') return null;
+        }
+        if (!family || family === 'ipv6') {
+            var ipv6 = parseIPv6(value);
+            if (ipv6) return { family: 'ipv6', bytes: ipv6 };
+        }
+        return null;
+    }
+
+    function bitsMatch(candidate, rule, prefixLength) {
+        var fullBytes = Math.floor(prefixLength / 8);
+        for (var index = 0; index < fullBytes; index += 1) {
+            if (candidate[index] !== rule[index]) return false;
+        }
+        var partialBits = prefixLength % 8;
+        if (partialBits === 0) return true;
+        var mask = (0xff << (8 - partialBits)) & 0xff;
+        return (candidate[fullBytes] & mask) === (rule[fullBytes] & mask);
+    }
+
+    function BlockList() {
+        if (!(this instanceof BlockList)) return new BlockList();
+        this.rules = [];
+    }
+    BlockList.prototype.addAddress = function(address, type) {
+        var parsed = parseIPAddress(address, type);
+        if (!parsed) throw new Error('Invalid IP address');
+        this.rules.push({
+            kind: 'address',
+            family: parsed.family,
+            bytes: parsed.bytes.slice(),
+            prefix: parsed.family === 'ipv6' ? 128 : 32
+        });
+        return this;
+    };
+    BlockList.prototype.addSubnet = function(address, prefix, type) {
+        var parsed = parseIPAddress(address, type);
+        if (!parsed) throw new Error('Invalid subnet address');
+        var maxBits = parsed.family === 'ipv6' ? 128 : 32;
+        if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxBits) {
+            throw new Error('Invalid subnet prefix');
+        }
+        this.rules.push({
+            kind: 'subnet',
+            family: parsed.family,
+            bytes: parsed.bytes.slice(),
+            prefix: prefix
+        });
+        return this;
+    };
+    BlockList.prototype.check = function(address, type) {
+        var parsed = parseIPAddress(address, type);
+        if (!parsed) return false;
+        for (var index = 0; index < this.rules.length; index += 1) {
+            var rule = this.rules[index];
+            if (rule.family !== parsed.family) continue;
+            if (bitsMatch(parsed.bytes, rule.bytes, rule.prefix)) return true;
+        }
+        return false;
+    };
+
     function toBuffer(chunk, encoding) {
         if (chunk == null) return Buffer.alloc(0);
         if (Buffer.isBuffer(chunk)) return chunk;
@@ -23,6 +174,10 @@
         EventEmitter.call(this);
         this._id = id;
         this._encoding = null;
+        this._paused = false;
+        this._readQueue = [];
+        this._timeoutHandle = null;
+        this._timeoutDuration = 0;
         this.destroyed = false;
         this.localAddress = metadata && metadata.localAddress || '';
         this.localPort = metadata && metadata.localPort || 0;
@@ -32,8 +187,47 @@
     }
     Socket.prototype = Object.create(EventEmitter.prototype);
     Socket.prototype.constructor = Socket;
+    Socket.prototype._clearTimeoutHandle = function() {
+        if (this._timeoutHandle != null) {
+            clearTimeout(this._timeoutHandle);
+            this._timeoutHandle = null;
+        }
+    };
+    Socket.prototype._refreshTimeout = function() {
+        var self = this;
+        if (!this._timeoutDuration) return;
+        this._clearTimeoutHandle();
+        this._timeoutHandle = setTimeout(function() {
+            self.emit('timeout');
+        }, this._timeoutDuration);
+    };
     Socket.prototype.setEncoding = function(encoding) {
         this._encoding = encoding || 'utf8';
+        return this;
+    };
+    Socket.prototype.setTimeout = function(timeout, callback) {
+        this._timeoutDuration = Math.max(0, Number(timeout) || 0);
+        if (typeof callback === 'function') this.once('timeout', callback);
+        this._clearTimeoutHandle();
+        if (this._timeoutDuration > 0) this._refreshTimeout();
+        return this;
+    };
+    Socket.prototype.pause = function() {
+        this._paused = true;
+        return this;
+    };
+    Socket.prototype.resume = function() {
+        this._paused = false;
+        while (!this._paused && this._readQueue.length > 0) {
+            this.emit('data', this._readQueue.shift());
+        }
+        return this;
+    };
+    Socket.prototype.unshift = function(chunk) {
+        var buffer = toBuffer(chunk);
+        var value = this._encoding ? buffer.toString(this._encoding) : buffer;
+        this._readQueue.unshift(value);
+        if (!this._paused) this.resume();
         return this;
     };
     Socket.prototype.write = function(chunk, encoding, callback) {
@@ -42,6 +236,7 @@
             encoding = undefined;
         }
         var buffer = toBuffer(chunk, encoding);
+        this._refreshTimeout();
         __netWrite(this._id, Array.from(buffer));
         if (callback) callback();
         return true;
@@ -56,12 +251,14 @@
             encoding = undefined;
         }
         var payload = chunk == null ? null : Array.from(toBuffer(chunk, encoding));
+        this._refreshTimeout();
         __netEnd(this._id, payload);
         if (callback) callback();
         return this;
     };
     Socket.prototype.destroy = function(error) {
         this.destroyed = true;
+        this._clearTimeoutHandle();
         __netDestroy(this._id);
         if (error) this.emit('error', error);
         return this;
@@ -109,15 +306,28 @@
         return socket;
     }
 
-    function connect(options, connectionListener) {
+    function connect() {
+        var options = arguments[0];
         var host = '127.0.0.1';
         var port = 0;
+        var connectionListener = null;
+
         if (typeof options === 'number') {
             port = options;
+            if (typeof arguments[1] === 'string') {
+                host = arguments[1];
+                if (typeof arguments[2] === 'function') connectionListener = arguments[2];
+            } else if (typeof arguments[1] === 'function') {
+                connectionListener = arguments[1];
+            }
         } else if (typeof options === 'object' && options) {
             host = options.host || options.hostname || host;
             port = options.port || port;
+            if (typeof arguments[1] === 'function') connectionListener = arguments[1];
+        } else if (typeof options === 'string') {
+            throw new Error('node:net UNIX domain sockets are not supported in swift-bun');
         }
+
         var socket = createSocket({});
         if (typeof connectionListener === 'function') socket.once('connect', connectionListener);
         __netConnect(socket._id, host, port | 0);
@@ -159,20 +369,29 @@
             socket.remoteAddress = event.remoteAddress || socket.remoteAddress;
             socket.remotePort = event.remotePort || socket.remotePort;
             socket.remoteFamily = socket.remoteAddress.indexOf(':') !== -1 ? 'IPv6' : 'IPv4';
+            socket._refreshTimeout();
             socket.emit('connect');
             return;
         }
         if (event.type === 'data') {
             var chunk = Buffer.from(event.bytes || []);
-            socket.emit('data', socket._encoding ? chunk.toString(socket._encoding) : chunk);
+            socket._refreshTimeout();
+            var value = socket._encoding ? chunk.toString(socket._encoding) : chunk;
+            if (socket._paused) {
+                socket._readQueue.push(value);
+            } else {
+                socket.emit('data', value);
+            }
             return;
         }
         if (event.type === 'end') {
+            socket._clearTimeoutHandle();
             socket.emit('end');
             return;
         }
         if (event.type === 'close') {
             socket.destroyed = true;
+            socket._clearTimeoutHandle();
             delete sockets[event.socketID];
             socket.emit('close');
             return;
@@ -183,25 +402,27 @@
                 if (erroredServer) erroredServer.emit('error', new Error(event.message || 'socket error'));
                 return;
             }
+            socket._clearTimeoutHandle();
             socket.emit('error', new Error(event.message || 'socket error'));
         }
     };
 
     var net = {
+        BlockList: BlockList,
         Socket: Socket,
         Server: Server,
         createServer: function(options, connectionListener) {
             return new Server(options, connectionListener);
         },
-        createConnection: function(options, connectionListener) {
-            return connect(options, connectionListener);
+        createConnection: function() {
+            return connect.apply(null, arguments);
         },
-        connect: function(options, connectionListener) {
-            return connect(options, connectionListener);
+        connect: function() {
+            return connect.apply(null, arguments);
         },
         isIP: function(input) {
-            if (/^\d{1,3}(\.\d{1,3}){3}$/.test(input)) return 4;
-            if (input.indexOf(':') !== -1) return 6;
+            if (parseIPv4(String(input || ''))) return 4;
+            if (parseIPv6(String(input || ''))) return 6;
             return 0;
         },
         isIPv4: function(input) { return this.isIP(input) === 4; },

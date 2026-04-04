@@ -618,14 +618,13 @@ struct NodeCompatModuleTests {
 
     @Test("readline promises question and prompt helpers work")
     func readlinePromisesAndPrompt() async throws {
-        let result = try await withLoadedProcess { process in
-            let stdoutCollector = NodeCompatLogCollector()
+        let stdoutCollector = NodeCompatLogCollector()
+        let outputTaskResult = try await withLoadedProcess { process in
             let outputTask = Task { [stdoutCollector] in
                 for await line in process.stdout {
                     stdoutCollector.append(line)
                 }
             }
-            defer { outputTask.cancel() }
 
             let promise = Task {
                 try await process.evaluateAsync(js: """
@@ -667,8 +666,10 @@ struct NodeCompatModuleTests {
             process.sendInput("promise answer\n".data(using: .utf8)!)
             let evaluation = try await promise.value
             try await Task.sleep(nanoseconds: 50_000_000)
-            return (evaluation.stringValue, stdoutCollector.values)
+            return (evaluation.stringValue, outputTask)
         }
+        _ = await outputTaskResult.1.result
+        let result = (outputTaskResult.0, stdoutCollector.values)
 
         let data = try #require(result.0.data(using: .utf8))
         let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -973,6 +974,151 @@ struct NodeCompatModuleTests {
         #expect(result.boolValue == true)
     }
 
+    @Test("zlib promises and constructor aliases roundtrip")
+    func zlibPromisesAndConstructors() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var consumers = require('node:stream/consumers');
+
+                var compressed = await zlib.promises.gzip('promise path', { level: 9 });
+                var promiseValue = (await zlib.promises.unzip(compressed)).toString();
+
+                var encoder = new zlib.Gzip({ level: 6 });
+                var decoder = new zlib.Unzip();
+                encoder.pipe(decoder);
+                encoder.end('constructor path');
+                var streamed = await consumers.text(decoder);
+
+                return JSON.stringify({
+                    promiseValue: promiseValue,
+                    streamed: streamed,
+                    hasTreeConstant: zlib.constants.Z_TREES === 6
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"promiseValue":"promise path","streamed":"constructor path","hasTreeConstant":true}"#)
+    }
+
+    @Test("zlib promises and callbacks surface decompression errors")
+    func zlibPromiseAndCallbackErrors() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var bad = Buffer.from('not-a-valid-gzip');
+
+                var promiseMessage;
+                try {
+                    await zlib.promises.gunzip(bad);
+                    promiseMessage = 'missing';
+                } catch (error) {
+                    promiseMessage = typeof error.message === 'string' && error.message.length > 0;
+                }
+
+                var callbackMessage = await new Promise(function(resolve) {
+                    zlib.gunzip(bad, function(error) {
+                        resolve(typeof (error && error.message) === 'string' && error.message.length > 0);
+                    });
+                });
+
+                return JSON.stringify({
+                    promiseMessage: promiseMessage,
+                    callbackMessage: callbackMessage
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"promiseMessage":true,"callbackMessage":true}"#)
+    }
+
+    @Test("zlib raw deflate and inflate roundtrip through promises")
+    func zlibRawPromiseRoundtrip() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var compressed = await zlib.promises.deflateRaw(Buffer.from([1, 2, 3, 4, 5]));
+                var uncompressed = await zlib.promises.inflateRaw(compressed);
+                return JSON.stringify(Array.from(uncompressed));
+            })()
+        """)
+        #expect(result.stringValue == "[1,2,3,4,5]")
+    }
+
+    @Test("zlib brotli sync, callback, promise, and transform APIs roundtrip")
+    func zlibBrotliAPIs() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var consumers = require('node:stream/consumers');
+
+                var syncValue = zlib.brotliDecompressSync(zlib.brotliCompressSync('brotli sync')).toString();
+
+                var callbackValue = await new Promise(function(resolve, reject) {
+                    zlib.brotliCompress('brotli callback', function(error, compressed) {
+                        if (error) {
+                            reject(error);
+                            return;
+                        }
+                        zlib.brotliDecompress(compressed, function(secondError, uncompressed) {
+                            if (secondError) {
+                                reject(secondError);
+                                return;
+                            }
+                            resolve(uncompressed.toString());
+                        });
+                    });
+                });
+
+                var promiseCompressed = await zlib.promises.brotliCompress('brotli promise');
+                var promiseValue = (await zlib.promises.brotliDecompress(promiseCompressed)).toString();
+
+                var encoder = new zlib.BrotliCompress();
+                var decoder = new zlib.BrotliDecompress();
+                encoder.pipe(decoder);
+                encoder.end('brotli stream');
+                var streamed = await consumers.text(decoder);
+
+                return JSON.stringify({
+                    syncValue: syncValue,
+                    callbackValue: callbackValue,
+                    promiseValue: promiseValue,
+                    streamed: streamed,
+                    hasFinishConstant: zlib.constants.BROTLI_OPERATION_FINISH === 2
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"syncValue":"brotli sync","callbackValue":"brotli callback","promiseValue":"brotli promise","streamed":"brotli stream","hasFinishConstant":true}"#)
+    }
+
+    @Test("zlib brotli decompression surfaces invalid payload errors")
+    func zlibBrotliErrors() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var bad = Buffer.from('not-a-valid-brotli');
+
+                var promiseMessage;
+                try {
+                    await zlib.promises.brotliDecompress(bad);
+                    promiseMessage = 'missing';
+                } catch (error) {
+                    promiseMessage = typeof error.message === 'string' && error.message.length > 0;
+                }
+
+                var callbackMessage = await new Promise(function(resolve) {
+                    zlib.brotliDecompress(bad, function(error) {
+                        resolve(typeof (error && error.message) === 'string' && error.message.length > 0);
+                    });
+                });
+
+                return JSON.stringify({
+                    promiseMessage: promiseMessage,
+                    callbackMessage: callbackMessage
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"promiseMessage":true,"callbackMessage":true}"#)
+    }
+
     @Test("net.createServer and connect roundtrip")
     func netCreateServerAndConnect() async throws {
         let result = try await evaluateAsync("""
@@ -1016,6 +1162,65 @@ struct NodeCompatModuleTests {
             })()
         """)
         #expect(result.stringValue.contains(#""seen":"ping""#))
+    }
+
+    @Test("net.BlockList matches IPv4 and IPv6 addresses")
+    func netBlockListMatchesIPv4AndIPv6() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var net = require('node:net');
+                var blockList = new net.BlockList();
+                blockList.addAddress('10.0.0.1', 'ipv4');
+                blockList.addSubnet('192.168.0.0', 16, 'ipv4');
+                blockList.addAddress('::1', 'ipv6');
+                blockList.addSubnet('2001:db8::', 32, 'ipv6');
+                return JSON.stringify({
+                    direct4: blockList.check('10.0.0.1', 'ipv4'),
+                    subnet4: blockList.check('192.168.99.7', 'ipv4'),
+                    miss4: blockList.check('172.16.0.1', 'ipv4'),
+                    direct6: blockList.check('::1', 'ipv6'),
+                    subnet6: blockList.check('2001:db8::42', 'ipv6'),
+                    miss6: blockList.check('2001:dead::1', 'ipv6')
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""direct4":true"#))
+        #expect(result.stringValue.contains(#""subnet4":true"#))
+        #expect(result.stringValue.contains(#""miss4":false"#))
+        #expect(result.stringValue.contains(#""direct6":true"#))
+        #expect(result.stringValue.contains(#""subnet6":true"#))
+        #expect(result.stringValue.contains(#""miss6":false"#))
+    }
+
+    @Test("net.connect supports port host overload")
+    func netConnectSupportsPortHostOverload() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var net = require('node:net');
+                return await new Promise(function(resolve, reject) {
+                    var server = net.createServer(function(socket) {
+                        socket.end('ok');
+                    });
+                    server.on('error', reject);
+                    server.listen(0, '127.0.0.1', function() {
+                        var address = server.address();
+                        var client = net.connect(address.port, '127.0.0.1', function() {});
+                        var seen = '';
+                        client.setEncoding('utf8');
+                        client.on('data', function(chunk) {
+                            seen += chunk;
+                        });
+                        client.on('end', function() {
+                            server.close(function() {
+                                resolve(seen);
+                            });
+                        });
+                        client.on('error', reject);
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue == "ok")
     }
 
     @Test("http.createServer handles request and response")
@@ -1182,5 +1387,35 @@ struct NodeCompatModuleTests {
         let files = try #require(payload["files"] as? [String])
         let normalizedFiles = Set(files.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
         #expect(normalizedFiles.contains(file.standardizedFileURL.path))
+    }
+
+    @Test("child_process spawn reports builtin errors without stream exceptions")
+    func childProcessSpawnBuiltinError() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var cp = require('node:child_process');
+                var child = cp.spawn('rg', ['needle']);
+                return await new Promise(function(resolve) {
+                    var payload = {
+                        errorMessage: null,
+                        closeCode: 'unset',
+                        closeSignal: 'unset'
+                    };
+                    child.on('error', function(err) {
+                        payload.errorMessage = err && err.message || null;
+                    });
+                    child.on('close', function(code, signal) {
+                        payload.closeCode = code;
+                        payload.closeSignal = signal;
+                        resolve(JSON.stringify(payload));
+                    });
+                });
+            })()
+        """)
+
+        let data = try #require(result.stringValue.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect((payload["errorMessage"] as? String)?.isEmpty == false)
+        #expect(payload["closeCode"] != nil)
     }
 }

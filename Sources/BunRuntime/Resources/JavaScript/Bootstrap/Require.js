@@ -143,6 +143,12 @@
         return error;
     }
 
+    function hostLog(message) {
+        if (typeof globalThis.__nativeLog === 'function') {
+            globalThis.__nativeLog('bun:cjs', String(message));
+        }
+    }
+
     function normalizeAsAbsolute(value, baseDirectory) {
         if (path.isAbsolute(value)) return path.normalize(value);
         return path.normalize(path.join(baseDirectory || currentWorkingDirectory(), value));
@@ -361,7 +367,7 @@
         var localRequire = loader.createRequire(filename, module);
         module.require = localRequire;
         return (function(exports, require, module, __filename, __dirname, __source) {
-            return eval(__source + '\n//# sourceURL=' + __filename);
+            return eval(__source + '\n;\n//# sourceURL=' + __filename);
         })(
             module.exports,
             localRequire,
@@ -418,10 +424,26 @@
             mainModuleRecord = module;
 
             try {
+                hostLog(
+                    'executeMain start filename=' + mainFilename +
+                    ' cwd=' + currentWorkingDirectory() +
+                    ' platform=' + String(process && process.platform) +
+                    ' home=' + String(process && process.env && process.env.HOME)
+                );
                 var completion = executeSourceInModule(source, mainFilename, module);
+                hostLog(
+                    'executeMain completion type=' +
+                    (completion === null ? 'null' : typeof completion) +
+                    ' thenable=' + (
+                        completion &&
+                        (typeof completion === 'object' || typeof completion === 'function') &&
+                        typeof completion.then === 'function'
+                    )
+                );
                 module.loaded = true;
                 return completion;
             } catch (error) {
+                hostLog('executeMain error=' + String(error && error.stack ? error.stack : error));
                 delete fileModuleCache[mainFilename];
                 if (mainModuleRecord === module) {
                     mainModuleRecord = null;

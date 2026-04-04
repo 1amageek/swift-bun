@@ -112,9 +112,12 @@
                 queueMicrotask(function() {
                     if (result.error) {
                         var err = new Error(result.error);
-                        child.stdout.destroy(err);
-                        child.stderr.destroy(err);
+                        child.exitCode = result.status == null ? null : result.status;
+                        child.signalCode = result.signal || null;
+                        child.stdout.end();
+                        child.stderr.end();
                         child.emit('error', err);
+                        child.emit('close', child.exitCode, child.signalCode);
                         return;
                     }
 
