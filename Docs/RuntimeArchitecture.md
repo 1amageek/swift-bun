@@ -149,7 +149,7 @@ Lifecycle is separate from Node/Bun API compatibility.
 
 ### Liveness domains
 - `visibleHandles`
-  - user-visible keep-alive state such as ref'ed timers, in-flight fetches, and ref'ed stdin
+  - user-visible keep-alive state such as ref'ed timers, in-flight fetches, ref'ed stdin, and WebSocket connections or connection attempts
 - `pendingHostCallbacks`
   - native completions not yet processed on the JS thread
 - `bootBarriers`
@@ -173,6 +173,8 @@ Natural exit is allowed when all of the following are true:
 `process.exit()` has priority over natural-exit checks.
 
 `load()` uses library mode and never naturally exits.
+
+For `globalThis.WebSocket`, process-mode liveness starts at connect initiation, not only after the handshake completes. This prevents `run()` entry scripts from exiting naturally in the gap between `new WebSocket(...)` and the first native open/error/close callback.
 
 ### Shutdown semantics
 - `shutdown()` is explicit and idempotent from the caller's perspective.

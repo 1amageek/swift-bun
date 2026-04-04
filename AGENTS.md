@@ -19,6 +19,7 @@ swift test --filter "setTimeout"
 ```
 
 Network roundtrip tests (`FetchRoundtripTests`) hit `httpbin.org` and require internet access.
+WebSocket tests use a local NIO-based server and do not require internet access.
 
 ### Test bundle regeneration
 
@@ -136,7 +137,7 @@ Layer 2: host bridges                           ← EventLoop-backed overrides (
 | Blob | ✅ Basic | Custom (text/arrayBuffer/stream/slice) |
 | File | ✅ Basic | Extends Blob with name/lastModified |
 | FormData | ✅ Full | Custom |
-| WebSocket | ✅ Basic | Runtime-installed client backed by `URLSessionWebSocketTask` |
+| WebSocket | ✅ Basic | Runtime-installed client backed by `URLSessionWebSocketTask`, including `run()`-mode E2E coverage |
 | Worker | ⚠️ Stub | Throws on instantiation |
 | MessageChannel / MessagePort | ✅ Basic | Functional postMessage |
 | XMLHttpRequest | ✅ Basic | Async-only adapter over fetch |
@@ -213,7 +214,7 @@ Layer 2: host bridges                           ← EventLoop-backed overrides (
 - `node:net` is implemented for plain TCP. `node:tls` remains unsupported.
 - `crypto.getRandomValues` uses `Math.random()`, not cryptographically secure. CryptoKit-backed `node:crypto` provides secure alternatives via `require('crypto')`.
 - `Bun.serve()` is not supported.
-- `WebSocket` is client-only. Text/binary messaging, headers, subprotocol negotiation, close events, and ping/pong are supported, but `proxy` and custom `tls` options are currently accepted and ignored, and there is no server-side WebSocket API.
+- `WebSocket` is client-only. Text/binary messaging, headers, subprotocol negotiation, close events, ping/pong, and process-mode keep-alive are supported, but `proxy` and custom `tls` options are currently accepted and ignored, and there is no server-side WebSocket API.
 - `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
 - `node:zlib` currently exposes `deflateSync` only.
 - `node:dns` currently exposes `lookup` only.

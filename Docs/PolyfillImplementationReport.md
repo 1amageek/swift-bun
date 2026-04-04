@@ -95,6 +95,7 @@ Specification sources were fixed to:
   - `error`
   - `close`
   - `pong`
+- process-mode liveness is acquired when connect starts so `run()` does not exit before the first WebSocket callback
 
 ## Before / After
 
@@ -123,6 +124,7 @@ Specification sources were fixed to:
 Focused tests were added or expanded in:
 
 - `Tests/BunRuntimeTests/WebAPIPolyfillTests.swift`
+- `Tests/BunRuntimeTests/WebSocketE2ETests.swift`
 - `Tests/BunRuntimeTests/FetchRoundtripTests.swift`
 - `Tests/BunRuntimeTests/TextCodecEdgeCaseTests.swift`
 - `Tests/BunRuntimeTests/CryptoEdgeCaseTests.swift`
@@ -150,6 +152,7 @@ Focused execution covered:
 - `http.createServer`
 - `net` loopback
 - WebSocket open/message/close/error/ping coverage
+- WebSocket `run()`-mode end-to-end coverage, including CLI-style options and natural exit
 - `zlib.deflateSync`
 - `crypto.createPrivateKey`
 - `dns.lookup`
