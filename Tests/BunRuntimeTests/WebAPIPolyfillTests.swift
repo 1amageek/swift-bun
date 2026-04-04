@@ -300,6 +300,38 @@ struct WebAPIPolyfillTests {
         }
     }
 
+    @Test("WebSocket default binaryType returns Blob and ignores invalid assignments")
+    func webSocketBinaryBlobDefault() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluateAsync(js: """
+                (async function() {
+                    return await new Promise(function(resolve, reject) {
+                        var socket = new WebSocket('\(server.baseURL)');
+                        socket.binaryType = 'invalid';
+                        socket.onerror = function(event) {
+                            reject(new Error(event.message || 'websocket error'));
+                        };
+                        socket.onopen = function() {
+                            socket.send(new Uint8Array([9, 8, 7]));
+                        };
+                        socket.onmessage = async function(event) {
+                            var bytes = Array.from(new Uint8Array(await event.data.arrayBuffer()));
+                            resolve(JSON.stringify({
+                                binaryType: socket.binaryType,
+                                isBlob: event.data instanceof Blob,
+                                bytes: bytes
+                            }));
+                            socket.close(1000, 'done');
+                        };
+                    });
+                })()
+                """)
+            }
+            #expect(result.stringValue == #"{"binaryType":"blob","isBlob":true,"bytes":[9,8,7]}"#)
+        }
+    }
+
     @Test("WebSocket forwards headers and negotiates protocols with CLI-style options")
     func webSocketCLIStyleOptions() async throws {
         try await withWebSocketServer { server in
@@ -338,6 +370,26 @@ struct WebAPIPolyfillTests {
         }
     }
 
+    @Test("WebSocket rejects duplicate protocols")
+    func webSocketRejectsDuplicateProtocols() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluate(js: """
+                try {
+                    new WebSocket('\(server.baseURL)', ['mcp', 'mcp']);
+                    'no-error';
+                } catch (error) {
+                    JSON.stringify({
+                        name: error.name,
+                        message: error.message
+                    });
+                }
+                """)
+            }
+            #expect(result.stringValue == #"{"name":"SyntaxError","message":"Duplicate WebSocket protocol"}"#)
+        }
+    }
+
     @Test("WebSocket close exposes code and reason")
     func webSocketCloseEvent() async throws {
         try await withWebSocketServer { server in
@@ -364,6 +416,42 @@ struct WebAPIPolyfillTests {
                 """)
             }
             #expect(result.stringValue == #"{"code":4001,"reason":"client-close","wasClean":true}"#)
+        }
+    }
+
+    @Test("WebSocket close validates code and reason length")
+    func webSocketCloseValidation() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluate(js: """
+                var socket = new WebSocket('\(server.baseURL)');
+                try {
+                    socket.close(2000, 'invalid');
+                    'no-error';
+                } catch (error) {
+                    JSON.stringify({
+                        name: error.name,
+                        reasonWithoutCode: (function() {
+                            try {
+                                socket.close(undefined, 'needs-code');
+                                return 'no-error';
+                            } catch (innerError) {
+                                return innerError.name;
+                            }
+                        })(),
+                        longReason: (function() {
+                            try {
+                                socket.close(4000, new Array(125).join('x'));
+                                return 'no-error';
+                            } catch (innerError) {
+                                return innerError.name;
+                            }
+                        })()
+                    });
+                }
+                """)
+            }
+            #expect(result.stringValue == #"{"name":"InvalidAccessError","reasonWithoutCode":"InvalidAccessError","longReason":"SyntaxError"}"#)
         }
     }
 
@@ -399,6 +487,27 @@ struct WebAPIPolyfillTests {
         }
 
         #expect(result.stringValue == "error,close:1006:false")
+    }
+
+    @Test("WebSocket send before open throws InvalidStateError")
+    func webSocketSendBeforeOpenThrows() async throws {
+        try await withWebSocketServer { server in
+            let result = try await withLoadedProcess { process in
+                try await process.evaluate(js: """
+                var socket = new WebSocket('\(server.baseURL)');
+                try {
+                    socket.send('too-early');
+                    'no-error';
+                } catch (error) {
+                    JSON.stringify({
+                        name: error.name,
+                        message: error.message
+                    });
+                }
+                """)
+            }
+            #expect(result.stringValue == #"{"name":"InvalidStateError","message":"WebSocket is not open"}"#)
+        }
     }
 
     @Test("WebSocket ping emits pong")

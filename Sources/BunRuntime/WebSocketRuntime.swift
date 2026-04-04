@@ -55,7 +55,6 @@ actor WebSocketRuntime {
         }
     }
 
-    private let onSocketOpened: @Sendable () -> LifecycleController.VisibleHandleToken
     private let onSocketClosed: @Sendable (LifecycleController.VisibleHandleToken) -> Void
     private let delegate: SessionDelegate
     private let session: URLSession
@@ -64,10 +63,8 @@ actor WebSocketRuntime {
     private var isActive = true
 
     init(
-        onSocketOpened: @escaping @Sendable () -> LifecycleController.VisibleHandleToken,
         onSocketClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken) -> Void
     ) {
-        self.onSocketOpened = onSocketOpened
         self.onSocketClosed = onSocketClosed
 
         let (delegateEvents, continuation) = AsyncStream<DelegateEvent>.makeStream()
@@ -115,9 +112,13 @@ actor WebSocketRuntime {
         urlString: String,
         protocols: [String],
         headers: [String: String],
+        visibleHandleToken: LifecycleController.VisibleHandleToken,
         callback: @escaping @Sendable ([String: Any]) -> Void
     ) {
-        guard isActive else { return }
+        guard isActive else {
+            onSocketClosed(visibleHandleToken)
+            return
+        }
         guard let url = URL(string: urlString) else {
             callback([
                 "type": "error",
@@ -131,6 +132,7 @@ actor WebSocketRuntime {
                 "reason": "",
                 "wasClean": false,
             ])
+            onSocketClosed(visibleHandleToken)
             return
         }
 
@@ -145,7 +147,6 @@ actor WebSocketRuntime {
         let task = session.webSocketTask(with: request)
         task.taskDescription = "\(socketID)"
 
-        let visibleHandleToken = onSocketOpened()
         sockets[socketID] = SocketEntry(
             task: task,
             visibleHandleToken: visibleHandleToken,

@@ -1,13 +1,26 @@
 (function() {
+    "use strict";
+
     if (typeof __nativeWebSocketConnect !== "function") {
         return;
     }
 
     var sockets = Object.create(null);
     var nextSocketID = 1;
+    var protocolPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
     function isProtocolList(value) {
         return typeof value === "string" || Array.isArray(value);
+    }
+
+    function makeDOMException(message, name) {
+        if (typeof DOMException === "function") {
+            return new DOMException(message, name);
+        }
+
+        var error = new Error(message);
+        error.name = name;
+        return error;
     }
 
     function normalizeProtocols(value) {
@@ -15,25 +28,54 @@
             return [];
         }
         if (typeof value === "string") {
-            return value ? [value] : [];
+            value = value ? [value] : [];
         }
         if (!Array.isArray(value)) {
             throw new TypeError("WebSocket protocols must be a string or array");
         }
 
         var normalized = [];
+        var seen = Object.create(null);
         for (var index = 0; index < value.length; index++) {
-            normalized.push(String(value[index]));
+            var protocol = String(value[index]);
+            if (!protocolPattern.test(protocol)) {
+                throw new SyntaxError("Invalid WebSocket protocol");
+            }
+            if (seen[protocol]) {
+                throw new SyntaxError("Duplicate WebSocket protocol");
+            }
+            seen[protocol] = true;
+            normalized.push(protocol);
         }
         return normalized;
     }
 
     function normalizeHeaders(value) {
-        if (!value || typeof value !== "object") {
+        if (value === undefined || value === null) {
             return {};
         }
 
         var normalized = {};
+        if (typeof value.forEach === "function") {
+            value.forEach(function(headerValue, headerName) {
+                normalized[String(headerName)] = String(headerValue);
+            });
+            return normalized;
+        }
+        if (Array.isArray(value)) {
+            for (var pairIndex = 0; pairIndex < value.length; pairIndex++) {
+                var pair = value[pairIndex];
+                if (!Array.isArray(pair) || pair.length < 2) {
+                    throw new TypeError("WebSocket headers entries must be [name, value] pairs");
+                }
+                normalized[String(pair[0])] = String(pair[1]);
+            }
+            return normalized;
+        }
+        if (typeof value !== "object") {
+            throw new TypeError("WebSocket headers must be an object, Headers, or entry list");
+        }
+
         var keys = Object.keys(value);
         for (var index = 0; index < keys.length; index++) {
             var key = keys[index];
@@ -90,6 +132,14 @@
         throw new TypeError("Unsupported WebSocket payload");
     }
 
+    function byteLengthOfString(value) {
+        return new TextEncoder().encode(String(value)).byteLength;
+    }
+
+    function isValidCloseCode(code) {
+        return code === 1000 || (code >= 3000 && code <= 4999);
+    }
+
     function invokePropertyHandler(target, type, event) {
         var handler = target["on" + type];
         if (typeof handler === "function") {
@@ -128,6 +178,10 @@
         return event;
     }
 
+    function failSendBecauseState(socket) {
+        throw makeDOMException("WebSocket is not open", "InvalidStateError");
+    }
+
     function toIncomingBinary(socket, bytes) {
         var payload = new Uint8Array(bytes || []);
         if (socket.binaryType === "arraybuffer") {
@@ -137,6 +191,10 @@
     }
 
     function WebSocket(url, protocolsOrOptions, maybeOptions) {
+        if (!(this instanceof WebSocket)) {
+            throw new TypeError("Failed to construct 'WebSocket': Please use the 'new' operator.");
+        }
+
         EventTarget.call(this);
 
         var parsedURL = validateURL(url);
@@ -149,7 +207,7 @@
         this.readyState = WebSocket.CONNECTING;
         this.protocol = "";
         this.extensions = "";
-        this.binaryType = "blob";
+        this._binaryType = "blob";
         this.bufferedAmount = 0;
         this.onopen = null;
         this.onmessage = null;
@@ -177,10 +235,22 @@
     WebSocket.prototype.OPEN = WebSocket.OPEN;
     WebSocket.prototype.CLOSING = WebSocket.CLOSING;
     WebSocket.prototype.CLOSED = WebSocket.CLOSED;
+    Object.defineProperty(WebSocket.prototype, "binaryType", {
+        configurable: true,
+        enumerable: true,
+        get: function() {
+            return this._binaryType;
+        },
+        set: function(value) {
+            if (value === "blob" || value === "arraybuffer") {
+                this._binaryType = value;
+            }
+        }
+    });
 
     WebSocket.prototype.send = function(data) {
         if (this.readyState !== WebSocket.OPEN) {
-            throw new Error("WebSocket is not open");
+            failSendBecauseState(this);
         }
 
         if (typeof data === "string") {
@@ -196,11 +266,26 @@
             return;
         }
 
+        var closeCode = 1000;
+        if (code !== undefined) {
+            closeCode = Number(code);
+            if (!Number.isInteger(closeCode) || !isValidCloseCode(closeCode)) {
+                throw makeDOMException("The close code must be 1000 or between 3000 and 4999.", "InvalidAccessError");
+            }
+        } else if (reason !== undefined && String(reason) !== "") {
+            throw makeDOMException("A close reason requires a valid close code.", "InvalidAccessError");
+        }
+
+        var closeReason = reason === undefined ? "" : String(reason);
+        if (byteLengthOfString(closeReason) > 123) {
+            throw makeDOMException("The close reason must be 123 bytes or fewer.", "SyntaxError");
+        }
+
         this.readyState = WebSocket.CLOSING;
         __nativeWebSocketClose(
             this._id,
-            typeof code === "number" ? code : 1000,
-            reason === undefined ? "" : String(reason)
+            closeCode,
+            closeReason
         );
     };
 

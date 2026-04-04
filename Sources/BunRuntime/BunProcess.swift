@@ -239,10 +239,6 @@ public final class BunProcess: Sendable {
             }
         )
         let webSocketRuntime = WebSocketRuntime(
-            onSocketOpened: {
-                handleRegistry.incrementWebSocketCount()
-                return lifecycle.acquireVisibleHandle(kind: "webSocket")
-            },
             onSocketClosed: { token in
                 handleRegistry.decrementWebSocketCount()
                 lifecycle.releaseVisibleHandle(token)
@@ -1552,15 +1548,18 @@ public final class BunProcess: Sendable {
             }
         }
 
-        let connectBlock: @convention(block) (Int32, String, String, String) -> Void = { [webSocketRuntime] socketID, urlString, protocolsJSON, headersJSON in
+        let connectBlock: @convention(block) (Int32, String, String, String) -> Void = { [self, webSocketRuntime] socketID, urlString, protocolsJSON, headersJSON in
             let protocols = Self.decodeStringArrayJSON(protocolsJSON)
             let headers = Self.decodeStringDictionaryJSON(headersJSON)
+            self.handleRegistry.incrementWebSocketCount()
+            let visibleHandleToken = self.lifecycle.acquireVisibleHandle(kind: "webSocket")
             Task {
                 await webSocketRuntime.connect(
                     socketID: socketID,
                     urlString: urlString,
                     protocols: protocols,
                     headers: headers,
+                    visibleHandleToken: visibleHandleToken,
                     callback: dispatchEvent
                 )
             }
