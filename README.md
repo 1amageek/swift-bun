@@ -164,9 +164,9 @@ public final class BunProcess: Sendable {
 
 JSCore's `evaluateScript()` provides only ECMAScript language features. All platform APIs are polyfilled in three layers:
 
-- **Layer 0**: `polyfills.bundle.js` — Web APIs (npm packages, esbuild bundled)
+- **Layer 0**: `polyfills.bundle.js` + runtime scripts — Web APIs (JS-owned semantics)
 - **Layer 1**: ModuleBootstrap — Node.js globals + modules (Swift strings)
-- **Layer 2**: NIO bridges — EventLoop-backed overrides (Swift closures)
+- **Layer 2**: host bridges — EventLoop-backed overrides (Swift closures)
 
 `ModuleBootstrap` is split internally into:
 - `ModuleGlobalBootstrap`
@@ -188,7 +188,7 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 | crypto.getRandomValues / randomUUID | ✅ Basic | `getRandomValues` is not cryptographically secure |
 | structuredClone | ✅ Basic | JSON roundtrip |
 | Symbol.dispose / asyncDispose | ✅ Full | |
-| WebSocket | ⚠️ Stub | Class exists, no connection |
+| WebSocket | ✅ Basic | Runtime-installed client backed by `URLSessionWebSocketTask`; `run()`-mode E2E covered |
 | Worker | ⚠️ Stub | Throws |
 | crypto.subtle | ⚠️ Partial | `digest`, `importKey`, `sign`, `verify` for common algorithms |
 
@@ -237,7 +237,8 @@ JSCore's `evaluateScript()` provides only ECMAScript language features. All plat
 
 - `crypto.getRandomValues` still uses a non-cryptographic fallback. Use `require('node:crypto')` or `crypto.subtle` for security-sensitive work.
 - `crypto.subtle` currently implements `digest`, `importKey`, `sign`, and `verify`, not the full Web Crypto surface.
-- `node:tls`, `node:http2`, `WebSocket`, `Worker`, and native addons remain unsupported.
+- `globalThis.WebSocket` is client-only. Text/binary messaging, headers, subprotocol negotiation, close events, ping/pong, and process-mode keep-alive are supported, but `proxy` and custom `tls` options are currently accepted and ignored.
+- server-side WebSocket APIs, `node:tls`, `node:http2`, `Worker`, and native addons remain unsupported.
 - `node:child_process` does not provide general subprocess execution. Use native bridges for specific host capabilities instead.
 - `node:zlib` currently exposes `deflateSync` only.
 - `node:dns` currently exposes `lookup` only.
