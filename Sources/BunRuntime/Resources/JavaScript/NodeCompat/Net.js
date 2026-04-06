@@ -170,23 +170,84 @@
         return Buffer.from(String(chunk), encoding || 'utf8');
     }
 
-    function Socket(id, metadata) {
+    function normalizeConnectArgs(args) {
+        var options = args[0];
+        var host = '127.0.0.1';
+        var port = 0;
+        var connectionListener = null;
+
+        if (typeof options === 'number') {
+            port = options;
+            if (typeof args[1] === 'string') {
+                host = args[1];
+                if (typeof args[2] === 'function') connectionListener = args[2];
+            } else if (typeof args[1] === 'function') {
+                connectionListener = args[1];
+            }
+        } else if (typeof options === 'object' && options) {
+            if (typeof options.path === 'string') {
+                throw new Error('node:net UNIX domain sockets are not supported in swift-bun');
+            }
+            host = options.host || options.hostname || host;
+            port = options.port || port;
+            if (typeof args[1] === 'function') connectionListener = args[1];
+        } else if (typeof options === 'string') {
+            throw new Error('node:net UNIX domain sockets are not supported in swift-bun');
+        }
+
+        return {
+            host: host,
+            port: port | 0,
+            connectionListener: connectionListener
+        };
+    }
+
+    function registerSocket(socket) {
+        sockets[socket._id] = socket;
+        return socket;
+    }
+
+    function finalizeServerClose(serverID) {
+        var server = servers[serverID];
+        if (!server || server.listening || server.connections > 0 || !server._pendingClose) return;
+        server._pendingClose = false;
+        delete servers[serverID];
+        server.emit('close');
+    }
+
+    function Socket(idOrOptions, metadata) {
         EventEmitter.call(this);
-        this._id = id;
+        var internal = typeof idOrOptions === 'number';
+        this._id = internal ? idOrOptions : nextSocketID--;
         this._encoding = null;
         this._paused = false;
         this._readQueue = [];
         this._timeoutHandle = null;
         this._timeoutDuration = 0;
+        this._hadError = false;
+        this._refed = true;
+        this._serverID = null;
+        this.connecting = false;
+        this.pending = false;
         this.destroyed = false;
+        this.bytesRead = 0;
+        this.bytesWritten = 0;
         this.localAddress = metadata && metadata.localAddress || '';
         this.localPort = metadata && metadata.localPort || 0;
         this.remoteAddress = metadata && metadata.remoteAddress || '';
         this.remotePort = metadata && metadata.remotePort || 0;
         this.remoteFamily = this.remoteAddress && this.remoteAddress.indexOf(':') !== -1 ? 'IPv6' : 'IPv4';
+        registerSocket(this);
     }
     Socket.prototype = Object.create(EventEmitter.prototype);
     Socket.prototype.constructor = Socket;
+    Socket.prototype.address = function() {
+        return {
+            address: this.localAddress || '',
+            family: (this.localAddress || '').indexOf(':') !== -1 ? 'IPv6' : 'IPv4',
+            port: this.localPort || 0
+        };
+    };
     Socket.prototype._clearTimeoutHandle = function() {
         if (this._timeoutHandle != null) {
             clearTimeout(this._timeoutHandle);
@@ -230,12 +291,39 @@
         if (!this._paused) this.resume();
         return this;
     };
+    Socket.prototype.ref = function() {
+        if (!this._refed) {
+            this._refed = true;
+            __netSetSocketRef(this._id, true);
+        }
+        return this;
+    };
+    Socket.prototype.unref = function() {
+        if (this._refed) {
+            this._refed = false;
+            __netSetSocketRef(this._id, false);
+        }
+        return this;
+    };
+    Socket.prototype.setNoDelay = function() { return this; };
+    Socket.prototype.setKeepAlive = function() { return this; };
+    Socket.prototype.connect = function() {
+        var normalized = normalizeConnectArgs(arguments);
+        if (typeof normalized.connectionListener === 'function') {
+            this.once('connect', normalized.connectionListener);
+        }
+        this.connecting = true;
+        this.pending = true;
+        __netConnect(this._id, normalized.host, normalized.port);
+        return this;
+    };
     Socket.prototype.write = function(chunk, encoding, callback) {
         if (typeof encoding === 'function') {
             callback = encoding;
             encoding = undefined;
         }
         var buffer = toBuffer(chunk, encoding);
+        this.bytesWritten += buffer.length;
         this._refreshTimeout();
         __netWrite(this._id, Array.from(buffer));
         if (callback) callback();
@@ -251,6 +339,7 @@
             encoding = undefined;
         }
         var payload = chunk == null ? null : Array.from(toBuffer(chunk, encoding));
+        if (payload) this.bytesWritten += payload.length;
         this._refreshTimeout();
         __netEnd(this._id, payload);
         if (callback) callback();
@@ -258,9 +347,18 @@
     };
     Socket.prototype.destroy = function(error) {
         this.destroyed = true;
+        this.connecting = false;
+        this.pending = false;
         this._clearTimeoutHandle();
         __netDestroy(this._id);
-        if (error) this.emit('error', error);
+        if (error) {
+            this._hadError = true;
+            this.emit('error', error);
+        }
+        return this;
+    };
+    Socket.prototype.destroySoon = function() {
+        this.end();
         return this;
     };
 
@@ -273,7 +371,13 @@
         this._id = nextServerID++;
         this._host = '127.0.0.1';
         this._port = 0;
+        this._backlog = 256;
+        this._refed = true;
+        this._pendingClose = false;
         this.listening = false;
+        this.connections = 0;
+        this.maxConnections = 0;
+        this.allowHalfOpen = !!(options && options.allowHalfOpen);
         if (typeof connectionListener === 'function') {
             this.on('connection', connectionListener);
         }
@@ -281,56 +385,87 @@
     }
     Server.prototype = Object.create(EventEmitter.prototype);
     Server.prototype.constructor = Server;
-    Server.prototype.listen = function(port, host, callback) {
-        if (typeof host === 'function') {
-            callback = host;
-            host = undefined;
+    Server.prototype.listen = function() {
+        var port = 0;
+        var host = this._host;
+        var backlog = this._backlog;
+        var callback = null;
+        var options = arguments[0];
+
+        if (typeof options === 'function') {
+            callback = options;
+        } else if (typeof options === 'object' && options) {
+            if (typeof options.path === 'string') {
+                throw new Error('node:net UNIX domain sockets are not supported in swift-bun');
+            }
+            port = options.port || 0;
+            host = options.host || options.hostname || host;
+            if (typeof options.backlog === 'number') backlog = options.backlog;
+            if (typeof arguments[1] === 'function') callback = arguments[1];
+        } else {
+            port = options || 0;
+            if (typeof arguments[1] === 'string') {
+                host = arguments[1];
+                if (typeof arguments[2] === 'function') callback = arguments[2];
+            } else if (typeof arguments[1] === 'number') {
+                backlog = arguments[1];
+                if (typeof arguments[2] === 'function') callback = arguments[2];
+            } else if (typeof arguments[1] === 'function') {
+                callback = arguments[1];
+            }
         }
         if (callback) this.once('listening', callback);
         this._host = host || '127.0.0.1';
-        __netListen(this._id, this._host, port | 0, 256);
+        this._backlog = backlog;
+        __netListen(this._id, this._host, port | 0, backlog | 0);
         return this;
     };
     Server.prototype.address = function() {
+        if (!this.listening) return null;
         return { address: this._host, family: this._host.indexOf(':') !== -1 ? 'IPv6' : 'IPv4', port: this._port };
     };
     Server.prototype.close = function(callback) {
         if (callback) this.once('close', callback);
+        this._pendingClose = true;
         __netCloseServer(this._id);
+        finalizeServerClose(this._id);
+        return this;
+    };
+    Server.prototype.getConnections = function(callback) {
+        var self = this;
+        if (typeof callback !== 'function') {
+            throw new TypeError('Callback must be a function');
+        }
+        queueMicrotask(function() {
+            callback(null, __netServerConnectionCount(self._id));
+        });
+    };
+    Server.prototype.ref = function() {
+        if (!this._refed) {
+            this._refed = true;
+            __netSetServerRef(this._id, true);
+        }
+        return this;
+    };
+    Server.prototype.unref = function() {
+        if (this._refed) {
+            this._refed = false;
+            __netSetServerRef(this._id, false);
+        }
         return this;
     };
 
     function createSocket(metadata) {
-        var socket = new Socket(nextSocketID--, metadata || {});
-        sockets[socket._id] = socket;
-        return socket;
+        return new Socket(nextSocketID--, metadata || {});
     }
 
     function connect() {
-        var options = arguments[0];
-        var host = '127.0.0.1';
-        var port = 0;
-        var connectionListener = null;
-
-        if (typeof options === 'number') {
-            port = options;
-            if (typeof arguments[1] === 'string') {
-                host = arguments[1];
-                if (typeof arguments[2] === 'function') connectionListener = arguments[2];
-            } else if (typeof arguments[1] === 'function') {
-                connectionListener = arguments[1];
-            }
-        } else if (typeof options === 'object' && options) {
-            host = options.host || options.hostname || host;
-            port = options.port || port;
-            if (typeof arguments[1] === 'function') connectionListener = arguments[1];
-        } else if (typeof options === 'string') {
-            throw new Error('node:net UNIX domain sockets are not supported in swift-bun');
-        }
-
+        var normalized = normalizeConnectArgs(arguments);
         var socket = createSocket({});
-        if (typeof connectionListener === 'function') socket.once('connect', connectionListener);
-        __netConnect(socket._id, host, port | 0);
+        if (typeof normalized.connectionListener === 'function') socket.once('connect', normalized.connectionListener);
+        socket.connecting = true;
+        socket.pending = true;
+        __netConnect(socket._id, normalized.host, normalized.port);
         return socket;
     }
 
@@ -341,6 +476,7 @@
             if (!listeningServer) return;
             listeningServer._port = event.port;
             listeningServer._host = event.host || listeningServer._host;
+            listeningServer._pendingClose = false;
             listeningServer.listening = true;
             listeningServer.emit('listening');
             return;
@@ -349,7 +485,9 @@
             var server = servers[event.serverID];
             if (!server) return;
             var socket = new Socket(event.socketID, event);
+            socket._serverID = event.serverID;
             sockets[event.socketID] = socket;
+            server.connections += 1;
             server.emit('connection', socket);
             return;
         }
@@ -357,8 +495,8 @@
             var closingServer = servers[event.serverID];
             if (!closingServer) return;
             closingServer.listening = false;
-            delete servers[event.serverID];
-            closingServer.emit('close');
+            closingServer._pendingClose = true;
+            finalizeServerClose(event.serverID);
             return;
         }
         var socket = sockets[event.socketID];
@@ -369,12 +507,15 @@
             socket.remoteAddress = event.remoteAddress || socket.remoteAddress;
             socket.remotePort = event.remotePort || socket.remotePort;
             socket.remoteFamily = socket.remoteAddress.indexOf(':') !== -1 ? 'IPv6' : 'IPv4';
+            socket.connecting = false;
+            socket.pending = false;
             socket._refreshTimeout();
             socket.emit('connect');
             return;
         }
         if (event.type === 'data') {
             var chunk = Buffer.from(event.bytes || []);
+            socket.bytesRead += chunk.length;
             socket._refreshTimeout();
             var value = socket._encoding ? chunk.toString(socket._encoding) : chunk;
             if (socket._paused) {
@@ -391,9 +532,15 @@
         }
         if (event.type === 'close') {
             socket.destroyed = true;
+            socket.connecting = false;
+            socket.pending = false;
             socket._clearTimeoutHandle();
             delete sockets[event.socketID];
-            socket.emit('close');
+            if (socket._serverID && servers[socket._serverID]) {
+                servers[socket._serverID].connections = Math.max(0, servers[socket._serverID].connections - 1);
+                finalizeServerClose(socket._serverID);
+            }
+            socket.emit('close', !!socket._hadError);
             return;
         }
         if (event.type === 'error') {
@@ -402,6 +549,7 @@
                 if (erroredServer) erroredServer.emit('error', new Error(event.message || 'socket error'));
                 return;
             }
+            socket._hadError = true;
             socket._clearTimeoutHandle();
             socket.emit('error', new Error(event.message || 'socket error'));
         }

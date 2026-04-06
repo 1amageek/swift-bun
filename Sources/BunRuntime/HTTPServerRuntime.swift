@@ -47,7 +47,7 @@ final class HTTPServerRuntime: Sendable {
         }
         for channel in entries.map(\.channel) {
             do {
-                try await channel.close().get()
+                try await closeChannel(channel)
             } catch {
             }
         }
@@ -104,7 +104,7 @@ final class HTTPServerRuntime: Sendable {
                     "port": localPort,
                     "host": host,
                 ])
-                _ = channel.closeFuture.map { _ in
+                channel.closeFuture.whenComplete { _ in
                     callback([
                         "type": "close",
                         "serverID": Int(serverID),
@@ -150,6 +150,20 @@ final class HTTPServerRuntime: Sendable {
         pending.channel.write(HTTPServerResponsePart.head(head), promise: nil)
         pending.channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
         pending.channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+    }
+
+    private func closeChannel(_ channel: Channel) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            channel.closeFuture.whenComplete { result in
+                switch result {
+                case .success:
+                    continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+            channel.close(promise: nil)
+        }
     }
 }
 

@@ -1000,6 +1000,98 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == #"{"promiseValue":"promise path","streamed":"constructor path","hasTreeConstant":true}"#)
     }
 
+    @Test("zlib transform instances support flush params reset close and bytesWritten")
+    func zlibTransformLifecycleAPIs() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                return await new Promise(function(resolve, reject) {
+                    var encoder = zlib.createGzip();
+                    var decoder = zlib.createGunzip();
+                    var events = [];
+                    var streamed = '';
+
+                    decoder.setEncoding('utf8');
+                    decoder.on('data', function(chunk) {
+                        streamed += chunk;
+                    });
+                    decoder.on('end', function() {
+                        resolve(JSON.stringify({
+                            streamed: streamed,
+                            bytesWritten: encoder.bytesWritten,
+                            events: events
+                        }));
+                    });
+                    decoder.on('error', reject);
+                    encoder.on('error', reject);
+                    encoder.pipe(decoder);
+
+                    encoder.write('before-reset');
+                    encoder.params(1, zlib.constants.Z_DEFAULT_STRATEGY, function(error) {
+                        if (error) return reject(error);
+                        events.push('params');
+                        encoder.reset();
+                        encoder.write('after');
+                        encoder.flush(function(flushError) {
+                            if (flushError) return reject(flushError);
+                            events.push('flush');
+                            encoder.close(function(closeError) {
+                                if (closeError) return reject(closeError);
+                                events.push('close');
+                            });
+                        });
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"streamed":"after","bytesWritten":5,"events":["params","flush","close"]}"#)
+    }
+
+    @Test("zlib validates transform callback requirements and unsupported input")
+    func zlibTransformValidationAndErrors() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var zlib = require('node:zlib');
+                var encoder = zlib.createDeflate();
+                var flushIsChainable = encoder.flush() === encoder;
+                var closeEvents = [];
+                encoder.close(function(error) {
+                    closeEvents.push(error == null ? 'first' : 'first-error');
+                });
+                encoder.close(function(error) {
+                    closeEvents.push(error == null ? 'second' : 'second-error');
+                });
+
+                var paramsMessage = '';
+                try {
+                    encoder.params(1, zlib.constants.Z_DEFAULT_STRATEGY);
+                } catch (error) {
+                    paramsMessage = error.message;
+                }
+
+                var inputMessage = '';
+                try {
+                    zlib.gzipSync({ bad: true });
+                } catch (error) {
+                    inputMessage = error.message;
+                }
+
+                await Promise.resolve();
+
+                return JSON.stringify({
+                    flushIsChainable: flushIsChainable,
+                    paramsMessage: paramsMessage,
+                    inputMessage: inputMessage,
+                    closeEvents: closeEvents
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""flushIsChainable":true"#))
+        #expect(result.stringValue.contains(#""paramsMessage":"Callback must be a function""#))
+        #expect(result.stringValue.contains(#""inputMessage":"Unsupported zlib input""#))
+        #expect(result.stringValue.contains(#""closeEvents":["first","second"]"#))
+    }
+
     @Test("zlib promises and callbacks surface decompression errors")
     func zlibPromiseAndCallbackErrors() async throws {
         let result = try await evaluateAsync("""
@@ -1223,6 +1315,165 @@ struct NodeCompatModuleTests {
         #expect(result.stringValue == "ok")
     }
 
+    @Test("net.Socket connect and server close semantics match expected lifecycle")
+    func netSocketLifecycleAPIs() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var net = require('node:net');
+                return await new Promise(function(resolve, reject) {
+                    var log = [];
+                    var server = net.createServer(function(socket) {
+                        socket.setEncoding('utf8');
+                        log.push('server:connection');
+                        server.getConnections(function(error, count) {
+                            if (error) return reject(error);
+                            log.push('server:connections:' + count);
+                        });
+                        socket.on('data', function(chunk) {
+                            log.push('server:data:' + chunk);
+                            setTimeout(function() {
+                                socket.end('echo:' + chunk);
+                            }, 10);
+                        });
+                    });
+                    server.on('error', reject);
+                    server.listen({ port: 0, host: '127.0.0.1', backlog: 8 }, function() {
+                        var address = server.address();
+                        log.push('server:address:' + JSON.stringify(address));
+                        log.push('server:isIPv4:' + net.isIPv4(address.address));
+
+                        var client = new net.Socket();
+                        client.setEncoding('utf8');
+                        client.on('error', reject);
+                        client.on('data', function(chunk) {
+                            log.push('client:data:' + chunk);
+                            server.close(function() {
+                                log.push('server:close');
+                                resolve(JSON.stringify(log));
+                            });
+                        });
+                        client.on('close', function() {
+                            log.push('client:close');
+                        });
+                        client.connect({ host: '127.0.0.1', port: address.port }, function() {
+                            log.push('client:connect');
+                            log.push('client:address:' + JSON.stringify(client.address()));
+                            client.write('ping');
+                        });
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""server:connections:1""#))
+        #expect(result.stringValue.contains(#""client:data:echo:ping""#))
+        #expect(result.stringValue.contains(#""server:isIPv4:true""#))
+        #expect(result.stringValue.contains(#""client:connect""#))
+        #expect(result.stringValue.contains(#""server:close""#))
+    }
+
+    @Test("net server and socket ref helpers are chainable")
+    func netRefHelpersAreChainable() async throws {
+        let result = try await evaluate("""
+            (function() {
+                var net = require('node:net');
+                var server = net.createServer();
+                var socket = new net.Socket();
+                return JSON.stringify({
+                    serverUnref: server.unref() === server,
+                    serverRef: server.ref() === server,
+                    socketUnref: socket.unref() === socket,
+                    socketRef: socket.ref() === socket
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"serverUnref":true,"serverRef":true,"socketUnref":true,"socketRef":true}"#)
+    }
+
+    @Test("net pause resume and unshift preserve queued data ordering")
+    func netPauseResumeAndUnshift() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var net = require('node:net');
+                return await new Promise(function(resolve, reject) {
+                    var server = net.createServer(function(socket) {
+                        socket.write('b');
+                        socket.end('c');
+                    });
+                    server.on('error', reject);
+                    server.listen(0, '127.0.0.1', function() {
+                        var client = net.connect(server.address().port, '127.0.0.1');
+                        var seen = '';
+                        client.setEncoding('utf8');
+                        client.pause();
+                        client.on('data', function(chunk) {
+                            seen += chunk;
+                        });
+                        client.on('end', function() {
+                            server.close(function() {
+                                resolve(seen);
+                            });
+                        });
+                        client.on('connect', function() {
+                            client.unshift('a');
+                            client.resume();
+                        });
+                        client.on('error', reject);
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue == "abc")
+    }
+
+    @Test("net destroy surfaces error close state and unsupported path")
+    func netDestroyAndUnsupportedPath() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var net = require('node:net');
+                var unsupportedMessage = '';
+                try {
+                    net.connect('/tmp/example.sock');
+                } catch (error) {
+                    unsupportedMessage = error.message;
+                }
+
+                return await new Promise(function(resolve, reject) {
+                    var server = net.createServer(function(socket) {
+                        socket.on('data', function() {
+                            socket.write('ignored');
+                        });
+                    });
+                    server.on('error', reject);
+                    server.listen(0, '127.0.0.1', function() {
+                        var client = net.connect(server.address().port, '127.0.0.1');
+                        var snapshot = { unsupportedMessage: unsupportedMessage };
+                        client.on('connect', function() {
+                            client.destroy(new Error('boom'));
+                        });
+                        client.on('error', function(error) {
+                            snapshot.errorMessage = error.message;
+                        });
+                        client.on('close', function(hadError) {
+                            snapshot.hadError = hadError;
+                            snapshot.destroyed = client.destroyed;
+                            snapshot.pending = client.pending;
+                            snapshot.connecting = client.connecting;
+                            server.close(function() {
+                                resolve(JSON.stringify(snapshot));
+                            });
+                        });
+                    });
+                });
+            })()
+        """)
+        #expect(result.stringValue.contains(#""unsupportedMessage":"node:net UNIX domain sockets are not supported in swift-bun""#))
+        #expect(result.stringValue.contains(#""errorMessage":"boom""#))
+        #expect(result.stringValue.contains(#""hadError":true"#))
+        #expect(result.stringValue.contains(#""destroyed":true"#))
+        #expect(result.stringValue.contains(#""pending":false"#))
+        #expect(result.stringValue.contains(#""connecting":false"#))
+    }
+
     @Test("http.createServer handles request and response")
     func httpCreateServer() async throws {
         let result = try await evaluateAsync("""
@@ -1417,5 +1668,86 @@ struct NodeCompatModuleTests {
         let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect((payload["errorMessage"] as? String)?.isEmpty == false)
         #expect(payload["closeCode"] != nil)
+    }
+
+    @Test("dns resolve4 resolveAny and reverse expose Node-like shapes")
+    func dnsResolveSurface() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var dns = require('node:dns');
+                var resolve4 = await dns.promises.resolve4('localhost');
+                var resolveAny = await dns.promises.resolveAny('localhost');
+                var reverse = await dns.promises.reverse('127.0.0.1');
+                return JSON.stringify({
+                    resolve4Count: resolve4.length,
+                    anyTypes: resolveAny.map(function(record) { return record.type; }).sort(),
+                    reverseCount: reverse.length
+                });
+            })()
+        """)
+        let data = try #require(result.stringValue.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect((payload["resolve4Count"] as? Int ?? 0) >= 1)
+        let anyTypes = try #require(payload["anyTypes"] as? [String])
+        #expect(anyTypes.contains("A"))
+        #expect((payload["reverseCount"] as? Int ?? 0) >= 1)
+    }
+
+    @Test("dns resolveTxt reports unsupported records with ENOTIMP")
+    func dnsUnsupportedResolve() async throws {
+        let result = try await evaluateAsync("""
+            (async function() {
+                var dns = require('node:dns');
+                try {
+                    await dns.promises.resolveTxt('localhost');
+                    return 'missing';
+                } catch (error) {
+                    return JSON.stringify({
+                        code: error && error.code,
+                        message: error && error.message
+                    });
+                }
+            })()
+        """)
+        #expect(result.stringValue == #"{"code":"ENOTIMP","message":"dns.resolveTxt() is not supported in swift-bun"}"#)
+    }
+
+    @Test("http2 connect request and response work against local server")
+    func http2ClientCompatibility() async throws {
+        let server = try await LocalHTTPTestServer.start()
+        let result = try await evaluateAsync("""
+            (async function() {
+                var http2 = require('node:http2');
+                var session = http2.connect('\(server.baseURL)');
+                var stream = session.request({
+                    ':method': 'GET',
+                    ':path': '/json'
+                });
+
+                return await new Promise(function(resolve, reject) {
+                    var body = '';
+                    var status = 0;
+                    stream.setEncoding('utf8');
+                    stream.on('response', function(headers) {
+                        status = headers[':status'];
+                    });
+                    stream.on('data', function(chunk) {
+                        body += chunk;
+                    });
+                    stream.on('end', function() {
+                        session.close();
+                        resolve(JSON.stringify({
+                            status: status,
+                            hasTitle: body.indexOf('Sample Slide Show') !== -1
+                        }));
+                    });
+                    stream.on('error', reject);
+                    stream.end();
+                });
+            })()
+        """)
+        try await server.shutdown()
+
+        #expect(result.stringValue == #"{"status":200,"hasTitle":true}"#)
     }
 }

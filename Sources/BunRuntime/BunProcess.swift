@@ -38,6 +38,7 @@ public final class BunProcess: Sendable {
     private let zlibAsyncBridge: ZlibAsyncBridge
     private let socketRuntime: SocketRuntime
     private let httpServerRuntime: HTTPServerRuntime
+    private let tlsRuntime: TLSRuntime
     private let webSocketRuntime: WebSocketRuntime
 
     // MARK: - Process State
@@ -232,7 +233,9 @@ public final class BunProcess: Sendable {
             },
             onServerClosed: { token in
                 handleRegistry.decrementTCPServerCount()
-                lifecycle.releaseVisibleHandle(token)
+                if let token {
+                    lifecycle.releaseVisibleHandle(token)
+                }
             },
             onSocketOpened: {
                 handleRegistry.incrementTCPSocketCount()
@@ -240,7 +243,9 @@ public final class BunProcess: Sendable {
             },
             onSocketClosed: { token in
                 handleRegistry.decrementTCPSocketCount()
-                lifecycle.releaseVisibleHandle(token)
+                if let token {
+                    lifecycle.releaseVisibleHandle(token)
+                }
             }
         )
         let httpServerRuntime = HTTPServerRuntime(
@@ -251,6 +256,18 @@ public final class BunProcess: Sendable {
             onServerClosed: { token in
                 handleRegistry.decrementHTTPServerCount()
                 lifecycle.releaseVisibleHandle(token)
+            }
+        )
+        let tlsRuntime = TLSRuntime(
+            onSocketOpened: {
+                handleRegistry.incrementTLSSocketCount()
+                return lifecycle.acquireVisibleHandle(kind: "tlsSocket")
+            },
+            onSocketClosed: { token in
+                handleRegistry.decrementTLSSocketCount()
+                if let token {
+                    lifecycle.releaseVisibleHandle(token)
+                }
             }
         )
         let webSocketRuntime = WebSocketRuntime(
@@ -270,6 +287,7 @@ public final class BunProcess: Sendable {
         self.zlibAsyncBridge = zlibAsyncBridge
         self.socketRuntime = socketRuntime
         self.httpServerRuntime = httpServerRuntime
+        self.tlsRuntime = tlsRuntime
         self.webSocketRuntime = webSocketRuntime
 
         executor.execute {
@@ -503,6 +521,17 @@ public final class BunProcess: Sendable {
                         let setupBarrier = self.lifecycle.acquireBootBarrier(name: "context-setup")
                         self.runStartupBarrier = self.lifecycle.acquireBootBarrier(name: "startup-sequence")
                         try self.setupContext()
+                        // Drain any pre-queued stdin immediately into the JS
+                        // context buffer, before any scheduler drain cycles
+                        // execute the CLI's async initialization. The CLI may
+                        // read stdin during early init and exit if it finds no
+                        // data — delivering here prevents that race.
+                        if self.pendingStdinCount > 0 {
+                            self.emitDiagnostic(
+                                "[bun:stdin] boot drain begin queued=\(self.pendingStdinCount)"
+                            )
+                            self.drainPendingStdin()
+                        }
                         self.lifecycle.releaseBootBarrier(setupBarrier)
                         self.completeRunStartup()
                     } catch {
@@ -600,6 +629,7 @@ public final class BunProcess: Sendable {
         try await nativeRuntime.shutdown()
         try await socketRuntime.shutdown()
         try await httpServerRuntime.shutdown()
+        try await tlsRuntime.shutdown()
         try await webSocketRuntime.shutdown()
         try await executor.shutdown()
         shutdownState.withLock { $0 = .shutDown }
@@ -610,72 +640,93 @@ public final class BunProcess: Sendable {
     private func setupContext() throws {
         executor.preconditionInExecutor()
 
-        guard let ctx = JSContext() else {
-            throw BunRuntimeError.contextCreationFailed
-        }
-        executor.installContext(ctx)
+        let bootstrap = BunProcessIsolateBootstrap(
+            entryPoint: .init(bundle: bundle, arguments: arguments),
+            runtimeEnvironment: mergedRuntimeEnvironment(),
+            makeContext: {
+                guard let context = JSContext() else {
+                    throw BunRuntimeError.contextCreationFailed
+                }
+                return context
+            },
+            installContext: { [executor] context in
+                executor.installContext(context)
+            },
+            makeModuleBootstrap: { [fileSystemAsyncBridge, builtinCommandBridge, zlibAsyncBridge, cwd] environment in
+                ModuleBootstrap(
+                    fileSystemAsyncBridge: fileSystemAsyncBridge,
+                    builtinCommandBridge: builtinCommandBridge,
+                    zlibAsyncBridge: zlibAsyncBridge,
+                    environment: environment,
+                    cwd: cwd
+                )
+            },
+            installFoundation: { [self] context, resolver in
+                installCryptoRandomBridge(in: context)
+                try installWebAPIPolyfills(in: context)
+                try throwPendingJavaScriptException(source: "setup:webAPIPolyfills")
+                try resolver.installModules(into: context)
+                try throwPendingJavaScriptException(source: "setup:installModules")
+            },
+            installHostBridges: { [self] context, resolver in
+                installConsoleBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:consoleBridge")
+                installStdioBridges(in: context)
+                try throwPendingJavaScriptException(source: "setup:stdioBridges")
+                installProcessDiagnosticsBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:processDiagnosticsBridge")
+                try installAsyncBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:asyncBridge")
+                try installTimerBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:timerBridge")
+                installFetchBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:fetchBridge")
+                installDNSBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:dnsBridge")
+                installSocketBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:socketBridge")
+                installTLSBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:tlsBridge")
+                installHTTPServerBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:httpServerBridge")
+                try installWebSocketBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:webSocketBridge")
+                try installProcessExitBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:processExitBridge")
+                installStdinBridge(in: context)
+                try throwPendingJavaScriptException(source: "setup:stdinBridge")
+                try patchTimerModuleReferences(in: context)
+                try throwPendingJavaScriptException(source: "setup:patchTimerRefs")
+                try resolver.installRequire(into: context)
+                try throwPendingJavaScriptException(source: "setup:installRequire")
+            },
+            configureEntryPoint: { [self] context, entryPoint in
+                guard let bundle = entryPoint.bundle else {
+                    return
+                }
 
-        let runtimeEnvironment = mergedRuntimeEnvironment()
-
-        installCryptoRandomBridge(in: ctx)
-        try installWebAPIPolyfills(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:webAPIPolyfills")
-
-        let resolver = ModuleBootstrap(
-            fileSystemAsyncBridge: fileSystemAsyncBridge,
-            builtinCommandBridge: builtinCommandBridge,
-            zlibAsyncBridge: zlibAsyncBridge,
-            environment: runtimeEnvironment,
-            cwd: cwd
-        )
-        try resolver.installModules(into: ctx)
-        try throwPendingJavaScriptException(source: "setup:installModules")
-        installConsoleBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:consoleBridge")
-        installStdioBridges(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:stdioBridges")
-        installProcessDiagnosticsBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:processDiagnosticsBridge")
-        try installAsyncBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:asyncBridge")
-        try installTimerBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:timerBridge")
-        installFetchBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:fetchBridge")
-        installDNSBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:dnsBridge")
-        installSocketBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:socketBridge")
-        installHTTPServerBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:httpServerBridge")
-        try installWebSocketBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:webSocketBridge")
-        try installProcessExitBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:processExitBridge")
-        installStdinBridge(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:stdinBridge")
-        try patchTimerModuleReferences(in: ctx)
-        try throwPendingJavaScriptException(source: "setup:patchTimerRefs")
-        try resolver.installRequire(into: ctx)
-        try throwPendingJavaScriptException(source: "setup:installRequire")
-
-        if let bundle {
-            let argv = ["node", bundle.path] + arguments
-            guard let process = ctx.objectForKeyedSubscript("process"), !process.isUndefined else {
-                throw BunRuntimeError.javaScriptException("process is not installed")
+                let argv = ["node", bundle.path] + entryPoint.arguments
+                guard let process = context.objectForKeyedSubscript("process"), !process.isUndefined else {
+                    throw BunRuntimeError.javaScriptException("process is not installed")
+                }
+                process.setObject(argv, forKeyedSubscript: "argv" as NSString)
+                try throwPendingJavaScriptException(source: "setup:processArgv")
+            },
+            installRejectionReporter: { [outputContinuation] context in
+                let rejectionBlock: @convention(block) (String) -> Void = { message in
+                    outputContinuation.yield("[bun:rejection] \(message)")
+                }
+                context.setObject(rejectionBlock, forKeyedSubscript: "__reportRejection" as NSString)
+            },
+            evaluateEntryPoint: { [self] context, entryPoint in
+                guard let bundle = entryPoint.bundle else {
+                    return
+                }
+                try evaluateBundle(bundle, in: context)
             }
-            process.setObject(argv, forKeyedSubscript: "argv" as NSString)
-            try throwPendingJavaScriptException(source: "setup:processArgv")
-        }
+        )
 
-        let rejectionBlock: @convention(block) (String) -> Void = { [outputContinuation] message in
-            outputContinuation.yield("[bun:rejection] \(message)")
-        }
-        ctx.setObject(rejectionBlock, forKeyedSubscript: "__reportRejection" as NSString)
-
-        if let bundle {
-            try evaluateBundle(bundle, in: ctx)
-        }
+        try bootstrap.boot()
     }
 
     private func mergedRuntimeEnvironment() -> [String: String] {
@@ -1161,10 +1212,13 @@ public final class BunProcess: Sendable {
     }
 
     private static func isATTY(fileDescriptor: Int32) -> Bool {
+        // fd 0 (stdin) is always non-TTY because BunProcess provides
+        // a virtual Readable stream, not a real terminal input.
+        if fileDescriptor == 0 { return false }
         #if canImport(Darwin)
-        Darwin.isatty(fileDescriptor) == 1
+        return Darwin.isatty(fileDescriptor) == 1
         #else
-        false
+        return false
         #endif
     }
 
@@ -1563,6 +1617,90 @@ public final class BunProcess: Sendable {
             socketRuntime.destroy(socketID: socketID)
         }
         ctx.setObject(destroyBlock, forKeyedSubscript: "__netDestroy" as NSString)
+
+        let setServerRefBlock: @convention(block) (Int32, Bool) -> Void = { [socketRuntime] serverID, isRefed in
+            socketRuntime.setServerRef(id: serverID, isRefed: isRefed)
+        }
+        ctx.setObject(setServerRefBlock, forKeyedSubscript: "__netSetServerRef" as NSString)
+
+        let setSocketRefBlock: @convention(block) (Int32, Bool) -> Void = { [socketRuntime] socketID, isRefed in
+            socketRuntime.setSocketRef(id: socketID, isRefed: isRefed)
+        }
+        ctx.setObject(setSocketRefBlock, forKeyedSubscript: "__netSetSocketRef" as NSString)
+
+        let serverConnectionCountBlock: @convention(block) (Int32) -> Int32 = { [socketRuntime] serverID in
+            Int32(socketRuntime.serverConnectionCount(id: serverID))
+        }
+        ctx.setObject(serverConnectionCountBlock, forKeyedSubscript: "__netServerConnectionCount" as NSString)
+    }
+
+    private func installTLSBridge(in ctx: JSContext) {
+        let dispatchEvent: @Sendable ([String: Any]) -> Void = { [self] payload in
+            self.scheduler.enqueueHostCallback(source: "tls:event") {
+                guard let ctx = self.executor.context,
+                      let dispatcher = ctx.objectForKeyedSubscript("__swiftBunTLSDispatch"),
+                      !dispatcher.isUndefined else {
+                    return
+                }
+                _ = dispatcher.call(withArguments: [payload])
+                self.reportPendingJavaScriptException(source: "tlsDispatch")
+            }
+        }
+
+        let connectBlock: @convention(block) (Int32, String, Int32, String?, Bool) -> Void = { [tlsRuntime] socketID, host, port, serverName, rejectUnauthorized in
+            Task {
+                await tlsRuntime.connect(
+                    socketID: socketID,
+                    host: host,
+                    port: Int(port),
+                    serverName: serverName,
+                    rejectUnauthorized: rejectUnauthorized,
+                    callback: dispatchEvent
+                )
+            }
+        }
+        ctx.setObject(connectBlock, forKeyedSubscript: "__tlsConnect" as NSString)
+
+        let writeBlock: @convention(block) (Int32, [UInt8]) -> Void = { [tlsRuntime] socketID, bytes in
+            Task {
+                await tlsRuntime.write(socketID: socketID, bytes: bytes)
+            }
+        }
+        ctx.setObject(writeBlock, forKeyedSubscript: "__tlsWrite" as NSString)
+
+        let endBlock: @convention(block) (Int32, JSValue?) -> Void = { [tlsRuntime] socketID, maybeBytes in
+            let bytes = maybeBytes?.toArray()?.compactMap { value -> UInt8? in
+                if let number = value as? NSNumber {
+                    return UInt8(truncating: number)
+                }
+                if let intValue = value as? Int {
+                    return UInt8(truncatingIfNeeded: intValue)
+                }
+                return nil
+            }
+            Task {
+                if let bytes, !bytes.isEmpty {
+                    await tlsRuntime.write(socketID: socketID, bytes: bytes, endAfterWrite: true)
+                } else {
+                    await tlsRuntime.end(socketID: socketID)
+                }
+            }
+        }
+        ctx.setObject(endBlock, forKeyedSubscript: "__tlsEnd" as NSString)
+
+        let destroyBlock: @convention(block) (Int32) -> Void = { [tlsRuntime] socketID in
+            Task {
+                await tlsRuntime.destroy(socketID: socketID)
+            }
+        }
+        ctx.setObject(destroyBlock, forKeyedSubscript: "__tlsDestroy" as NSString)
+
+        let setSocketRefBlock: @convention(block) (Int32, Bool) -> Void = { [tlsRuntime] socketID, isRefed in
+            Task {
+                await tlsRuntime.setSocketRef(id: socketID, isRefed: isRefed)
+            }
+        }
+        ctx.setObject(setSocketRefBlock, forKeyedSubscript: "__tlsSetSocketRef" as NSString)
     }
 
     private func installDNSBridge(in ctx: JSContext) {
@@ -1784,8 +1922,11 @@ public final class BunProcess: Sendable {
     // MARK: - process.exit Bridge
 
     private func installProcessExitBridge(in ctx: JSContext) throws {
-        let exitBlock: @convention(block) (JSValue) -> Void = { [self] codeValue in
+        let exitBlock: @convention(block) (JSValue) -> Void = { [self, outputContinuation] codeValue in
             let code: Int32 = codeValue.isUndefined ? 0 : codeValue.toInt32()
+            if code != 0 {
+                outputContinuation.yield("[bun:exit] process.exit(\(code)) called")
+            }
             self.requestExit(code: code)
         }
         ctx.setObject(exitBlock, forKeyedSubscript: "__processExit" as NSString)
@@ -1922,9 +2063,11 @@ public final class BunProcess: Sendable {
             ensureStdinDeliveryGraceHandleIfNeeded()
             scheduleStdinDeliveryGraceReleaseIfNeeded()
             let string = String(data: data, encoding: .utf8) ?? ""
+            let preview = String(string.prefix(200))
             emitDiagnostic(
                 "[bun:stdin] deliver bytes=\(data.count) remaining=\(pendingStdinCount) stdinRefed=\(handleRegistry.isStdinRefed)"
             )
+            outputContinuation.yield("[bun:stdin] payload preview: \(preview)")
             _ = deliver.call(withArguments: [string])
         } else {
             releaseStdinDeliveryGraceHandleIfNeeded(reason: "stdin-eof")

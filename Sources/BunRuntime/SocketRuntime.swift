@@ -6,12 +6,14 @@ import Synchronization
 final class SocketRuntime: Sendable {
     private struct ServerEntry: Sendable {
         let channel: Channel
-        let visibleHandleToken: LifecycleController.VisibleHandleToken
+        var visibleHandleToken: LifecycleController.VisibleHandleToken?
+        var socketIDs: Set<Int32>
     }
 
     private struct SocketEntry: Sendable {
         let channel: Channel
-        let visibleHandleToken: LifecycleController.VisibleHandleToken
+        var visibleHandleToken: LifecycleController.VisibleHandleToken?
+        let serverID: Int32?
     }
 
     private struct State: Sendable {
@@ -23,15 +25,15 @@ final class SocketRuntime: Sendable {
     private let group: MultiThreadedEventLoopGroup
     private let state = Mutex(State())
     private let onServerOpened: @Sendable () -> LifecycleController.VisibleHandleToken
-    private let onServerClosed: @Sendable (LifecycleController.VisibleHandleToken) -> Void
+    private let onServerClosed: @Sendable (LifecycleController.VisibleHandleToken?) -> Void
     private let onSocketOpened: @Sendable () -> LifecycleController.VisibleHandleToken
-    private let onSocketClosed: @Sendable (LifecycleController.VisibleHandleToken) -> Void
+    private let onSocketClosed: @Sendable (LifecycleController.VisibleHandleToken?) -> Void
 
     init(
         onServerOpened: @escaping @Sendable () -> LifecycleController.VisibleHandleToken,
-        onServerClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken) -> Void,
+        onServerClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken?) -> Void,
         onSocketOpened: @escaping @Sendable () -> LifecycleController.VisibleHandleToken,
-        onSocketClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken) -> Void
+        onSocketClosed: @escaping @Sendable (LifecycleController.VisibleHandleToken?) -> Void
     ) {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.onServerOpened = onServerOpened
@@ -58,7 +60,7 @@ final class SocketRuntime: Sendable {
 
         for channel in entries.0.map(\.channel) + entries.1.map(\.channel) {
             do {
-                try await channel.close().get()
+                try await closeChannel(channel)
             } catch {
             }
         }
@@ -90,7 +92,15 @@ final class SocketRuntime: Sendable {
                 let socketID = self.state.withLock { state -> Int32 in
                     let identifier = state.nextSocketID
                     state.nextSocketID += 1
-                    state.socketChannels[identifier] = SocketEntry(channel: channel, visibleHandleToken: visibleHandleToken)
+                    state.socketChannels[identifier] = SocketEntry(
+                        channel: channel,
+                        visibleHandleToken: visibleHandleToken,
+                        serverID: serverID
+                    )
+                    if var serverEntry = state.serverChannels[serverID] {
+                        serverEntry.socketIDs.insert(identifier)
+                        state.serverChannels[serverID] = serverEntry
+                    }
                     return identifier
                 }
 
@@ -100,11 +110,16 @@ final class SocketRuntime: Sendable {
                     callback: callback,
                     onClose: { [weak self] identifier in
                         let token = self?.state.withLock { state in
-                            state.socketChannels.removeValue(forKey: identifier)?.visibleHandleToken
+                            let entry = state.socketChannels.removeValue(forKey: identifier)
+                            if let serverID = entry?.serverID {
+                                if var serverEntry = state.serverChannels[serverID] {
+                                    serverEntry.socketIDs.remove(identifier)
+                                    state.serverChannels[serverID] = serverEntry
+                                }
+                            }
+                            return entry?.visibleHandleToken
                         }
-                        if let token {
-                            self?.onSocketClosed(token)
-                        }
+                        self?.onSocketClosed(token)
                     }
                 )
 
@@ -117,14 +132,20 @@ final class SocketRuntime: Sendable {
                 let channel = try await bootstrap.bind(host: host, port: port).get()
                 let localPort = channel.localAddress?.port ?? port
                 let visibleHandleToken = self.onServerOpened()
-                state.withLock { $0.serverChannels[serverID] = ServerEntry(channel: channel, visibleHandleToken: visibleHandleToken) }
+                state.withLock {
+                    $0.serverChannels[serverID] = ServerEntry(
+                        channel: channel,
+                        visibleHandleToken: visibleHandleToken,
+                        socketIDs: []
+                    )
+                }
                 callback([
                     "type": "listening",
                     "serverID": Int(serverID),
                     "port": localPort,
                     "host": host,
                 ])
-                _ = channel.closeFuture.map { _ in
+                channel.closeFuture.whenComplete { _ in
                     callback([
                         "type": "close",
                         "serverID": Int(serverID),
@@ -132,9 +153,7 @@ final class SocketRuntime: Sendable {
                     let token = self.state.withLock { state in
                         state.serverChannels.removeValue(forKey: serverID)?.visibleHandleToken
                     }
-                    if let token {
-                        self.onServerClosed(token)
-                    }
+                    self.onServerClosed(token)
                 }
             } catch {
                 callback([
@@ -161,7 +180,13 @@ final class SocketRuntime: Sendable {
             .channelInitializer { [weak self] channel in
                 guard let self else { return channel.eventLoop.makeSucceededFuture(()) }
                 let visibleHandleToken = self.onSocketOpened()
-                self.state.withLock { $0.socketChannels[socketID] = SocketEntry(channel: channel, visibleHandleToken: visibleHandleToken) }
+                self.state.withLock {
+                    $0.socketChannels[socketID] = SocketEntry(
+                        channel: channel,
+                        visibleHandleToken: visibleHandleToken,
+                        serverID: nil
+                    )
+                }
                 return channel.pipeline.addHandler(
                     TCPSocketInboundHandler(
                         socketID: socketID,
@@ -169,11 +194,16 @@ final class SocketRuntime: Sendable {
                         callback: callback,
                         onClose: { [weak self] identifier in
                             let token = self?.state.withLock { state in
-                                state.socketChannels.removeValue(forKey: identifier)?.visibleHandleToken
+                                let entry = state.socketChannels.removeValue(forKey: identifier)
+                                if let serverID = entry?.serverID {
+                                    if var serverEntry = state.serverChannels[serverID] {
+                                        serverEntry.socketIDs.remove(identifier)
+                                        state.serverChannels[serverID] = serverEntry
+                                    }
+                                }
+                                return entry?.visibleHandleToken
                             }
-                            if let token {
-                                self?.onSocketClosed(token)
-                            }
+                            self?.onSocketClosed(token)
                         }
                     )
                 )
@@ -225,6 +255,66 @@ final class SocketRuntime: Sendable {
     func destroy(socketID: Int32) {
         let channel = state.withLock { $0.socketChannels[socketID]?.channel }
         channel?.close(promise: nil)
+    }
+
+    func setServerRef(id: Int32, isRefed: Bool) {
+        let releasedToken = state.withLock { state -> LifecycleController.VisibleHandleToken? in
+            guard var entry = state.serverChannels[id] else { return nil }
+            if isRefed {
+                guard entry.visibleHandleToken == nil else { return nil }
+                entry.visibleHandleToken = onServerOpened()
+                state.serverChannels[id] = entry
+                return nil
+            }
+            let token = entry.visibleHandleToken
+            entry.visibleHandleToken = nil
+            state.serverChannels[id] = entry
+            return token
+        }
+
+        if isRefed {
+            return
+        }
+        onServerClosed(releasedToken)
+    }
+
+    func setSocketRef(id: Int32, isRefed: Bool) {
+        let releasedToken = state.withLock { state -> LifecycleController.VisibleHandleToken? in
+            guard var entry = state.socketChannels[id] else { return nil }
+            if isRefed {
+                guard entry.visibleHandleToken == nil else { return nil }
+                entry.visibleHandleToken = onSocketOpened()
+                state.socketChannels[id] = entry
+                return nil
+            }
+            let token = entry.visibleHandleToken
+            entry.visibleHandleToken = nil
+            state.socketChannels[id] = entry
+            return token
+        }
+
+        if isRefed {
+            return
+        }
+        onSocketClosed(releasedToken)
+    }
+
+    func serverConnectionCount(id: Int32) -> Int {
+        state.withLock { $0.serverChannels[id]?.socketIDs.count ?? 0 }
+    }
+
+    private func closeChannel(_ channel: Channel) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            channel.closeFuture.whenComplete { result in
+                switch result {
+                case .success:
+                    continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+            channel.close(promise: nil)
+        }
     }
 }
 

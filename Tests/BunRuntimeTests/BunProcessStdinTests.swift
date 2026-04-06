@@ -114,6 +114,39 @@ struct BunProcessStdinTests {
         #expect(try await task.value == 0)
     }
 
+    @Test func stdinAsyncIteratorUnrefsAfterSynchronousNextThrow() async throws {
+        let url = try tempBundle("""
+            (async function() {
+                process.stdin.read = function() {
+                    throw new Error('sync-next-failure');
+                };
+
+                try {
+                    for await (const _ of process.stdin) {
+                    }
+                    process.exit(1);
+                    return;
+                } catch (error) {
+                    if (!error || error.message !== 'sync-next-failure') {
+                        process.exit(1);
+                        return;
+                    }
+                }
+                // No explicit exit here. The iterator keep-alive must be released
+                // even when next() throws synchronously.
+            })();
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let p = BunProcess(bundle: url)
+        let task = Task { try await TestProcessSupport.run(p) }
+
+        try await Task.sleep(for: .milliseconds(50))
+        p.sendInput("boom".data(using: .utf8)!)
+        try await Task.sleep(for: .milliseconds(10))
+        p.sendInput(nil)
+        #expect(try await task.value == 0)
+    }
+
     @Test func stdinPipe() async throws {
         let url = try tempBundle("""
             var output = '';

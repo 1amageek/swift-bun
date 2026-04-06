@@ -9313,6 +9313,9 @@ var __swiftBunYAMLPackage;
           suppressResumeRef = true;
           try {
             nextResult = iterator.next.apply(iterator, arguments);
+          } catch (error) {
+            releaseOnce();
+            throw error;
           } finally {
             suppressResumeRef = false;
           }

@@ -682,6 +682,9 @@ if (!globalThis.__swiftBunPackages) {
           suppressResumeRef = true;
           try {
             nextResult = iterator.next.apply(iterator, arguments);
+          } catch (error) {
+            releaseOnce();
+            throw error;
           } finally {
             suppressResumeRef = false;
           }
@@ -1041,6 +1044,8 @@ if (typeof globalThis.queueMicrotask === "undefined") {
     init = init || {};
     if (typeof input === "string") {
       this.url = input;
+    } else if (typeof URL !== "undefined" && input instanceof URL) {
+      this.url = input.href;
     } else {
       this.url = input.url;
       init = Object.assign({}, input, init);

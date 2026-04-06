@@ -101,10 +101,13 @@
 
         var chunks = [];
         var transform;
+        var closed = false;
         transform = new stream.Transform({
             write: function(chunk, encoding, cb) {
                 try {
-                    chunks.push(toBuffer(chunk));
+                    var buffer = toBuffer(chunk);
+                    transform.bytesWritten += buffer.length;
+                    chunks.push(buffer);
                     cb();
                 } catch (error) {
                     cb(error);
@@ -136,6 +139,61 @@
                     cb(error);
                 }
             },
+        });
+        transform.bytesWritten = 0;
+        transform.flush = function(kind, callback) {
+            if (typeof kind === 'function') {
+                callback = kind;
+            }
+            if (typeof callback === 'function') {
+                queueMicrotask(function() {
+                    callback(null);
+                });
+            }
+            return transform;
+        };
+        transform.params = function(level, strategy, callback) {
+            void level;
+            void strategy;
+            if (typeof callback !== 'function') {
+                throw new TypeError('Callback must be a function');
+            }
+            queueMicrotask(function() {
+                callback(null);
+            });
+            return transform;
+        };
+        transform.reset = function() {
+            chunks.length = 0;
+            transform.bytesWritten = 0;
+            return transform;
+        };
+        transform.close = function(callback) {
+            if (typeof callback === 'function') {
+                if (closed) {
+                    queueMicrotask(function() {
+                        callback(null);
+                    });
+                } else {
+                    transform.once('finish', function() {
+                        callback(null);
+                    });
+                }
+            }
+            if (!closed) {
+                closed = true;
+                if (!transform.writableEnded) {
+                    transform.end();
+                } else if (typeof transform.destroy === 'function') {
+                    transform.destroy();
+                }
+            }
+            return transform;
+        };
+        transform.once('finish', function() {
+            if (closed || typeof transform.destroy !== 'function') return;
+            closed = true;
+            transform.destroy();
         });
         return transform;
     }

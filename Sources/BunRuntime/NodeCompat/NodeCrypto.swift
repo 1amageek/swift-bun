@@ -22,11 +22,24 @@ struct NodeCrypto: JavaScriptModuleInstalling, Sendable {
         context.setObject(randomUUIDBlock, forKeyedSubscript: "__cryptoRandomUUID" as NSString)
 
         // SHA-256 hash (accepts Uint8Array as [UInt8])
+        let sha1Block: @convention(block) ([UInt8]) -> String = { bytes in
+            let hash = Insecure.SHA1.hash(data: Data(bytes))
+            return hash.map { String(format: "%02x", $0) }.joined()
+        }
+        context.setObject(sha1Block, forKeyedSubscript: "__cryptoSHA1" as NSString)
+
+        // SHA-256 hash (accepts Uint8Array as [UInt8])
         let sha256Block: @convention(block) ([UInt8]) -> String = { bytes in
             let hash = SHA256.hash(data: Data(bytes))
             return hash.map { String(format: "%02x", $0) }.joined()
         }
         context.setObject(sha256Block, forKeyedSubscript: "__cryptoSHA256" as NSString)
+
+        let sha384Block: @convention(block) ([UInt8]) -> String = { bytes in
+            let hash = SHA384.hash(data: Data(bytes))
+            return hash.map { String(format: "%02x", $0) }.joined()
+        }
+        context.setObject(sha384Block, forKeyedSubscript: "__cryptoSHA384" as NSString)
 
         // SHA-512 hash (accepts Uint8Array as [UInt8])
         let sha512Block: @convention(block) ([UInt8]) -> String = { bytes in
@@ -41,8 +54,14 @@ struct NodeCrypto: JavaScriptModuleInstalling, Sendable {
             let messageData = Data(dataBytes)
 
             switch algorithm.lowercased() {
+            case "sha1":
+                let mac = HMAC<Insecure.SHA1>.authenticationCode(for: messageData, using: keyData)
+                return Data(mac).map { String(format: "%02x", $0) }.joined()
             case "sha256":
                 let mac = HMAC<SHA256>.authenticationCode(for: messageData, using: keyData)
+                return Data(mac).map { String(format: "%02x", $0) }.joined()
+            case "sha384":
+                let mac = HMAC<SHA384>.authenticationCode(for: messageData, using: keyData)
                 return Data(mac).map { String(format: "%02x", $0) }.joined()
             case "sha512":
                 let mac = HMAC<SHA512>.authenticationCode(for: messageData, using: keyData)

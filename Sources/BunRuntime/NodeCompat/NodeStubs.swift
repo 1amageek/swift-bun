@@ -90,6 +90,25 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
         }
         context.setObject(dnsLookupBlock, forKeyedSubscript: "__dnsLookup" as NSString)
 
+        let dnsResolveBlock: @convention(block) (String, String) -> [String: Any] = { host, recordType in
+            do {
+                let values = try Self.resolveRecords(for: host, type: recordType)
+                return ["values": values]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        context.setObject(dnsResolveBlock, forKeyedSubscript: "__dnsResolve" as NSString)
+
+        let dnsReverseBlock: @convention(block) (String) -> [String: Any] = { address in
+            do {
+                return ["hostnames": try Self.reverseLookup(address: address)]
+            } catch {
+                return ["error": "\(error)"]
+            }
+        }
+        context.setObject(dnsReverseBlock, forKeyedSubscript: "__dnsReverse" as NSString)
+
         try JavaScriptModuleInstaller.installAll(
             .nodeCompat(.net),
             .nodeCompat(.tls),
@@ -176,5 +195,75 @@ struct NodeStubs: JavaScriptModuleInstalling, Sendable {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(EAI_NONAME), userInfo: [
             NSLocalizedDescriptionKey: "No usable address found for \(host)",
         ])
+    }
+
+    static func resolveRecords(for host: String, type: String) throws -> [String] {
+        switch type.uppercased() {
+        case "A":
+            return try lookupAddresses(for: host, family: 4).map(\.address)
+        case "AAAA":
+            return try lookupAddresses(for: host, family: 6).map(\.address)
+        default:
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EAI_NONAME), userInfo: [
+                NSLocalizedDescriptionKey: "dns.resolve(\(type)) is not supported in swift-bun",
+            ])
+        }
+    }
+
+    static func reverseLookup(address: String) throws -> [String] {
+        var storageIPv4 = sockaddr_in()
+        var storageIPv6 = sockaddr_in6()
+        let hostname: String
+
+        if inet_pton(AF_INET, address, &storageIPv4.sin_addr) == 1 {
+            storageIPv4.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            storageIPv4.sin_family = sa_family_t(AF_INET)
+            hostname = try withUnsafePointer(to: &storageIPv4) { pointer in
+                try reverseLookupHost(
+                    sockaddr: UnsafeRawPointer(pointer).assumingMemoryBound(to: sockaddr.self),
+                    sockaddrLength: socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
+            }
+        } else if inet_pton(AF_INET6, address, &storageIPv6.sin6_addr) == 1 {
+            storageIPv6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            storageIPv6.sin6_family = sa_family_t(AF_INET6)
+            hostname = try withUnsafePointer(to: &storageIPv6) { pointer in
+                try reverseLookupHost(
+                    sockaddr: UnsafeRawPointer(pointer).assumingMemoryBound(to: sockaddr.self),
+                    sockaddrLength: socklen_t(MemoryLayout<sockaddr_in6>.size)
+                )
+            }
+        } else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EAI_NONAME), userInfo: [
+                NSLocalizedDescriptionKey: "Invalid IP address: \(address)",
+            ])
+        }
+
+        return [hostname]
+    }
+
+    private static func reverseLookupHost(
+        sockaddr: UnsafePointer<sockaddr>,
+        sockaddrLength: socklen_t
+    ) throws -> String {
+        var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let status = getnameinfo(
+            sockaddr,
+            sockaddrLength,
+            &hostBuffer,
+            socklen_t(hostBuffer.count),
+            nil,
+            0,
+            NI_NAMEREQD
+        )
+        guard status == 0 else {
+            let message = String(cString: gai_strerror(status))
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(status), userInfo: [
+                NSLocalizedDescriptionKey: message,
+            ])
+        }
+
+        let hostnameBytes = hostBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: hostnameBytes, as: UTF8.self)
     }
 }

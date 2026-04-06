@@ -37,6 +37,18 @@ struct CryptoEdgeCaseTests {
         -----END PRIVATE KEY-----
         """
 
+    private static let rsaPublicKeyPEM = """
+        -----BEGIN PUBLIC KEY-----
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwWKiSS0LntQ0vsJpNBmW
+        ey/PdXDAV1AZKabtkEupCmrbhkoSYJIjxof/o9FjC10e++4bh/0qCCfM80i5chxW
+        px4SnzRcHl3D5flQoUdVeLoJ+RX3p7nPQ/cqjdJuf2NF9avS+IV6Ui47t49OH3aE
+        xRmsosq1ONcxWWpZz7A0JQbLD6SC3fsFNHu4NSXiN0/yhQfIcqENzMGpHJCqRJSs
+        ifgn6aCojjeJzarRJG/QOv2yb0skzPl9aSrn/hZIoJ4YHLjN53jAmvlAk1krm776
+        XWRoz2kiG4UupzwzrpmvrGWmSmJyoS4fKaKzZrvPD8OR4hKUm97fyAMxdKLDioK1
+        IQIDAQAB
+        -----END PUBLIC KEY-----
+        """
+
     @Test("SHA-256 of empty string")
     func sha256Empty() async throws {
         let result = try await TestProcessSupport.evaluate("""
@@ -193,5 +205,81 @@ struct CryptoEdgeCaseTests {
             })()
         """)
         #expect(result.stringValue == #"{"type":"private","asymmetricKeyType":"rsa","instance":true}"#)
+    }
+
+    @Test("createPublicKey accepts PEM public keys and exports DER")
+    func createPublicKeyPEMAndExportDER() async throws {
+        let escapedPEM = Self.rsaPublicKeyPEM
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let result = try await TestProcessSupport.evaluate("""
+            (function() {
+                var crypto = require('node:crypto');
+                var key = crypto.createPublicKey({ key: '\(escapedPEM)', format: 'pem', type: 'spki' });
+                var exported = key.export({ format: 'der', type: 'spki' });
+                return JSON.stringify({
+                    type: key.type,
+                    asymmetricKeyType: key.asymmetricKeyType,
+                    exportedLength: exported.length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"type":"public","asymmetricKeyType":"rsa","exportedLength":294}"#)
+    }
+
+    @Test("crypto.sign and crypto.verify roundtrip with RSA keys")
+    func oneShotRSASignVerify() async throws {
+        let privateKey = Self.rsaPrivateKeyPEM
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let publicKey = Self.rsaPublicKeyPEM
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let result = try await TestProcessSupport.evaluate("""
+            (function() {
+                var crypto = require('node:crypto');
+                var data = Buffer.from('swift-bun node crypto');
+                var signature = crypto.sign('RSA-SHA256', data, { key: '\(privateKey)', format: 'pem' });
+                return JSON.stringify({
+                    length: signature.length,
+                    verified: crypto.verify('RSA-SHA256', data, { key: '\(publicKey)', format: 'pem', type: 'spki' }, signature)
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"length":256,"verified":true}"#)
+    }
+
+    @Test("createSign and createVerify support streaming updates")
+    func createSignCreateVerify() async throws {
+        let privateKey = Self.rsaPrivateKeyPEM
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let publicKey = Self.rsaPublicKeyPEM
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let result = try await TestProcessSupport.evaluate("""
+            (function() {
+                var crypto = require('node:crypto');
+                var signer = crypto.createSign('RSA-SHA256');
+                signer.update('streaming ');
+                signer.update('signature');
+                var signature = signer.sign({ key: '\(privateKey)', format: 'pem' }, 'base64');
+
+                var verifier = crypto.createVerify('RSA-SHA256');
+                verifier.update('streaming ');
+                verifier.update('signature');
+
+                return JSON.stringify({
+                    verified: verifier.verify({ key: '\(publicKey)', format: 'pem', type: 'spki' }, signature, 'base64'),
+                    hashCount: crypto.getHashes().filter(function(name) { return name.toLowerCase() === 'sha384'; }).length
+                });
+            })()
+        """)
+        #expect(result.stringValue == #"{"verified":true,"hashCount":1}"#)
     }
 }

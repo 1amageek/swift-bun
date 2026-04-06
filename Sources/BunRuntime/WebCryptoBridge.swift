@@ -487,18 +487,83 @@ struct WebCryptoBridge: Sendable {
         let createPrivateKeyBlock: @convention(block) (String, [UInt8], String) -> [String: Any] = { format, keyBytes, typeHint in
             do {
                 let created = try createPrivateKey(format: format, keyBytes: Data(keyBytes), typeHint: typeHint)
-                let token = Self.registry.insert(.security(created.derData, algorithm: created.algorithm, type: "private", format: format))
+                let token = Self.registry.insert(.security(created.derData, algorithm: created.algorithm, type: "private", format: created.format))
                 return [
                     "token": Int(token),
                     "type": "private",
                     "asymmetricKeyType": created.algorithm.uppercased().hasPrefix("EC") ? "ec" : "rsa",
-                    "format": format,
+                    "format": created.format,
                 ]
             } catch {
                 return ["error": error.localizedDescription]
             }
         }
         context.setObject(createPrivateKeyBlock, forKeyedSubscript: "__cryptoCreatePrivateKey" as NSString)
+
+        let createPublicKeyBlock: @convention(block) (String, [UInt8], String) -> [String: Any] = { format, keyBytes, typeHint in
+            do {
+                let created = try createPublicKey(format: format, keyBytes: Data(keyBytes), typeHint: typeHint)
+                let token = Self.registry.insert(.security(created.derData, algorithm: created.algorithm, type: "public", format: created.format))
+                return [
+                    "token": Int(token),
+                    "type": "public",
+                    "asymmetricKeyType": created.algorithm.uppercased().hasPrefix("EC") ? "ec" : "rsa",
+                    "format": created.format,
+                ]
+            } catch {
+                return ["error": error.localizedDescription]
+            }
+        }
+        context.setObject(createPublicKeyBlock, forKeyedSubscript: "__cryptoCreatePublicKey" as NSString)
+
+        let exportKeyObjectBlock: @convention(block) (Int32, String?) -> [String: Any] = { token, requestedFormat in
+            guard let key = Self.registry.key(for: token) else {
+                return ["error": "Unknown key"]
+            }
+            let normalizedRequestedFormat = requestedFormat?.lowercased()
+            switch key {
+            case .security(let keyData, let algorithm, let type, let format):
+                if let normalizedRequestedFormat, !normalizedRequestedFormat.isEmpty, normalizedRequestedFormat != format.lowercased() {
+                    return ["error": "Key was imported as \(format) and cannot be exported as \(requestedFormat ?? format)"]
+                }
+                return [
+                    "bytes": [UInt8](keyData),
+                    "type": type,
+                    "format": format,
+                    "asymmetricKeyType": algorithm.uppercased().hasPrefix("EC") ? "ec" : "rsa",
+                ]
+            case .ecdsaPrivateP256(let keyData, let format):
+                if let normalizedRequestedFormat, !normalizedRequestedFormat.isEmpty, normalizedRequestedFormat != format.lowercased() {
+                    return ["error": "Key was imported as \(format) and cannot be exported as \(requestedFormat ?? format)"]
+                }
+                return [
+                    "bytes": [UInt8](keyData),
+                    "type": "private",
+                    "format": format,
+                    "asymmetricKeyType": "ec",
+                ]
+            case .ecdsaPublicP256(let keyData, let format):
+                if let normalizedRequestedFormat, !normalizedRequestedFormat.isEmpty, normalizedRequestedFormat != format.lowercased() {
+                    return ["error": "Key was imported as \(format) and cannot be exported as \(requestedFormat ?? format)"]
+                }
+                return [
+                    "bytes": [UInt8](keyData),
+                    "type": "public",
+                    "format": format,
+                    "asymmetricKeyType": "ec",
+                ]
+            case .hmac(let secret, _), .aes(let secret, _, _), .kdf(let secret, _):
+                if let normalizedRequestedFormat, !normalizedRequestedFormat.isEmpty, normalizedRequestedFormat != "raw" {
+                    return ["error": "Secret keys can only be exported as raw"]
+                }
+                return [
+                    "bytes": [UInt8](secret),
+                    "type": "secret",
+                    "format": "raw",
+                ]
+            }
+        }
+        context.setObject(exportKeyObjectBlock, forKeyedSubscript: "__cryptoExportKeyObject" as NSString)
     }
 }
 
@@ -964,7 +1029,7 @@ private func secKey(from data: Data, algorithm: String, type: String, format: St
     return secKey
 }
 
-private func createPrivateKey(format: String, keyBytes: Data, typeHint: String) throws -> (derData: Data, algorithm: String) {
+private func createPrivateKey(format: String, keyBytes: Data, typeHint: String) throws -> (derData: Data, algorithm: String, format: String) {
     let normalizedFormat = format.lowercased()
     switch normalizedFormat {
     case "pem":
@@ -978,25 +1043,54 @@ private func createPrivateKey(format: String, keyBytes: Data, typeHint: String) 
     }
 }
 
-private func validatePrivateKeyDER(_ data: Data, typeHint: String) throws -> (derData: Data, algorithm: String) {
+private func createPublicKey(format: String, keyBytes: Data, typeHint: String) throws -> (derData: Data, algorithm: String, format: String) {
+    let normalizedFormat = format.lowercased()
+    let data: Data
+    switch normalizedFormat {
+    case "pem":
+        data = try pemToDER(String(decoding: keyBytes, as: UTF8.self))
+    case "der":
+        data = keyBytes
+    default:
+        throw WebCryptoBridgeError.unsupportedAlgorithm("Unsupported public key format: \(format)")
+    }
+
+    let hint = typeHint.lowercased()
+    if hint == "spki" || hint.isEmpty {
+        if let algorithm = detectPublicKeyAlgorithm(in: data) {
+            return (data, algorithm, "spki")
+        }
+    }
+
+    if hint == "pkcs8" || hint == "sec1" || hint == "ec" {
+        do {
+            return try derivePublicKeyFromPrivate(data: data)
+        } catch {
+        }
+    }
+
+    throw WebCryptoBridgeError.unsupportedAlgorithm("Unable to construct a public key from the provided input")
+}
+
+private func validatePrivateKeyDER(_ data: Data, typeHint: String) throws -> (derData: Data, algorithm: String, format: String) {
     let hint = typeHint.lowercased()
     if hint == "sec1" || hint == "ec" {
-        return (data, "ECDSA")
+        return (data, "ECDSA", "sec1")
     }
     if hint == "pkcs1" || hint == "rsa" {
-        return (data, "RSASSA-PKCS1-V1_5")
+        return (data, "RSASSA-PKCS1-V1_5", "pkcs1")
     }
 
     do {
         _ = try secKey(from: data, algorithm: "RSASSA-PKCS1-V1_5", type: "private")
-        return (data, "RSASSA-PKCS1-V1_5")
+        return (data, "RSASSA-PKCS1-V1_5", "pkcs8")
     } catch {
         do {
             _ = try secKey(from: data, algorithm: "ECDSA", type: "private")
-            return (data, "ECDSA")
+            return (data, "ECDSA", "pkcs8")
         } catch {
             if let detected = detectPrivateKeyAlgorithm(in: data) {
-                return (data, detected)
+                return (data, detected, detected == "ECDSA" ? "sec1" : "pkcs8")
             }
             throw error
         }
@@ -1025,6 +1119,29 @@ private func detectPrivateKeyAlgorithm(in data: Data) -> String? {
         return "ECDSA"
     }
     return nil
+}
+
+private func detectPublicKeyAlgorithm(in data: Data) -> String? {
+    do {
+        _ = try secKey(from: data, algorithm: "RSASSA-PKCS1-V1_5", type: "public", format: "spki")
+        return "RSASSA-PKCS1-V1_5"
+    } catch {
+    }
+    do {
+        _ = try secKey(from: data, algorithm: "ECDSA", type: "public", format: "spki")
+        return "ECDSA"
+    } catch {
+    }
+    return nil
+}
+
+private func derivePublicKeyFromPrivate(data: Data) throws -> (derData: Data, algorithm: String, format: String) {
+    do {
+        let privateKey = try P256.Signing.PrivateKey(derRepresentation: data)
+        return (privateKey.publicKey.derRepresentation, "ECDSA", "spki")
+    } catch {
+    }
+    throw WebCryptoBridgeError.unsupportedAlgorithm("Deriving an RSA public key from a private key is not yet supported")
 }
 
 private func containsSubsequence(_ haystack: [UInt8], needle: [UInt8]) -> Bool {

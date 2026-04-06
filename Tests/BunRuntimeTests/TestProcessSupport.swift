@@ -68,27 +68,32 @@ enum TestProcessSupport {
         try await withExclusiveRuntimeAccess {
             try await process.load()
 
-            var operationResult: T?
-            var operationError: (any Error)?
+            var operationResult: Result<T, any Error>?
             do {
-                operationResult = try await operation(process)
+                operationResult = .success(try await operation(process))
             } catch {
-                operationError = error
+                operationResult = .failure(error)
             }
 
             do {
                 try await process.shutdown()
             } catch {
-                if let operationError {
+                if case let .failure(operationError)? = operationResult {
                     throw operationError
                 }
                 throw error
             }
 
-            if let operationResult {
-                return operationResult
+            guard let operationResult else {
+                throw BunRuntimeError.shutdownRequired
             }
-            throw operationError ?? BunRuntimeError.shutdownRequired
+
+            switch operationResult {
+            case .success(let value):
+                return value
+            case .failure(let error):
+                throw error
+            }
         }
     }
 
